@@ -141,19 +141,15 @@ func (r *PolicyBindingReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	// Step 1: Handle deletion if the PolicyBinding is marked for it.
 	// This involves running finalizers to clean up external resources.
-	result, err := r.handleDeletion(ctx, policyBinding)
 	if policyBinding.GetDeletionTimestamp() != nil {
-		// If a deletionTimestamp exists, handleDeletion has determined the outcome.
-		// It will either be a requeue if finalization is ongoing, an error if
-		// finalization failed, or an empty result if finalization is complete.
-		return result, err
+		return r.handleDeletion(ctx, policyBinding)
 	}
 	// If not deleting, 'err' from handleDeletion should be nil if it reached its "not deleted" path.
 	// The result.Requeue from handleDeletion's non-deleted path is ignored here as subsequent steps dictate requeue.
 
 	// Step 2: Ensure our custom finalizer is present on the PolicyBinding if it's not being deleted.
 	// This is crucial for ensuring cleanup (via OpenFGAFinalizer) when the resource is eventually deleted.
-	result, err = r.ensureFinalizer(ctx, policyBinding, currentGeneration)
+	result, err := r.ensureFinalizer(ctx, policyBinding, currentGeneration)
 	if err != nil {
 		// An error occurred while trying to add or update the finalizer.
 		return result, err
@@ -181,7 +177,7 @@ func (r *PolicyBindingReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			Message:            fmt.Sprintf("TargetRef validation failed: %s. See TargetValid condition for details.", err.Error()),
 			LastTransitionTime: metav1.Now(),
 		})
-		// Attempt to update status with the Ready=False condition. reconcileTargetRefValidation might have already updated, this ensures Ready is also set.
+		// Attempt to update status with the Ready=False condition.
 		if statusUpdateErr := r.updatePolicyBindingStatus(ctx, policyBinding, currentGeneration); statusUpdateErr != nil {
 			log.Error(statusUpdateErr, "Failed to update PolicyBinding status after TargetRef validation error")
 		}
@@ -288,51 +284,53 @@ func (r *PolicyBindingReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 // (if deletion is complete or in progress) or an error if finalization fails.
 func (r *PolicyBindingReconciler) handleDeletion(ctx context.Context, policyBinding *iamdatumapiscomv1alpha1.PolicyBinding) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
-	if policyBinding.GetDeletionTimestamp() != nil {
-		log.Info("PolicyBinding is marked for deletion, performing finalization.")
-		// The finalization logic should only run if our specific finalizer is still present on the resource.
-		// This prevents issues if multiple finalizers are involved or if the finalizer was already removed.
-		if controllerutil.ContainsFinalizer(policyBinding, policyBindingFinalizerKey) {
-			finalizerResult, err := r.Finalizers.Finalize(ctx, policyBinding)
-			if err != nil {
-				// Log error and update status before returning
-				log.Error(err, "Finalization failed for PolicyBinding")
-				meta.SetStatusCondition(&policyBinding.Status.Conditions, metav1.Condition{
-					Type:    "Ready", // Or a more specific finalization condition type
-					Status:  metav1.ConditionFalse,
-					Reason:  "FinalizationFailed",
-					Message: fmt.Sprintf("Finalization failed: %s", err.Error()),
-				})
-				// Attempt to update status, but prioritize returning the finalization error
-				if statusUpdateErr := r.updatePolicyBindingStatus(ctx, policyBinding, policyBinding.Generation); statusUpdateErr != nil {
-					log.Error(statusUpdateErr, "Failed to update PolicyBinding status during finalization error")
-				}
-				return ctrl.Result{}, fmt.Errorf("failed to finalize PolicyBinding: %w", err)
-			}
-			// If the finalizer updated the PolicyBinding object (e.g., by removing itself or updating status),
-			// we need to persist these changes to the API server.
-			if finalizerResult.Updated {
-				log.Info("PolicyBinding updated by finalizer (e.g. finalizer removed or status updated).")
-				if err := r.Update(ctx, policyBinding); err != nil { // Use r.Update, not r.Status().Update() if object itself changed
-					log.Error(err, "Failed to update PolicyBinding after finalizer operation")
-					return ctrl.Result{}, err
-				}
-			}
-			// If the finalizer is still present after the Finalize call, it means the finalization
-			// process is not yet complete (e.g., waiting for external resources to be fully cleaned up).
-			// In this case, we must requeue the reconciliation to retry finalization.
-			if controllerutil.ContainsFinalizer(policyBinding, policyBindingFinalizerKey) {
-				log.Info("Finalizer still present, requeueing for finalization.")
-				return ctrl.Result{Requeue: true}, nil
-			}
-		}
-		log.Info("Finalization process complete or finalizer not present.")
-		// Deletion is complete or no finalizer was present; stop reconciliation for this resource.
+	log.Info("PolicyBinding is marked for deletion, performing finalization.")
+
+	// The finalization logic should only run if our specific finalizer is still present on the resource.
+	// This prevents issues if multiple finalizers are involved or if the finalizer was already removed.
+	if !controllerutil.ContainsFinalizer(policyBinding, policyBindingFinalizerKey) {
+		log.Info("PolicyBinding marked for deletion but our finalizer is not present or already processed.", "finalizerKey", policyBindingFinalizerKey)
 		return ctrl.Result{}, nil
 	}
-	// The PolicyBinding is not being deleted. Return a placeholder result;
-	// the main Reconcile function will continue with further processing.
-	return ctrl.Result{}, nil // Changed from Requeue:true to allow main flow.
+
+	log.Info("PolicyBinding is marked for deletion and our finalizer is present, performing finalization logic.", "finalizerKey", policyBindingFinalizerKey)
+	finalizerResult, err := r.Finalizers.Finalize(ctx, policyBinding)
+	if err != nil {
+		// Log error and update status before returning
+		log.Error(err, "Finalization failed for PolicyBinding")
+		meta.SetStatusCondition(&policyBinding.Status.Conditions, metav1.Condition{
+			Type:    "Ready", // Or a more specific finalization condition type
+			Status:  metav1.ConditionFalse,
+			Reason:  "FinalizationFailed",
+			Message: fmt.Sprintf("Finalization failed: %s", err.Error()),
+		})
+		// Attempt to update status, but prioritize returning the finalization error
+		if statusUpdateErr := r.updatePolicyBindingStatus(ctx, policyBinding, policyBinding.Generation); statusUpdateErr != nil {
+			log.Error(statusUpdateErr, "Failed to update PolicyBinding status during finalization error")
+		}
+		return ctrl.Result{}, fmt.Errorf("failed to finalize PolicyBinding: %w", err)
+	}
+	// If the finalizer updated the PolicyBinding object (e.g., by removing itself or updating status),
+	// we need to persist these changes to the API server.
+	if finalizerResult.Updated {
+		log.Info("PolicyBinding updated by finalizer (e.g. finalizer removed or status updated).")
+		if err := r.Update(ctx, policyBinding); err != nil { // Use r.Update, not r.Status().Update() if object itself changed
+			log.Error(err, "Failed to update PolicyBinding after finalizer operation")
+			return ctrl.Result{}, err
+		}
+	}
+
+	// If the finalizer is still present after the Finalize call, it means the finalization
+	// process is not yet complete (e.g., waiting for external resources to be fully cleaned up).
+	// In this case, we must requeue the reconciliation to retry finalization.
+	if controllerutil.ContainsFinalizer(policyBinding, policyBindingFinalizerKey) {
+		log.Info("Finalizer still present, requeueing for finalization.")
+		return ctrl.Result{Requeue: true}, nil
+	}
+
+	log.Info("Finalization process complete.")
+	// Deletion is complete; stop reconciliation for this resource.
+	return ctrl.Result{}, nil
 }
 
 // ensureFinalizer checks if the PolicyBinding custom resource has the
@@ -837,7 +835,7 @@ func (r *PolicyBindingReconciler) validatePolicyBindingSubjects(ctx context.Cont
 // PolicyBindingFinalizer implements the finalizer.Finalizer interface. It is responsible
 // for cleaning up authorization tuples associated with a PolicyBinding when the
 // PolicyBinding custom resource is deleted from the Kubernetes cluster.
-type PolicyBindingFinalizer struct {
+type openFGAFinalizer struct {
 	client.Client
 	fgaClient openfgav1.OpenFGAServiceClient
 	storeID   string
@@ -845,7 +843,7 @@ type PolicyBindingFinalizer struct {
 
 // Finalize is called by the controller when the PolicyBinding is being deleted.
 // It now delegates the deletion of OpenFGA tuples to the openfga.PolicyReconciler.
-func (f *PolicyBindingFinalizer) Finalize(ctx context.Context, obj client.Object) (finalizer.Result, error) {
+func (f *openFGAFinalizer) Finalize(ctx context.Context, obj client.Object) (finalizer.Result, error) {
 	log := logf.FromContext(ctx)
 	policyBinding, ok := obj.(*iamdatumapiscomv1alpha1.PolicyBinding)
 	if !ok {
@@ -970,7 +968,7 @@ func (r *PolicyBindingReconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 	// Initialize finalizers
 	r.Finalizers = finalizer.NewFinalizers()
-	if err := r.Finalizers.Register(policyBindingFinalizerKey, &PolicyBindingFinalizer{
+	if err := r.Finalizers.Register(policyBindingFinalizerKey, &openFGAFinalizer{
 		Client:    r.Client,
 		fgaClient: r.FgaClient,
 		storeID:   r.StoreID,

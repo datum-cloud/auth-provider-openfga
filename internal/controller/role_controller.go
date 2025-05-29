@@ -256,32 +256,34 @@ func (r *RoleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	currentGeneration := role.Generation
 
 	if role.GetDeletionTimestamp() != nil {
-		if controllerutil.ContainsFinalizer(role, roleFinalizerKey) {
-			log.Info("Performing Finalization Tasks for Role before deletion")
-			finalizerHelper := OpenFGARoleFinalizer{
-				Client:    r.Client,
-				fgaClient: r.FgaClient,
-				storeID:   r.StoreID,
-			}
-			if _, err := finalizerHelper.Finalize(ctx, role); err != nil {
-				log.Error(err, "Role finalization failed")
-				meta.SetStatusCondition(&role.Status.Conditions, metav1.Condition{
-					Type: "Ready", Status: metav1.ConditionFalse, Reason: "FinalizationFailed",
-					Message: fmt.Sprintf("Failed to finalize: %s", err.Error()), LastTransitionTime: metav1.Now(),
-				})
-				if statusUpdateErr := r.Status().Update(ctx, role); statusUpdateErr != nil {
-					log.Error(statusUpdateErr, "Failed to update Role status after finalization error")
-				}
-				return ctrl.Result{}, err
-			}
+		log.Info("Role is marked for deletion, performing finalization.")
+		// Check if our specific finalizer is present.
+		if !controllerutil.ContainsFinalizer(role, roleFinalizerKey) {
+			log.Info("Role marked for deletion but finalizer is not present or already processed.")
+			return ctrl.Result{}, nil
+		}
 
-			log.Info("Role finalization successful, removing finalizer")
-			controllerutil.RemoveFinalizer(role, roleFinalizerKey)
+		log.Info("Role is marked for deletion and finalizer is present, performing finalization logic.")
+		finalizerResult, err := r.Finalizers.Finalize(ctx, role)
+		if err != nil {
+			log.Error(err, "Role finalization failed")
+			return ctrl.Result{}, fmt.Errorf("failed to run finalizers for Role: %w", err)
+		}
+
+		if finalizerResult.Updated {
+			log.Info("Role updated by finalizer (e.g., finalizer removed or status updated).")
 			if err := r.Update(ctx, role); err != nil {
-				log.Error(err, "Failed to remove finalizer from Role")
+				log.Error(err, "Failed to update Role after finalizer operation")
 				return ctrl.Result{}, err
 			}
 		}
+
+		if controllerutil.ContainsFinalizer(role, roleFinalizerKey) {
+			log.Info("Finalizer still present on Role, requeueing for finalization.")
+			return ctrl.Result{Requeue: true}, nil
+		}
+
+		log.Info("Role finalization process complete.")
 		return ctrl.Result{}, nil
 	}
 
@@ -292,6 +294,7 @@ func (r *RoleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 			log.Error(err, "Failed to add finalizer to Role")
 			return ctrl.Result{}, err
 		}
+		// Requeue is important after adding a finalizer so the next reconcile loop sees it.
 		return ctrl.Result{Requeue: true}, nil
 	}
 
