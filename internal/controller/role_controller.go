@@ -15,7 +15,6 @@ import (
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/finalizer"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -48,8 +47,7 @@ func parsePermissionString(permStr string) (string, string, string, bool) {
 // OpenFGARoleFinalizer handles deletion of OpenFGA tuples for a Role.
 type OpenFGARoleFinalizer struct {
 	client.Client
-	fgaClient openfgav1.OpenFGAServiceClient
-	storeID   string
+	roleReconciler *openfga.RoleReconciler
 }
 
 // Finalize ensures that OpenFGA tuples for the Role are removed.
@@ -62,25 +60,7 @@ func (f *OpenFGARoleFinalizer) Finalize(ctx context.Context, obj client.Object) 
 
 	log.Info("Performing Finalization Tasks for Role before deletion", "Role", role.Name)
 
-	reconciler := openfga.RoleReconciler{
-		StoreID:      f.storeID,
-		OpenFGA:      f.fgaClient,
-		ControlPlane: f.Client, // The openfga.RoleReconciler needs a client to fetch inherited roles
-	}
-
-	if err := reconciler.DeleteRole(ctx, *role); err != nil {
-		log.Error(err, "Failed to delete role configuration during finalization")
-		condition := metav1.Condition{
-			Type:               "Ready",
-			Status:             metav1.ConditionFalse,
-			Reason:             "RoleDeletionFailed",
-			Message:            fmt.Sprintf("Failed to delete role configuration: %s", err.Error()),
-			LastTransitionTime: metav1.Now(),
-		}
-		meta.SetStatusCondition(&role.Status.Conditions, condition)
-		if statusErr := f.Status().Update(ctx, role); statusErr != nil {
-			log.Error(statusErr, "Failed to update Role status during finalization error")
-		}
+	if err := f.roleReconciler.DeleteRole(ctx, *role); err != nil {
 		return finalizer.Result{}, fmt.Errorf("failed to delete role configuration: %w", err)
 	}
 
@@ -255,59 +235,24 @@ func (r *RoleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 
 	currentGeneration := role.Generation
 
-	if role.GetDeletionTimestamp() != nil {
-		log.Info("Role is marked for deletion, performing finalization.")
-		// Check if our specific finalizer is present.
-		if !controllerutil.ContainsFinalizer(role, roleFinalizerKey) {
-			log.Info("Role marked for deletion but finalizer is not present or already processed.")
-			return ctrl.Result{}, nil
+	finalizeResult, err := r.Finalizers.Finalize(ctx, role)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to run finalizers for Role: %w", err)
+	}
+	if finalizeResult.Updated {
+		log.Info("Role updated by finalizer (e.g., finalizer removed or status updated).")
+		if err := r.Update(ctx, role); err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to update Role after finalizer operation: %w", err)
 		}
-
-		log.Info("Role is marked for deletion and finalizer is present, performing finalization logic.")
-		finalizerResult, err := r.Finalizers.Finalize(ctx, role)
-		if err != nil {
-			log.Error(err, "Role finalization failed")
-			return ctrl.Result{}, fmt.Errorf("failed to run finalizers for Role: %w", err)
-		}
-
-		if finalizerResult.Updated {
-			log.Info("Role updated by finalizer (e.g., finalizer removed or status updated).")
-			if err := r.Update(ctx, role); err != nil {
-				log.Error(err, "Failed to update Role after finalizer operation")
-				return ctrl.Result{}, err
-			}
-		}
-
-		if controllerutil.ContainsFinalizer(role, roleFinalizerKey) {
-			log.Info("Finalizer still present on Role, requeueing for finalization.")
-			return ctrl.Result{Requeue: true}, nil
-		}
-
-		log.Info("Role finalization process complete.")
-		return ctrl.Result{}, nil
+		return ctrl.Result{Requeue: true}, nil
 	}
 
-	if !controllerutil.ContainsFinalizer(role, roleFinalizerKey) {
-		log.Info("Adding Finalizer for the Role")
-		controllerutil.AddFinalizer(role, roleFinalizerKey)
-		if err := r.Update(ctx, role); err != nil {
-			log.Error(err, "Failed to add finalizer to Role")
-			return ctrl.Result{}, err
-		}
-		// Requeue is important after adding a finalizer so the next reconcile loop sees it.
-		return ctrl.Result{Requeue: true}, nil
+	if role.GetDeletionTimestamp() != nil {
+		return ctrl.Result{}, nil
 	}
 
 	var protectedResourceList iamdatumapiscomv1alpha1.ProtectedResourceList
 	if err := r.List(ctx, &protectedResourceList); err != nil {
-		log.Error(err, "unable to list ProtectedResources for permission validation")
-		meta.SetStatusCondition(&role.Status.Conditions, metav1.Condition{
-			Type: "Ready", Status: metav1.ConditionFalse, Reason: "ListProtectedResourcesFailed",
-			Message: fmt.Sprintf("Failed to list ProtectedResources: %s", err.Error()), LastTransitionTime: metav1.Now(),
-		})
-		if statusUpdateErr := r.Status().Update(ctx, role); statusUpdateErr != nil {
-			log.Error(statusUpdateErr, "Failed to update Role status after ProtectedResource list error")
-		}
 		return ctrl.Result{}, err
 	}
 
@@ -411,9 +356,12 @@ func (r *RoleReconciler) enqueueRequestsForProtectedResourceChange(ctx context.C
 func (r *RoleReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	r.Finalizers = finalizer.NewFinalizers()
 	if err := r.Finalizers.Register(roleFinalizerKey, &OpenFGARoleFinalizer{
-		Client:    r.Client,
-		fgaClient: r.FgaClient,
-		storeID:   r.StoreID,
+		Client: r.Client,
+		roleReconciler: &openfga.RoleReconciler{
+			StoreID:      r.StoreID,
+			OpenFGA:      r.FgaClient,
+			ControlPlane: r.Client,
+		},
 	}); err != nil {
 		return fmt.Errorf("failed to register role finalizer: %w", err)
 	}
