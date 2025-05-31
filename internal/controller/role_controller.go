@@ -6,8 +6,8 @@ import (
 	"strings"
 
 	openfgav1 "github.com/openfga/api/proto/openfga/v1"
-	iamdatumapiscomv1alpha1 "go.datum.net/datum/pkg/apis/iam.datumapis.com/v1alpha1"
-	"go.datum.net/iam/openfga/internal/openfga"
+	iamdatumapiscomv1alpha1 "go.miloapis.com/milo/pkg/apis/iam/v1alpha1"
+	"go.miloapis.com/auth-provider-openfga/internal/openfga"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -22,7 +22,7 @@ import (
 )
 
 const (
-	roleFinalizerKey = "iam.datumapis.com/openfga-role"
+	roleFinalizerKey = "iam.miloapis.com/openfga-role"
 )
 
 // parsePermissionString splits a permission string into its components.
@@ -378,7 +378,7 @@ func (r *RoleReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return controllerBuilder.Complete(r)
 }
 
-// +kubebuilder:rbac:groups=iam.datumapis.com,resources=roles,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=iam.datumapis.com,resources=roles/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=iam.datumapis.com,resources=roles/finalizers,verbs=update
-// +kubebuilder:rbac:groups=iam.datumapis.com,resources=protectedresources,verbs=get;list;watch
+// +kubebuilder:rbac:groups=iam.miloapis.com,resources=roles,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=iam.miloapis.com,resources=roles/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=iam.miloapis.com,resources=roles/finalizers,verbs=update
+// +kubebuilder:rbac:groups=iam.miloapis.com,resources=protectedresources,verbs=get;list;watch

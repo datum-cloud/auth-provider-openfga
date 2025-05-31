@@ -6,9 +6,9 @@ import (
 	"log/slog"
 
 	openfgav1 "github.com/openfga/api/proto/openfga/v1"
-	iamv1alpha1 "go.datum.net/datum/pkg/apis/iam.datumapis.com/v1alpha1"
-	resourcemanagerv1alpha1 "go.datum.net/datum/pkg/apis/resourcemanager.datumapis.com/v1alpha1"
-	"go.datum.net/iam/openfga/internal/openfga"
+	iamv1alpha1 "go.miloapis.com/milo/pkg/apis/iam/v1alpha1"
+	resourcemanagerv1alpha1 "go.miloapis.com/milo/pkg/apis/resourcemanager/v1alpha1"
+	"go.miloapis.com/auth-provider-openfga/internal/openfga"
 	"k8s.io/apiserver/pkg/authorization/authorizer"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -25,7 +25,7 @@ type ProjectControlPlaneAuthorizer struct {
 // used by the webhook to perform authorization checks.
 var serviceNameMapping = map[string]string{
 	// An empty APIGroup is used for the core/v1 Kubernetes API Group.
-	"": "core.datumapis.com",
+	"": "core.miloapis.com",
 }
 
 // Authorize implements authorizer.Authorizer.
@@ -81,15 +81,15 @@ func (o *ProjectControlPlaneAuthorizer) Authorize(
 
 	// Get user UID - this should be provided as an extra field from the authentication system
 	var userUID string
-	if userUIDs, set := attributes.GetUser().GetExtra()["authentication.datumapis.com/user-uid"]; !set {
-		return authorizer.DecisionDeny, "", fmt.Errorf("extra 'authentication.datumapis.com/user-uid' is required by project control plane authorizer")
+	if userUIDs, set := attributes.GetUser().GetExtra()["authentication.miloapis.com/user-uid"]; !set {
+		return authorizer.DecisionDeny, "", fmt.Errorf("extra 'authentication.miloapis.com/user-uid' is required by project control plane authorizer")
 	} else if len(userUIDs) > 1 {
-		return authorizer.DecisionDeny, "", fmt.Errorf("extra 'authentication.datumapis.com/user-uid' only supports one value, but multiple were provided: %v", userUIDs)
+		return authorizer.DecisionDeny, "", fmt.Errorf("extra 'authentication.miloapis.com/user-uid' only supports one value, but multiple were provided: %v", userUIDs)
 	} else {
 		userUID = userUIDs[0]
 	}
 
-	user := fmt.Sprintf("iam.datumapis.com/InternalUser:%s", userUID)
+	user := fmt.Sprintf("iam.miloapis.com/InternalUser:%s", userUID)
 	resource := o.buildResource(attributes, projectUID)
 	relation := o.buildRelation(attributes)
 
@@ -186,7 +186,7 @@ func (o *ProjectControlPlaneAuthorizer) buildPermissionString(attributes authori
 
 func (o *ProjectControlPlaneAuthorizer) buildResource(attributes authorizer.Attributes, projectUID string) string {
 	// Build the resource identifier for OpenFGA using the correct format
-	return fmt.Sprintf("resourcemanager.datumapis.com/Project:%s", projectUID)
+	return fmt.Sprintf("resourcemanager.miloapis.com/Project:%s", projectUID)
 }
 
 func (o *ProjectControlPlaneAuthorizer) buildRelation(attributes authorizer.Attributes) string {

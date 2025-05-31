@@ -4,13 +4,13 @@ import (
 	"fmt"
 	"strings"
 
-	iamdatumapiscomv1alpha1 "go.datum.net/datum/pkg/apis/iam.datumapis.com/v1alpha1"
+	iamdatumapiscomv1alpha1 "go.miloapis.com/milo/pkg/apis/iam/v1alpha1"
 )
 
 type resourceGraphNode struct {
 	// The fully qualified Kind of the resource registered in the system. This
 	// will always be in the format `<service_apigroup>/<Kind>` (e.g.
-	// compute.datumapis.com/Workload).
+	// compute.miloapis.com/Workload).
 	ResourceType string // This will store "serviceAPIGroup/Kind"
 
 	// A list of permissions that are supported directly against this resource.
@@ -38,7 +38,7 @@ type resourceGraphNode struct {
 // root resource is defined as a resource with no parent resources.
 func getResourceGraph(protectedResources []iamdatumapiscomv1alpha1.ProtectedResource) (*resourceGraphNode, error) {
 	if len(protectedResources) == 0 {
-		return &resourceGraphNode{ResourceType: "iam.datumapis.com/Root"}, nil // Return a root node even if no protected resources
+		return &resourceGraphNode{ResourceType: "iam.miloapis.com/Root"}, nil // Return a root node even if no protected resources
 	}
 
 	rootResourceIdentifiers := []string{} // Stores "serviceAPIGroup/Kind"
@@ -94,13 +94,13 @@ func getResourceGraph(protectedResources []iamdatumapiscomv1alpha1.ProtectedReso
 		}
 		hasRootParent := false
 		for _, p := range effectiveParentResources {
-			if p == "iam.datumapis.com/Root" {
+			if p == "iam.miloapis.com/Root" {
 				hasRootParent = true
 				break
 			}
 		}
 		if !hasRootParent {
-			effectiveParentResources = append(effectiveParentResources, "iam.datumapis.com/Root")
+			effectiveParentResources = append(effectiveParentResources, "iam.miloapis.com/Root")
 		}
 
 		for _, parentFQN := range effectiveParentResources {
@@ -123,7 +123,7 @@ func getResourceGraph(protectedResources []iamdatumapiscomv1alpha1.ProtectedReso
 		}
 	}
 	// Note: The original check for `len(rootResources) == 0` was removed.
-	// The graph will always have "iam.datumapis.com/Root".
+	// The graph will always have "iam.miloapis.com/Root".
 	// If `rootResourceIdentifiers` is empty, `nodes` will be empty, which is fine.
 
 	nodes := []*resourceGraphNode{}
@@ -145,7 +145,7 @@ func getResourceGraph(protectedResources []iamdatumapiscomv1alpha1.ProtectedReso
 	}
 
 	return &resourceGraphNode{
-		ResourceType:   "iam.datumapis.com/Root",
+		ResourceType:   "iam.miloapis.com/Root",
 		ChildResources: nodes,
 	}, nil
 }

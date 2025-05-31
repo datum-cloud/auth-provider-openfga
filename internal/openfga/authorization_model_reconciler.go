@@ -9,7 +9,7 @@ import (
 	"strings"
 
 	openfgav1 "github.com/openfga/api/proto/openfga/v1"
-	iamdatumapiscomv1alpha1 "go.datum.net/datum/pkg/apis/iam.datumapis.com/v1alpha1"
+	iamdatumapiscomv1alpha1 "go.miloapis.com/milo/pkg/apis/iam/v1alpha1"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
@@ -154,10 +154,10 @@ func getResourceTypeDefinition(permissions []string, resourceNode *resourceGraph
 				// grant a subject access directly to the Resource. Permissions
 				// bound to the resource will be inherited by any child
 				// resources.
-				"iam.datumapis.com/RoleBinding": {
+				"iam.miloapis.com/RoleBinding": {
 					DirectlyRelatedUserTypes: []*openfgav1.RelationReference{
 						{
-							Type: "iam.datumapis.com/RoleBinding",
+							Type: "iam.miloapis.com/RoleBinding",
 						},
 					},
 				},
@@ -168,7 +168,7 @@ func getResourceTypeDefinition(permissions []string, resourceNode *resourceGraph
 			Module: strings.Split(resourceNode.ResourceType, "/")[0],
 		},
 		Relations: map[string]*openfgav1.Userset{
-			"iam.datumapis.com/RoleBinding": {
+			"iam.miloapis.com/RoleBinding": {
 				Userset: &openfgav1.Userset_This{},
 			},
 		},
@@ -196,7 +196,7 @@ func getResourceTypeDefinition(permissions []string, resourceNode *resourceGraph
 							Userset: &openfgav1.Userset_TupleToUserset{
 								TupleToUserset: &openfgav1.TupleToUserset{
 									Tupleset: &openfgav1.ObjectRelation{
-										Relation: "iam.datumapis.com/RoleBinding",
+										Relation: "iam.miloapis.com/RoleBinding",
 									},
 									ComputedUserset: &openfgav1.ObjectRelation{
 										Relation: hashedPermission,
@@ -251,13 +251,13 @@ func getAllPermissions(protectedResources []iamdatumapiscomv1alpha1.ProtectedRes
 
 func getUserTypeDefinition() *openfgav1.TypeDefinition {
 	return &openfgav1.TypeDefinition{
-		Type: "iam.datumapis.com/InternalUser",
+		Type: "iam.miloapis.com/InternalUser",
 		Metadata: &openfgav1.Metadata{
 			Relations: map[string]*openfgav1.RelationMetadata{},
 			SourceInfo: &openfgav1.SourceInfo{
 				File: "dynamically_managed_iam_datumapis_com.fga",
 			},
-			Module: "iam.datumapis.com",
+			Module: "iam.miloapis.com",
 		},
 		Relations: map[string]*openfgav1.Userset{},
 	}
@@ -271,13 +271,13 @@ func getRoleTypeDefinition(permissions []string) *openfgav1.TypeDefinition {
 		// The InternalRole type will represent the application of an Role in the
 		// OpenFGA backend. The standard Role type is only used to gate access to a
 		// role resource.
-		Type: "iam.datumapis.com/InternalRole",
+		Type: "iam.miloapis.com/InternalRole",
 		Metadata: &openfgav1.Metadata{
 			Relations: map[string]*openfgav1.RelationMetadata{
 				"assignee": {
 					DirectlyRelatedUserTypes: []*openfgav1.RelationReference{
 						{
-							Type: "iam.datumapis.com/InternalUser",
+							Type: "iam.miloapis.com/InternalUser",
 						},
 					},
 				},
@@ -285,7 +285,7 @@ func getRoleTypeDefinition(permissions []string) *openfgav1.TypeDefinition {
 			SourceInfo: &openfgav1.SourceInfo{
 				File: "dynamically_managed_iam_datumapis_com.fga",
 			},
-			Module: "iam.datumapis.com",
+			Module: "iam.miloapis.com",
 		},
 		Relations: map[string]*openfgav1.Userset{
 			"assignee": {
@@ -302,7 +302,7 @@ func getRoleTypeDefinition(permissions []string) *openfgav1.TypeDefinition {
 		role.Metadata.Relations[hashedPermission] = &openfgav1.RelationMetadata{
 			DirectlyRelatedUserTypes: []*openfgav1.RelationReference{
 				{
-					Type:               "iam.datumapis.com/InternalUser",
+					Type:               "iam.miloapis.com/InternalUser",
 					RelationOrWildcard: &openfgav1.RelationReference_Wildcard{},
 				},
 			},
@@ -322,23 +322,23 @@ func getRoleBindingTypeDefinition(permissions []string) *openfgav1.TypeDefinitio
 	// create custom roles. These roles will always be related to a "user" type
 	// through a role binding.
 	roleBinding := &openfgav1.TypeDefinition{
-		Type: "iam.datumapis.com/RoleBinding",
+		Type: "iam.miloapis.com/RoleBinding",
 		Metadata: &openfgav1.Metadata{
 			Relations: map[string]*openfgav1.RelationMetadata{
-				"iam.datumapis.com/InternalRole": {
+				"iam.miloapis.com/InternalRole": {
 					DirectlyRelatedUserTypes: []*openfgav1.RelationReference{
 						{
-							Type: "iam.datumapis.com/InternalRole",
+							Type: "iam.miloapis.com/InternalRole",
 						},
 					},
 				},
-				"iam.datumapis.com/InternalUser": {
+				"iam.miloapis.com/InternalUser": {
 					DirectlyRelatedUserTypes: []*openfgav1.RelationReference{
 						{
-							Type: "iam.datumapis.com/InternalUser",
+							Type: "iam.miloapis.com/InternalUser",
 						},
 						{
-							Type:               "iam.datumapis.com/InternalUser",
+							Type:               "iam.miloapis.com/InternalUser",
 							RelationOrWildcard: &openfgav1.RelationReference_Wildcard{},
 						},
 						// Ensure only InternalUser is allowed here if all subjects are mapped to it for this relation
@@ -348,15 +348,15 @@ func getRoleBindingTypeDefinition(permissions []string) *openfgav1.TypeDefinitio
 			SourceInfo: &openfgav1.SourceInfo{
 				File: "dynamically_managed_iam_datumapis_com.fga",
 			},
-			Module: "iam.datumapis.com",
+			Module: "iam.miloapis.com",
 		},
 		Relations: map[string]*openfgav1.Userset{
-			"iam.datumapis.com/InternalRole": {
+			"iam.miloapis.com/InternalRole": {
 				Userset: &openfgav1.Userset_This{
 					This: &openfgav1.DirectUserset{},
 				},
 			},
-			"iam.datumapis.com/InternalUser": {
+			"iam.miloapis.com/InternalUser": {
 				Userset: &openfgav1.Userset_This{
 					This: &openfgav1.DirectUserset{},
 				},
@@ -374,7 +374,7 @@ func getRoleBindingTypeDefinition(permissions []string) *openfgav1.TypeDefinitio
 						{
 							Userset: &openfgav1.Userset_ComputedUserset{
 								ComputedUserset: &openfgav1.ObjectRelation{
-									Relation: "iam.datumapis.com/InternalUser",
+									Relation: "iam.miloapis.com/InternalUser",
 								},
 							},
 						},
@@ -385,7 +385,7 @@ func getRoleBindingTypeDefinition(permissions []string) *openfgav1.TypeDefinitio
 										Relation: hashedPermission,
 									},
 									Tupleset: &openfgav1.ObjectRelation{
-										Relation: "iam.datumapis.com/InternalRole",
+										Relation: "iam.miloapis.com/InternalRole",
 									},
 								},
 							},
