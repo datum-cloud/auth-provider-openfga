@@ -1,0 +1,13 @@
+apiVersion: iam.miloapis.com/v1alpha1
+kind: Role
+metadata:
+  name: resourcemanager.miloapis.com-projectowner
+spec:
+  launchStage: Beta
+  inheritedRoles:
+    - name: compute.miloapis.com-workload-admin
+      namespace: ($namespace)
+  includedPermissions:
+    - resourcemanager.miloapis.com/projects.delete
+    - resourcemanager.miloapis.com/projects.get
+    - resourcemanager.miloapis.com/projects.update
