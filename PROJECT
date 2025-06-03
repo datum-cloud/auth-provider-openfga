@@ -2,31 +2,31 @@
 # This file is used to track the info used to scaffold your project
 # and allow the plugins properly work.
 # More info: https://book.kubebuilder.io/reference/project-config.html
-domain: openfga.iam.datumapis.com
+domain: openfga.iam.miloapis.com
 layout:
 - go.kubebuilder.io/v4
 projectName: auth-provider-openfga
-repo: go.datum.net/iam/openfga
+repo: go.miloapis.com/auth-provider-openfga
 resources:
 - controller: true
-  domain: iam.datumapis.com
+  domain: iam.miloapis.com
   external: true
-  group: iam.datumapis.com
+  group: iam.miloapis.com
   kind: PolicyBinding
   path: go.datum.net/iam
   version: v1alpha1
 - controller: true
-  domain: iam.datumapis.com
+  domain: iam.miloapis.com
   external: true
-  group: iam.datumapis.com
+  group: iam.miloapis.com
   kind: Service
-  path: go.datum.net/datum/pkg/apis/iam.datumapis.com/v1alpha1
+  path: go.miloapis.com/milo/pkg/apis/iam/v1alpha1
   version: v1alpha1
 - controller: true
-  domain: iam.datumapis.com
+  domain: iam.miloapis.com
   external: true
-  group: iam.datumapis.com
+  group: iam.miloapis.com
   kind: Role
-  path: go.datum.net/datum/pkg/apis/iam.datumapis.com/v1alpha1
+  path: go.miloapis.com/milo/pkg/apis/iam/v1alpha1
   version: v1alpha1
 version: "3"

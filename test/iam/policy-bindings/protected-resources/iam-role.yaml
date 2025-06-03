@@ -1,0 +1,19 @@
+apiVersion: iam.miloapis.com/v1alpha1
+kind: ProtectedResource
+metadata:
+  name: iam-role
+spec:
+  serviceRef:
+    name: "iam.miloapis.com"
+  kind: Role
+  plural: roles
+  singular: role
+  permissions:
+    - list
+    - get
+    - create
+    - update
+    - delete
+    - use
+    - patch
+    - watch

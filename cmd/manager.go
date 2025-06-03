@@ -8,7 +8,7 @@ import (
 
 	openfgav1 "github.com/openfga/api/proto/openfga/v1"
 	"github.com/spf13/cobra"
-	"go.datum.net/iam/openfga/internal/controller"
+	"go.miloapis.com/auth-provider-openfga/internal/controller"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
@@ -119,7 +119,7 @@ func runManager(
 		Metrics:                metricsserver.Options{BindAddress: metricsAddr},
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
-		LeaderElectionID:       "4b85f171.datumapis.com",
+		LeaderElectionID:       "4b85f171.miloapis.com",
 	})
 	if err != nil {
 		return fmt.Errorf("unable to start manager: %w", err)

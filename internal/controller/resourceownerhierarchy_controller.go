@@ -24,12 +24,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
-	resourcemanagerv1alpha1 "go.datum.net/datum/pkg/apis/resourcemanager.datumapis.com/v1alpha1"
-	"go.datum.net/iam/openfga/internal/openfga"
+	resourcemanagerv1alpha1 "go.miloapis.com/milo/pkg/apis/resourcemanager/v1alpha1"
+	"go.miloapis.com/auth-provider-openfga/internal/openfga"
 )
 
 const (
-	resourceOwnerHierarchyFinalizer = "resourceownerhierarchy.iam.datumapis.com/finalizer"
+	resourceOwnerHierarchyFinalizer = "resourceownerhierarchy.iam.miloapis.com/finalizer"
 	DefaultAPIVersion               = "v1alpha1"
 	RelationName                    = "parent"
 	DefaultOpenFGAStoreID           = "default_store_id"
@@ -53,10 +53,10 @@ type ResourceOwnerHierarchyReconciler struct {
 	validProjectParentGVKs map[schema.GroupVersionKind]struct{}
 }
 
-// +kubebuilder:rbac:groups=resourcemanager.datumapis.com,resources=projects,verbs=get;list;watch;update;patch
-// +kubebuilder:rbac:groups=resourcemanager.datumapis.com,resources=projects/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=resourcemanager.datumapis.com,resources=projects/finalizers,verbs=update
-// Potentially add RBAC for assumed parent types like iam.datumapis.com/organizations if we check their existence (though ownerRef itself doesn't require it)
+// +kubebuilder:rbac:groups=resourcemanager.miloapis.com,resources=projects,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups=resourcemanager.miloapis.com,resources=projects/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=resourcemanager.miloapis.com,resources=projects/finalizers,verbs=update
+// Potentially add RBAC for assumed parent types like iam.miloapis.com/organizations if we check their existence (though ownerRef itself doesn't require it)
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -91,7 +91,7 @@ func (r *ResourceOwnerHierarchyReconciler) Reconcile(ctx context.Context, req ct
 
 func (r *ResourceOwnerHierarchyReconciler) reconcileProject(ctx context.Context, project *resourcemanagerv1alpha1.Project, gvk schema.GroupVersionKind) (ctrl.Result, error) {
 	// serviceNameForChildResource is derived from the Project's GVK group.
-	// This assumes the FGA type for a project is like "resourcemanager.datumapis.com/Project"
+	// This assumes the FGA type for a project is like "resourcemanager.miloapis.com/Project"
 	serviceNameForChildResource := gvk.Group
 
 	// validParentGVKsForChild is now taken from the reconciler's hardcoded map.

@@ -7,8 +7,8 @@ import (
 	"fmt"
 
 	openfgav1 "github.com/openfga/api/proto/openfga/v1"
-	iamdatumapiscomv1alpha1 "go.datum.net/datum/pkg/apis/iam.datumapis.com/v1alpha1"
-	"go.datum.net/iam/openfga/internal/openfga"
+	iamdatumapiscomv1alpha1 "go.miloapis.com/milo/pkg/apis/iam/v1alpha1"
+	"go.miloapis.com/auth-provider-openfga/internal/openfga"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -23,7 +23,7 @@ const (
 	// protectedResourceFinalizerKey is the finalizer key added to the
 	// ProtectedResource to ensure the type is removed from the OpenFGA
 	// authorization model before the ProtectedResource is deleted.
-	protectedResourceFinalizerKey = "iam.datumapis.com/protectedresource"
+	protectedResourceFinalizerKey = "iam.miloapis.com/protectedresource"
 )
 
 // ProtectedResourceFinalizer implements the controller runtime
@@ -82,9 +82,9 @@ type AuthorizationModelReconciler struct {
 	Finalizers   finalizer.Finalizers
 }
 
-//+kubebuilder:rbac:groups=iam.datumapis.com,resources=protectedresources,verbs=get;list;watch;update;patch
-//+kubebuilder:rbac:groups=iam.datumapis.com,resources=protectedresources/status,verbs=get;update;patch
-//+kubebuilder:rbac:groups=iam.datumapis.com,resources=protectedresources/finalizers,verbs=update
+//+kubebuilder:rbac:groups=iam.miloapis.com,resources=protectedresources,verbs=get;list;watch;update;patch
+//+kubebuilder:rbac:groups=iam.miloapis.com,resources=protectedresources/status,verbs=get;update;patch
+//+kubebuilder:rbac:groups=iam.miloapis.com,resources=protectedresources/finalizers,verbs=update
 
 // Reconcile is the core reconciliation loop for the
 // AuthorizationModelReconciler. It is invoked when changes are detected in

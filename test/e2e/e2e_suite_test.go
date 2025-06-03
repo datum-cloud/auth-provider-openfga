@@ -25,7 +25,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"go.datum.net/iam/openfga/test/utils"
+	"go.miloapis.com/auth-provider-openfga/test/utils"
 )
 
 var (

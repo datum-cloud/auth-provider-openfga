@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	iamdatumapiscomv1alpha1 "go.datum.net/datum/pkg/apis/iam.datumapis.com/v1alpha1"
+	iamdatumapiscomv1alpha1 "go.miloapis.com/milo/pkg/apis/iam/v1alpha1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	openfgav1 "github.com/openfga/api/proto/openfga/v1"
@@ -60,7 +60,7 @@ func (r *RoleReconciler) ReconcileRole(ctx context.Context, role *iamdatumapisco
 	var expectedTuples []*openfgav1.TupleKey
 
 	// Use Role UID for the object identifier
-	roleObjectIdentifier := "iam.datumapis.com/InternalRole:" + string(role.UID)
+	roleObjectIdentifier := "iam.miloapis.com/InternalRole:" + string(role.UID)
 
 	existingTupleKeys, err := getTupleKeys(ctx, r.StoreID, r.OpenFGA, &openfgav1.ReadRequestTupleKey{
 		Object: roleObjectIdentifier,
@@ -78,7 +78,7 @@ func (r *RoleReconciler) ReconcileRole(ctx context.Context, role *iamdatumapisco
 		expectedTuples = append(
 			expectedTuples,
 			&openfgav1.TupleKey{
-				User:     "iam.datumapis.com/InternalUser:*",
+				User:     "iam.miloapis.com/InternalUser:*",
 				Relation: hashPermission(permission),
 				Object:   roleObjectIdentifier,
 			},
@@ -118,7 +118,7 @@ func (r *RoleReconciler) ReconcileRole(ctx context.Context, role *iamdatumapisco
 
 func (r *RoleReconciler) DeleteRole(ctx context.Context, role iamdatumapiscomv1alpha1.Role) error {
 	// Use Role UID for the object identifier
-	roleObjectIdentifier := "iam.datumapis.com/InternalRole:" + string(role.UID)
+	roleObjectIdentifier := "iam.miloapis.com/InternalRole:" + string(role.UID)
 
 	existingTupleKeys, err := getTupleKeys(ctx, r.StoreID, r.OpenFGA, &openfgav1.ReadRequestTupleKey{
 		Object: roleObjectIdentifier,

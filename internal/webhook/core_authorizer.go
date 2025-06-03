@@ -7,9 +7,9 @@ import (
 	"slices"
 
 	openfgav1 "github.com/openfga/api/proto/openfga/v1"
-	iamv1alpha1 "go.datum.net/datum/pkg/apis/iam.datumapis.com/v1alpha1"
-	resourcemanagerv1alpha1 "go.datum.net/datum/pkg/apis/resourcemanager.datumapis.com/v1alpha1"
-	"go.datum.net/iam/openfga/internal/openfga"
+	iamv1alpha1 "go.miloapis.com/milo/pkg/apis/iam/v1alpha1"
+	resourcemanagerv1alpha1 "go.miloapis.com/milo/pkg/apis/resourcemanager/v1alpha1"
+	"go.miloapis.com/auth-provider-openfga/internal/openfga"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apiserver/pkg/authorization/authorizer"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -44,7 +44,7 @@ func (o *CoreControlPlaneAuthorizer) Authorize(ctx context.Context, attributes a
 		return authorizer.DecisionDeny, "", fmt.Errorf("permission '%s' not registered", permissionString)
 	}
 
-	if attributes.GetAPIGroup() != "resourcemanager.datumapis.com" {
+	if attributes.GetAPIGroup() != "resourcemanager.miloapis.com" {
 		slog.DebugContext(ctx, "No opinion on auth webhook request since API Group is not managed by webhook", slog.String("api_group", attributes.GetAPIGroup()))
 		return authorizer.DecisionNoOpinion, "", nil
 	}
@@ -60,15 +60,15 @@ func (o *CoreControlPlaneAuthorizer) Authorize(ctx context.Context, attributes a
 
 	// Get user UID - this should be provided as an extra field from the authentication system
 	var userUID string
-	if userUIDs, set := attributes.GetUser().GetExtra()["authentication.datumapis.com/user-uid"]; !set {
-		return authorizer.DecisionDeny, "", fmt.Errorf("extra 'authentication.datumapis.com/user-uid' is required by core control plane authorizer")
+	if userUIDs, set := attributes.GetUser().GetExtra()["authentication.miloapis.com/user-uid"]; !set {
+		return authorizer.DecisionDeny, "", fmt.Errorf("extra 'authentication.miloapis.com/user-uid' is required by core control plane authorizer")
 	} else if len(userUIDs) > 1 {
-		return authorizer.DecisionDeny, "", fmt.Errorf("extra 'authentication.datumapis.com/user-uid' only supports one value, but multiple were provided: %v", userUIDs)
+		return authorizer.DecisionDeny, "", fmt.Errorf("extra 'authentication.miloapis.com/user-uid' only supports one value, but multiple were provided: %v", userUIDs)
 	} else {
 		userUID = userUIDs[0]
 	}
 
-	user := fmt.Sprintf("iam.datumapis.com/InternalUser:%s", userUID)
+	user := fmt.Sprintf("iam.miloapis.com/InternalUser:%s", userUID)
 	resource := o.buildResource(attributes, organizationUID)
 	relation := o.buildRelation(attributes)
 
@@ -140,7 +140,7 @@ func (o *CoreControlPlaneAuthorizer) buildPermissionString(attributes authorizer
 func (o *CoreControlPlaneAuthorizer) buildResource(attributes authorizer.Attributes, organizationUID string) string {
 	// Use the organization resource when acting on resource collections.
 	if slices.Contains([]string{"list", "create", "watch"}, attributes.GetVerb()) {
-		result := fmt.Sprintf("resourcemanager.datumapis.com/Organization:%s", organizationUID)
+		result := fmt.Sprintf("resourcemanager.miloapis.com/Organization:%s", organizationUID)
 		slog.Debug("buildResource for collection operation",
 			slog.String("result", result),
 			slog.String("verb", attributes.GetVerb()),
@@ -152,7 +152,7 @@ func (o *CoreControlPlaneAuthorizer) buildResource(attributes authorizer.Attribu
 	resourceName := attributes.GetName()
 	if resourceName == "" {
 		// For collection operations on specific resource types
-		result := fmt.Sprintf("resourcemanager.datumapis.com/Organization:%s", organizationUID)
+		result := fmt.Sprintf("resourcemanager.miloapis.com/Organization:%s", organizationUID)
 		slog.Debug("buildResource for empty resource name",
 			slog.String("result", result),
 		)

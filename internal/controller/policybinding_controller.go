@@ -10,8 +10,8 @@ import (
 	"strings"
 
 	openfgav1 "github.com/openfga/api/proto/openfga/v1"
-	iamdatumapiscomv1alpha1 "go.datum.net/datum/pkg/apis/iam.datumapis.com/v1alpha1"
-	"go.datum.net/iam/openfga/internal/openfga"
+	iamdatumapiscomv1alpha1 "go.miloapis.com/milo/pkg/apis/iam/v1alpha1"
+	"go.miloapis.com/auth-provider-openfga/internal/openfga"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -29,7 +29,7 @@ import (
 )
 
 const (
-	policyBindingFinalizerKey = "iam.datumapis.com/policybinding"
+	policyBindingFinalizerKey = "iam.miloapis.com/policybinding"
 	// ConditionTypeSubjectValid represents the condition type for validating the subjects (users or groups) referenced in
 	// a PolicyBinding. This condition is True if all subjects are found, recognized by the API server, and have valid
 	// UIDs.
@@ -64,10 +64,10 @@ func (e *MissingNamespaceError) Error() string {
 // RBAC permissions are managed by kubebuilder markers. These define the necessary permissions for the controller to
 // interact with various Kubernetes resources.
 //
-// +kubebuilder:rbac:groups=iam.datumapis.com,resources=policybindings,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=iam.datumapis.com,resources=policybindings/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=iam.datumapis.com,resources=policybindings/finalizers,verbs=update
-// +kubebuilder:rbac:groups=iam.datumapis.com,resources=protectedresources,verbs=get;list;watch
+// +kubebuilder:rbac:groups=iam.miloapis.com,resources=policybindings,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=iam.miloapis.com,resources=policybindings/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=iam.miloapis.com,resources=policybindings/finalizers,verbs=update
+// +kubebuilder:rbac:groups=iam.miloapis.com,resources=protectedresources,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=users;groups,verbs=get;list;watch
 // +kubebuilder:rbac:groups="*",resources="*",verbs=get;list;watch
 
@@ -568,20 +568,13 @@ func (r *PolicyBindingReconciler) validatePolicyBindingSubjects(ctx context.Cont
 			continue
 		}
 
-		effectiveAPIGroup := subject.APIGroup
-		// Default to "iam.datumapis.com" for User and Group kinds if no APIGroup is specified. This provides a convention
-		// for commonly used IAM kinds.
-		if effectiveAPIGroup == "" && (subject.Kind == "User" || subject.Kind == "Group") {
-			effectiveAPIGroup = "iam.datumapis.com"
-		}
-
-		_, err := r.getUnstructuredResourceAndMapping(ctx, effectiveAPIGroup, subject.Kind, subject.Name, subject.Namespace)
+		_, err := r.getUnstructuredResourceAndMapping(ctx, "iam.miloapis.com", subject.Kind, subject.Name, subject.Namespace)
 		if err != nil {
 			var subjectMsg string
 			var reason string
 
 			if meta.IsNoMatchError(err) {
-				subjectMsg = fmt.Sprintf("Subject Kind '%s' in group '%s' not recognized by the API server for subject '%s'.", subject.Kind, effectiveAPIGroup, subject.Name)
+				subjectMsg = fmt.Sprintf("Subject Kind '%s' in group '%s' not recognized by the API server for subject '%s'.", subject.Kind, "iam.miloapis.com", subject.Name)
 				reason = "KindNotRecognized"
 			} else if apierrors.IsNotFound(err) {
 				subjectMsg = fmt.Sprintf("Subject %s/%s (namespace: '%s') not found.", subject.Kind, subject.Name, subject.Namespace)

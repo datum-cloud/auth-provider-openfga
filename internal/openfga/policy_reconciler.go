@@ -7,7 +7,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	openfgav1 "github.com/openfga/api/proto/openfga/v1"
-	iamdatumapiscomv1alpha1 "go.datum.net/datum/pkg/apis/iam.datumapis.com/v1alpha1"
+	iamdatumapiscomv1alpha1 "go.miloapis.com/milo/pkg/apis/iam/v1alpha1"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
@@ -25,7 +25,7 @@ type PolicyReconciler struct {
 // exist for the provided IAM policy.
 func (r *PolicyReconciler) ReconcilePolicy(ctx context.Context, binding iamdatumapiscomv1alpha1.PolicyBinding) error {
 	// Use PolicyBinding UID for the intermediate binding object
-	policyBindingObjectIdentifier := "iam.datumapis.com/RoleBinding:" + string(binding.UID)
+	policyBindingObjectIdentifier := "iam.miloapis.com/RoleBinding:" + string(binding.UID)
 
 	// Fetch the Role to get its UID
 	roleToFetch := &iamdatumapiscomv1alpha1.Role{}
@@ -61,22 +61,22 @@ func (r *PolicyReconciler) ReconcilePolicy(ctx context.Context, binding iamdatum
 		// etc) to the role binding.
 		&openfgav1.TupleKey{
 			User:     policyBindingObjectIdentifier, // Use PolicyBinding UID based object
-			Relation: "iam.datumapis.com/RoleBinding",
+			Relation: "iam.miloapis.com/RoleBinding",
 			Object:   fmt.Sprintf("%s/%s:%s", binding.Spec.TargetRef.APIGroup, binding.Spec.TargetRef.Kind, string(binding.Spec.TargetRef.UID)), // Use TargetRef UID
 		},
 		// Associates the role binding to the role that should be bound
 		// to the resource.
 		&openfgav1.TupleKey{
-			User:     "iam.datumapis.com/InternalRole:" + string(roleUID),
-			Relation: "iam.datumapis.com/InternalRole",
+			User:     "iam.miloapis.com/InternalRole:" + string(roleUID),
+			Relation: "iam.miloapis.com/InternalRole",
 			Object:   policyBindingObjectIdentifier, // Use PolicyBinding UID based object
 		},
 	)
 
 	for _, subject := range binding.Spec.Subjects {
 		tuples = append(tuples, &openfgav1.TupleKey{
-			User:     fmt.Sprintf("iam.datumapis.com/InternalUser:%s", string(subject.UID)), // Represent all subjects as InternalUser with their original UID
-			Relation: "iam.datumapis.com/InternalUser",
+			User:     fmt.Sprintf("iam.miloapis.com/InternalUser:%s", string(subject.UID)), // Represent all subjects as InternalUser with their original UID
+			Relation: "iam.miloapis.com/InternalUser",
 			Object:   policyBindingObjectIdentifier, // Use PolicyBinding UID based object
 		})
 	}
@@ -160,14 +160,14 @@ func diffTuples(existing, current []*openfgav1.TupleKey) (added, removed []*open
 
 func (r *PolicyReconciler) getExistingPolicyTuples(ctx context.Context, policy iamdatumapiscomv1alpha1.PolicyBinding, roleUID types.UID) ([]*openfgav1.TupleKey, error) {
 	// Use PolicyBinding UID for the intermediate binding object
-	policyBindingObjectIdentifier := "iam.datumapis.com/RoleBinding:" + string(policy.UID)
+	policyBindingObjectIdentifier := "iam.miloapis.com/RoleBinding:" + string(policy.UID)
 
 	var allExistingTuples []*openfgav1.TupleKey
 
 	// 1. Get tuples where the binding object is the User (linking binding to target resource)
 	tuplesLinkingBindingToResource, err := getTupleKeys(ctx, r.StoreID, r.Client, &openfgav1.ReadRequestTupleKey{
 		User:     policyBindingObjectIdentifier,
-		Relation: "iam.datumapis.com/RoleBinding",                                                                                        // Relation used when binding is the user
+		Relation: "iam.miloapis.com/RoleBinding",                                                                                        // Relation used when binding is the user
 		Object:   fmt.Sprintf("%s/%s:%s", policy.Spec.TargetRef.APIGroup, policy.Spec.TargetRef.Kind, string(policy.Spec.TargetRef.UID)), // Use TargetRef UID
 	})
 	if err != nil {
@@ -182,8 +182,8 @@ func (r *PolicyReconciler) getExistingPolicyTuples(ctx context.Context, policy i
 
 	// Specifically fetch the role linkage tuple
 	roleLinkageTuple, err := getTupleKeys(ctx, r.StoreID, r.Client, &openfgav1.ReadRequestTupleKey{
-		User:     "iam.datumapis.com/InternalRole:" + string(roleUID),
-		Relation: "iam.datumapis.com/InternalRole",
+		User:     "iam.miloapis.com/InternalRole:" + string(roleUID),
+		Relation: "iam.miloapis.com/InternalRole",
 		Object:   policyBindingObjectIdentifier,
 	})
 	if err != nil {
@@ -194,8 +194,8 @@ func (r *PolicyReconciler) getExistingPolicyTuples(ctx context.Context, policy i
 	// Fetch subject linkage tuples
 	for _, subject := range policy.Spec.Subjects {
 		subjectLinkageTuple, err := getTupleKeys(ctx, r.StoreID, r.Client, &openfgav1.ReadRequestTupleKey{
-			User:     fmt.Sprintf("iam.datumapis.com/InternalUser:%s", string(subject.UID)),
-			Relation: "iam.datumapis.com/InternalUser",
+			User:     fmt.Sprintf("iam.miloapis.com/InternalUser:%s", string(subject.UID)),
+			Relation: "iam.miloapis.com/InternalUser",
 			Object:   policyBindingObjectIdentifier,
 		})
 		if err != nil {
