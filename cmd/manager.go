@@ -158,6 +158,16 @@ func runManager(
 		return fmt.Errorf("unable to create controller AuthorizationModel: %w", err)
 	}
 
+	if err = (&controller.GroupMembershipReconciler{
+		Client:        mgr.GetClient(),
+		Scheme:        mgr.GetScheme(),
+		FgaClient:     fgaClient,
+		StoreID:       openfgaStoreID,
+		EventRecorder: mgr.GetEventRecorderFor("groupmembership-controller"),
+	}).SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("unable to create controller GroupMembership: %w", err)
+	}
+
 	//+kubebuilder:scaffold:builder
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {

@@ -16,6 +16,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	iamdatumapiscomv1alpha1 "go.miloapis.com/milo/pkg/apis/iam/v1alpha1"
+	iammiloapiscomv1alpha1 "go.miloapis.com/milo/pkg/apis/iam/v1alpha1"
 	resourcemanagerdatumapiscomv1alpha1 "go.miloapis.com/milo/pkg/apis/resourcemanager/v1alpha1"
 	//+kubebuilder:scaffold:imports
 )
@@ -30,6 +31,7 @@ func init() {
 
 	utilruntime.Must(iamdatumapiscomv1alpha1.AddToScheme(scheme))
 	utilruntime.Must(resourcemanagerdatumapiscomv1alpha1.AddToScheme(scheme))
+	utilruntime.Must(iammiloapiscomv1alpha1.AddToScheme(scheme))
 	//+kubebuilder:scaffold:scheme
 }
 
