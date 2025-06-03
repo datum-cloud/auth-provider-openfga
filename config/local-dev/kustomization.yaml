@@ -1,0 +1,17 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Development-optimized configuration
+namespace: auth-provider-openfga-system
+
+namePrefix: auth-provider-openfga-
+
+resources:
+  # Base application components (includes namespace via transformer)
+  - ../default
+
+# Development-specific image configurations
+images:
+  - name: auth-provider-openfga
+    newName: auth-provider-openfga
+    newTag: dev

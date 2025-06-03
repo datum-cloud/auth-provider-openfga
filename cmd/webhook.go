@@ -8,9 +8,9 @@ import (
 
 	openfgav1 "github.com/openfga/api/proto/openfga/v1"
 	"github.com/spf13/cobra"
+	"go.miloapis.com/auth-provider-openfga/internal/webhook"
 	iamv1alpha1 "go.miloapis.com/milo/pkg/apis/iam/v1alpha1"
 	resourcemanagerv1alpha1 "go.miloapis.com/milo/pkg/apis/resourcemanager/v1alpha1"
-	"go.miloapis.com/auth-provider-openfga/internal/webhook"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
@@ -32,7 +32,7 @@ func createWebhookCommand() *cobra.Command {
 	var openfgaAPIToken string
 	var openfgaScheme string
 	var webhookPort int
-	var metricsPort int
+	var metricsBindAddress string
 
 	cmd := &cobra.Command{
 		Use:   "authz-webhook",
@@ -48,7 +48,7 @@ func createWebhookCommand() *cobra.Command {
 				openfgaAPIToken,
 				openfgaScheme,
 				webhookPort,
-				metricsPort,
+				metricsBindAddress,
 			)
 		},
 	}
@@ -61,7 +61,7 @@ func createWebhookCommand() *cobra.Command {
 	cmd.Flags().StringVar(&openfgaAPIToken, "openfga-api-token", "", "OpenFGA API Token (optional)")
 	cmd.Flags().StringVar(&openfgaScheme, "openfga-scheme", "http", "OpenFGA Scheme (http or https)")
 	cmd.Flags().IntVar(&webhookPort, "webhook-port", 9443, "Port for the webhook server")
-	cmd.Flags().IntVar(&metricsPort, "metrics-port", 8080, "Port for the metrics server")
+	cmd.Flags().StringVar(&metricsBindAddress, "metrics-bind-address", ":8080", "Address for the metrics server")
 
 	// Mark required flags
 	cmd.MarkFlagRequired("openfga-api-url")
@@ -79,7 +79,7 @@ func runWebhookServer(
 	openfgaAPIToken string,
 	openfgaScheme string,
 	webhookPort int,
-	metricsPort int,
+	metricsBindAddress string,
 ) error {
 	log.SetLogger(zap.New(zap.JSONEncoder()))
 	entryLog := log.Log.WithName("webhook-server")
@@ -124,7 +124,7 @@ func runWebhookServer(
 	mgr, err := manager.New(restConfig, manager.Options{
 		Scheme: runtimeScheme,
 		Metrics: server.Options{
-			BindAddress: fmt.Sprintf(":%d", metricsPort),
+			BindAddress: metricsBindAddress,
 		},
 		WebhookServer: ctrlwebhook.NewServer(ctrlwebhook.Options{
 			CertDir:  certDir,
@@ -157,6 +157,6 @@ func runWebhookServer(
 		K8sClient:  k8sClient,
 	}))
 
-	entryLog.Info("starting webhook server", "port", webhookPort, "metrics-port", metricsPort)
+	entryLog.Info("starting webhook server", "port", webhookPort, "metrics-port", metricsBindAddress)
 	return mgr.Start(context.Background())
 }

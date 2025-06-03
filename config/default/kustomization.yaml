@@ -1,5 +1,12 @@
-# Adds namespace to all resources.
-namespace: auth-provider-openfga-system
+# Adds namespace to all resources if not already specified..
+transformers:
+- |-
+  apiVersion: builtin
+  kind: NamespaceTransformer
+  metadata:
+    name: notImportantHere
+    namespace: auth-provider-openfga-system
+  unsetOnly: true
 
 # Value of this field is prepended to the
 # names of all resources, e.g. a deployment named
@@ -15,9 +22,10 @@ namePrefix: auth-provider-openfga-
 #    someName: someValue
 
 resources:
-#- ../crd
+- namespace.yaml
 - ../rbac
 - ../manager
+- ../authz-webhook
 # [WEBHOOK] To enable webhook, uncomment all the sections with [WEBHOOK] prefix including the one in
 # crd/kustomization.yaml
 #- ../webhook

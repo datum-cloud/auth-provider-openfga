@@ -25,3 +25,6 @@ go.work
 *.swp
 *.swo
 *~
+
+# Ignore helm charts installed by kustomize
+config/openfga/charts
