@@ -1,0 +1,9 @@
+apiVersion: iam.miloapis.com/v1alpha1
+kind: Role
+metadata:
+  name: iam.miloapis.com-user-creator
+spec:
+  launchStage: Beta
+  includedPermissions:
+    - iam.miloapis.com/users.create
+    - iam.miloapis.com/users.get

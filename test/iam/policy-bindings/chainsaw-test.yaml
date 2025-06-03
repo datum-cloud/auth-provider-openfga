@@ -1,0 +1,189 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: policy-bindings
+spec:
+  steps:
+  - try:
+    - apply:
+        file: protected-resources/iam-role.yaml
+    - wait:
+        apiVersion: iam.miloapis.com/v1alpha1
+        kind: ProtectedResource
+        name: iam-role
+        timeout: 5m
+        for:
+          condition:
+            name: Ready
+            value: 'true'
+    - apply:
+        file: protected-resources/iam-user.yaml
+    - wait:
+        apiVersion: iam.miloapis.com/v1alpha1
+        kind: ProtectedResource
+        name: iam-user
+        timeout: 5m
+        for:
+          condition:
+            name: Ready
+            value: 'true'
+    - apply:
+        file: protected-resources/iam-group.yaml
+    - wait:
+        apiVersion: iam.miloapis.com/v1alpha1
+        kind: ProtectedResource
+        name: iam-group
+        timeout: 5m
+        for:
+          condition:
+            name: Ready
+            value: 'true'
+    - apply:
+        file: protected-resources/resourcemanager-organization.yaml
+    - wait:
+        apiVersion: iam.miloapis.com/v1alpha1
+        kind: ProtectedResource
+        name: resourcemanager-organization
+        timeout: 5m
+        for:
+          condition:
+            name: Ready
+            value: 'true'
+    - apply:
+        file: protected-resources/resourcemanager-project.yaml
+    - wait:
+        apiVersion: iam.miloapis.com/v1alpha1
+        kind: ProtectedResource
+        name: resourcemanager-project
+        timeout: 5m
+        for:
+          condition:
+            name: Ready
+            value: 'true'
+    - apply:
+        file: protected-resources/compute-workloads.yaml
+    - wait:
+        apiVersion: iam.miloapis.com/v1alpha1
+        kind: ProtectedResource
+        name: compute-workloads
+        timeout: 5m
+        for:
+          condition:
+            name: Ready
+            value: 'true'
+    - apply:
+        file: roles/iam-user-creator.yaml
+    - wait:
+        apiVersion: iam.miloapis.com/v1alpha1
+        kind: Role
+        name: iam.miloapis.com-user-creator
+        timeout: 5m
+        for:
+          condition:
+            name: Ready
+            value: 'true'
+    - apply:
+        file: roles/compute-workload-admin.yaml
+    - wait:
+        apiVersion: iam.miloapis.com/v1alpha1
+        kind: Role
+        name: compute.miloapis.com-workload-admin
+        timeout: 5m
+        for:
+          condition:
+            name: Ready
+            value: 'true'
+    - apply:
+        file: roles/resourcemanager-organizationowner.yaml
+    - wait:
+        apiVersion: iam.miloapis.com/v1alpha1
+        kind: Role
+        name: resourcemanager.miloapis.com-organizationowner
+        timeout: 5m
+        for:
+          condition:
+            name: Ready
+            value: 'true'
+    - apply:
+        file: roles/resourcemanager-projectowner.yaml
+    - wait:
+        apiVersion: iam.miloapis.com/v1alpha1
+        kind: Role
+        name: resourcemanager.miloapis.com-projectowner
+        timeout: 5m
+        for:
+          condition:
+            name: Ready
+            value: 'true'
+    - apply:
+        file: user.yaml
+        outputs:
+          - name: user
+            value: (@)
+    - apply:
+        file: organization.yaml
+        outputs:
+          - name: org
+            value: (@)
+    - apply:
+        resource:
+          apiVersion: iam.miloapis.com/v1alpha1
+          kind: PolicyBinding
+          metadata:
+            name: sample-org-admin-binding
+          spec:
+            roleRef:
+              name: resourcemanager.miloapis.com-organizationowner
+              namespace: ($namespace)
+            subjects:
+              - kind: User
+                name: "kubernetes-admin"
+                uid: ($user.metadata.uid)
+            targetRef:
+              apiGroup: "resourcemanager.miloapis.com"
+              kind: Organization
+              name: "datum"
+              uid: ($org.metadata.uid)
+
+    - wait:
+        apiVersion: iam.miloapis.com/v1alpha1
+        kind: PolicyBinding
+        name: sample-org-admin-binding
+        timeout: 5m
+        for:
+          condition:
+            name: Ready
+            value: 'true'
+    - script:
+        env:
+          - name: USER_UID
+            value: ($user.metadata.uid)
+          - name: ORG_UID
+            value: ($org.metadata.uid)
+        content: |
+          curl -ksS https://localhost:9443/core/v1alpha/webhook \
+            -H "Content-Type: application/json" \
+            -d @- << EOF
+          {
+            "apiVersion": "authorization.k8s.io/v1",
+            "kind": "SubjectAccessReview",
+            "spec": {
+              "user": "kubernetes-admin",
+              "extra": {
+                "resourcemanager.miloapis.com/organization-id": ["$ORG_UID"],
+                "authentication.miloapis.com/user-uid": ["$USER_UID"]
+              },
+              "groups": ["system:authenticated"],
+              "resourceAttributes": {
+                "group": "resourcemanager.miloapis.com",
+                "resource": "organizations",
+                "version": "v1alpha1",
+                "verb": "get",
+                "name": "datum"
+              }
+            }
+          }
+          EOF
+        check:
+          ($error == null): true
+          (@.status.allowed != true): false
