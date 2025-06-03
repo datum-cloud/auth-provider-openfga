@@ -71,7 +71,7 @@ func (r *GroupMembershipReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 	group := &iammiloapiscomv1alpha1.Group{}
 	err = r.Get(ctx, client.ObjectKey{
-		Name: groupMembership.Spec.GroupRef.Name,
+		Name:      groupMembership.Spec.GroupRef.Name,
 		Namespace: groupMembership.Spec.GroupRef.Namespace,
 	}, group)
 	if err != nil {
@@ -79,7 +79,7 @@ func (r *GroupMembershipReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	}
 
 	groupMembershipRequest := openfga.GroupMembershipRequest{
-		GroupUid: group.ObjectMeta.UID,
+		GroupUid:  group.ObjectMeta.UID,
 		MemberUid: user.ObjectMeta.UID,
 	}
 
@@ -95,11 +95,11 @@ func (r *GroupMembershipReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		if err != nil {
 			log.Error(err, "Failed to remove group membership")
 		}
-		 // Remove the finalizer so the resource can be deleted
-		 controllerutil.RemoveFinalizer(groupMembership, groupMembershipFinalizerKey)
-		 if err := r.Update(ctx, groupMembership); err != nil {
-			 return ctrl.Result{}, err
-		 }
+		// Remove the finalizer so the resource can be deleted
+		controllerutil.RemoveFinalizer(groupMembership, groupMembershipFinalizerKey)
+		if err := r.Update(ctx, groupMembership); err != nil {
+			return ctrl.Result{}, err
+		}
 
 		log.Info("Successfully removed group membership.")
 		return ctrl.Result{}, nil
@@ -113,7 +113,7 @@ func (r *GroupMembershipReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		}
 		return ctrl.Result{Requeue: true}, nil
 	}
-	
+
 	// Add the group membership tuple to the OpenFGA store
 	err = userGroupReconciler.AddMemberToGroup(ctx, groupMembershipRequest)
 	if err != nil {
@@ -146,4 +146,3 @@ func (r *GroupMembershipReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Named("groupmembership").
 		Complete(r)
 }
-

@@ -8,7 +8,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
-) 
+)
 
 type UserGroupReconciler struct {
 	StoreID   string
@@ -63,7 +63,7 @@ func (r *UserGroupReconciler) RemoveMemberFromGroup(ctx context.Context, groupMe
 			Relation: "member",
 			Object:   openFGAGroupObject,
 		},
-	}	
+	}
 
 	checkResp, err := r.checkIfTupleKeyExists(ctx, tupleKeys[0])
 	if err != nil {
@@ -100,7 +100,7 @@ func (r *UserGroupReconciler) checkIfTupleKeyExists(ctx context.Context, tupleKe
 	log := logf.FromContext(ctx)
 
 	checkRequest := &openfgav1.CheckRequest{
-		StoreId:  r.StoreID,
+		StoreId: r.StoreID,
 		TupleKey: &openfgav1.CheckRequestTupleKey{
 			User:     tupleKey.User,
 			Relation: tupleKey.Relation,
