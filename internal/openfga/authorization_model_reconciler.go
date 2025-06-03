@@ -106,6 +106,7 @@ func (r *AuthorizationModelReconciler) createExpectedAuthorizationModel(protecte
 
 	typeDefinitions := []*openfgav1.TypeDefinition{
 		getUserTypeDefinition(),
+		getUserGroupTypeDefinition(),
 		getRoleTypeDefinition(permissions),
 		getRoleBindingTypeDefinition(permissions),
 	}
@@ -259,6 +260,44 @@ func getUserTypeDefinition() *openfgav1.TypeDefinition {
 	}
 }
 
+func getUserGroupTypeDefinition() *openfgav1.TypeDefinition {
+	return &openfgav1.TypeDefinition{
+		Type: "iam.miloapis.com/InternalUserGroup",
+		Metadata: &openfgav1.Metadata{
+			Relations: map[string]*openfgav1.RelationMetadata{
+				"member": {
+					DirectlyRelatedUserTypes: []*openfgav1.RelationReference{
+						{
+							Type: "iam.miloapis.com/InternalUser",
+						},
+					},
+				},
+				"assignee": {
+					DirectlyRelatedUserTypes: nil,
+				},
+			},
+			SourceInfo: &openfgav1.SourceInfo{
+				File: "dynamically_managed_iam_datumapis_com.fga",
+			},
+			Module: "iam.miloapis.com",
+		},
+		Relations: map[string]*openfgav1.Userset{
+			"member": {
+				Userset: &openfgav1.Userset_This{
+					This: &openfgav1.DirectUserset{},
+				},
+			},
+			"assignee": {
+				Userset: &openfgav1.Userset_ComputedUserset{
+					ComputedUserset: &openfgav1.ObjectRelation{
+						Relation: "member",
+					},
+				},
+			},
+		},
+	}
+}
+
 func getRoleTypeDefinition(permissions []string) *openfgav1.TypeDefinition {
 	// Create a new type definition for the base role type that will be used to
 	// create custom roles. These roles will always be related to a "user" type
@@ -338,6 +377,12 @@ func getRoleBindingTypeDefinition(permissions []string) *openfgav1.TypeDefinitio
 							RelationOrWildcard: &openfgav1.RelationReference_Wildcard{},
 						},
 						// Ensure only InternalUser is allowed here if all subjects are mapped to it for this relation
+						{
+							Type: "iam.miloapis.com/InternalUserGroup",
+							RelationOrWildcard: &openfgav1.RelationReference_Relation{
+								Relation: "assignee",
+							},
+						},
 					},
 				},
 			},
