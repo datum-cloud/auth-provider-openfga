@@ -1,6 +1,49 @@
 # Milo OpenFGA Auth Provider
 
-A Kubernetes controller that enables Milo to use OpenFGA as the authorization provider for managing access to all resources in the control plane.
+Authorization infrastructure for Milo's business operating system backed by
+OpenFGA - enabling fine-grained, relationship-based access control across
+business entities like customers, products, agreements, and organizational
+resources.
+
+## Overview
+
+This project provides the authorization backbone for the [Milo business
+operating system](https://github.com/datum-cloud/milo), which uses Kubernetes
+APIServer patterns to manage business entities for product-led B2B companies.
+The auth provider bridges Milo's business APIs with OpenFGA's relationship-based
+authorization engine to answer complex business questions like:
+
+- *"Can this sales rep view pricing for customers in this project?"*
+- *"Can this account manager modify agreements for this organization?"*
+- *"Which product features can this customer access based on their
+  entitlements?"*
+
+### Key Capabilities
+
+1. **Business Resource Authorization** - Protects Milo's resources using
+   relationship-based policies
+2. **Organizational Hierarchies** - Supports complex business structures with
+   permission inheritance across organizations and projects
+3. **Dynamic Permission Models** - Automatically builds authorization models as
+   new resource types are registered in Milo
+4. **Real-time Access Control** - Provides webhook-based authorization that
+   integrates seamlessly with Milo's Kubernetes-based APIs
+
+## How It Works
+
+1. **Business Resource Registration**: `ProtectedResource` CRDs define what
+   resources should be protected and what permissions are available (view, edit,
+   delete, manage)
+2. **Authorization Model Sync**: The system automatically builds OpenFGA type
+   definitions based on registered resources
+3. **Role Management**: `Role` CRDs define roles (Sales Rep, Account Manager)
+   with collections of permissions
+4. **Access Binding**: `PolicyBinding` CRDs create relationships between
+   subjects, roles, and target resources
+5. **Runtime Authorization**: Webhook servers evaluate access requests by
+   querying OpenFGA relationship graphs
+6. **Inheritance Support**: Resources inherit permissions through organizational
+   hierarchies (Organization → Project → Customer)
 
 ## 🚀 Quick Start
 
@@ -42,8 +85,13 @@ make test               # Run tests
 ├── config/               # Kubernetes manifests and Kustomize overlays
 │   ├── default/          # Base application configuration
 │   ├── bootstrap/        # Infrastructure (cert-manager, OpenFGA)
+│   ├── authz-webhook/    # Authorization webhook deployment
 │   └── local-dev/        # Development environment
 ├── internal/             # Application logic
+│   ├── controller/       # Kubernetes controllers
+│   ├── webhook/          # Authorization webhook servers
+│   └── openfga/          # OpenFGA integration layer
+├── cmd/                  # CLI entrypoints (manager, webhook)
 ├── test/                 # E2E tests
 └── docs/                 # Detailed documentation
 ```
