@@ -21,6 +21,9 @@ import (
 
 const (
 	groupMembershipFinalizerKey = "iam.miloapis.com/groupmembership"
+
+	ConditionTypeUserRefValid  = "UserRefValid"
+	ConditionTypeGroupRefValid = "GroupRefValid"
 )
 
 // GroupMembershipReconciler reconciles a GroupMembership object
@@ -62,22 +65,79 @@ func (r *GroupMembershipReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, err
 	}
 
+	isUserRefValid := true
+	// Validate UserRef
 	user := &iammiloapiscomv1alpha1.User{}
 	err = r.Get(ctx, client.ObjectKey{
 		Name: groupMembership.Spec.UserRef.Name,
 	}, user)
 	if err != nil {
-		return ctrl.Result{}, err
+		meta.SetStatusCondition(&groupMembership.Status.Conditions, metav1.Condition{
+			Type:               ConditionTypeUserRefValid,
+			Status:             metav1.ConditionFalse,
+			Reason:             ReasonValidationFailed,
+			Message:            fmt.Sprintf("UserRef not found: %v", err),
+			LastTransitionTime: metav1.Now(),
+		})
+		meta.SetStatusCondition(&groupMembership.Status.Conditions, metav1.Condition{
+			Type:               "Ready",
+			Status:             metav1.ConditionFalse,
+			Reason:             "UserRefInvalid",
+			Message:            "User reference is invalid. See UserRefValid condition for details.",
+			LastTransitionTime: metav1.Now(),
+		})
+
+		isUserRefValid = false
+	} else {
+		meta.SetStatusCondition(&groupMembership.Status.Conditions, metav1.Condition{
+			Type:               ConditionTypeUserRefValid,
+			Status:             metav1.ConditionTrue,
+			Reason:             ReasonValidationSuccessful,
+			Message:            "UserRef is valid.",
+			LastTransitionTime: metav1.Now(),
+		})
 	}
 
+	isGroupRefValid := true
+	// Validate GroupRef
 	group := &iammiloapiscomv1alpha1.Group{}
 	err = r.Get(ctx, client.ObjectKey{
 		Name:      groupMembership.Spec.GroupRef.Name,
 		Namespace: groupMembership.Spec.GroupRef.Namespace,
 	}, group)
 	if err != nil {
-		return ctrl.Result{}, err
+		meta.SetStatusCondition(&groupMembership.Status.Conditions, metav1.Condition{
+			Type:               ConditionTypeGroupRefValid,
+			Status:             metav1.ConditionFalse,
+			Reason:             ReasonValidationFailed,
+			Message:            fmt.Sprintf("GroupRef not found: %v", err),
+			LastTransitionTime: metav1.Now(),
+		})
+		meta.SetStatusCondition(&groupMembership.Status.Conditions, metav1.Condition{
+			Type:               "Ready",
+			Status:             metav1.ConditionFalse,
+			Reason:             "GroupRefInvalid",
+			Message:            "Group reference is invalid. See GroupRefValid condition for details.",
+			LastTransitionTime: metav1.Now(),
+		})
+
+		isGroupRefValid = false
+	} else {
+		meta.SetStatusCondition(&groupMembership.Status.Conditions, metav1.Condition{
+			Type:               ConditionTypeGroupRefValid,
+			Status:             metav1.ConditionTrue,
+			Reason:             ReasonValidationSuccessful,
+			Message:            "GroupRef is valid.",
+			LastTransitionTime: metav1.Now(),
+		})
 	}
+
+	if !isUserRefValid || !isGroupRefValid {
+		_ = r.Status().Update(ctx, groupMembership)
+		log.Info("GroupMembership conditions are not valid. Skipping reconciliation.", "userRefValid", isUserRefValid, "groupRefValid", isGroupRefValid)
+		return ctrl.Result{}, nil
+	}
+	log.Info("GroupMembership conditions are valid. Proceeding with reconciliation.", "userRefValid", isUserRefValid, "groupRefValid", isGroupRefValid)
 
 	groupMembershipRequest := openfga.GroupMembershipRequest{
 		GroupUid:  group.ObjectMeta.UID,
@@ -121,10 +181,11 @@ func (r *GroupMembershipReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 	// Update status conditions
 	meta.SetStatusCondition(&groupMembership.Status.Conditions, metav1.Condition{
-		Type:    "Ready",
-		Status:  metav1.ConditionTrue,
-		Reason:  "Reconciled",
-		Message: "Group membership successfully reconciled",
+		Type:               "Ready",
+		Status:             metav1.ConditionTrue,
+		Reason:             "Reconciled",
+		Message:            "Group membership successfully reconciled",
+		LastTransitionTime: metav1.Now(),
 	})
 
 	if err := r.Status().Update(ctx, groupMembership); err != nil {
