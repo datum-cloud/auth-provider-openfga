@@ -14,7 +14,6 @@ import (
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/finalizer"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -35,6 +34,57 @@ type GroupMembershipReconciler struct {
 	Finalizers          finalizer.Finalizers
 	EventRecorder       record.EventRecorder
 	UserGroupReconciler openfga.UserGroupReconciler
+}
+
+// UserGroupFinalizer implements the finalizer.Finalizer interface for GroupMembership cleanup.
+// This is used to remove the group membership tuple from the OpenFGA store when the GroupMembership is deleted.
+type UserGroupFinalizer struct {
+	K8sClient           client.Client
+	UserGroupReconciler *openfga.UserGroupReconciler
+}
+
+func (f *UserGroupFinalizer) Finalize(ctx context.Context, obj client.Object) (finalizer.Result, error) {
+	log := logf.FromContext(ctx)
+	groupMembership, ok := obj.(*iammiloapiscomv1alpha1.GroupMembership)
+	if !ok {
+		return finalizer.Result{}, fmt.Errorf("unexpected object type %T, expected GroupMembership", obj)
+	}
+
+	// Fetch the referenced User and Group to get their UIDs
+	user := &iammiloapiscomv1alpha1.User{}
+	err := f.K8sClient.Get(ctx, client.ObjectKey{
+		Name: groupMembership.Spec.UserRef.Name,
+	}, user)
+	if err != nil {
+		log.Error(err, "Failed to get User for finalization")
+		return finalizer.Result{}, nil // Don't block deletion if user is gone
+	}
+	group := &iammiloapiscomv1alpha1.Group{}
+	err = f.K8sClient.Get(ctx, client.ObjectKey{
+		Name:      groupMembership.Spec.GroupRef.Name,
+		Namespace: groupMembership.Spec.GroupRef.Namespace,
+	}, group)
+	if err != nil {
+		log.Error(err, "Failed to get Group for finalization")
+		return finalizer.Result{}, nil // Don't block deletion if group is gone
+	}
+
+	groupMembershipRequest := openfga.GroupMembershipRequest{
+		GroupUid:  group.ObjectMeta.UID,
+		MemberUid: user.ObjectMeta.UID,
+	}
+
+	log.Info("Removing group membership during finalization", "groupRef", group.ObjectMeta.UID, "userRef", user.ObjectMeta.UID)
+
+	// Remove the group membership tuple from the OpenFGA store
+	err = f.UserGroupReconciler.RemoveMemberFromGroup(ctx, groupMembershipRequest)
+	if err != nil {
+		log.Error(err, "Failed to remove group membership during finalization")
+		return finalizer.Result{}, err
+	}
+
+	log.Info("Successfully finalized GroupMembership (removed from OpenFGA)")
+	return finalizer.Result{}, nil
 }
 
 // +kubebuilder:rbac:groups=iam.miloapis.com,resources=groupmemberships,verbs=get;list;watch;create;update;patch;delete
@@ -63,6 +113,24 @@ func (r *GroupMembershipReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		}
 		log.Error(err, "Failed to get GroupMembership")
 		return ctrl.Result{}, err
+	}
+
+	finalizeResult, err := r.Finalizers.Finalize(ctx, groupMembership)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to run finalizers for GroupMembership: %w", err)
+	}
+
+	if finalizeResult.Updated {
+		log.Info("finalizer updated the group membership object, updating API server")
+		if updateErr := r.Client.Update(ctx, groupMembership); updateErr != nil {
+			return ctrl.Result{}, updateErr
+		}
+		return ctrl.Result{Requeue: true}, nil
+	}
+
+	if groupMembership.GetDeletionTimestamp() != nil {
+		log.Info("GroupMembership is marked for deletion, stopping reconciliation")
+		return ctrl.Result{}, nil
 	}
 
 	isUserRefValid := true
@@ -146,31 +214,6 @@ func (r *GroupMembershipReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 	userGroupReconciler := &r.UserGroupReconciler
 
-	// Check if the resource is being deleted
-	if !groupMembership.DeletionTimestamp.IsZero() {
-		err = userGroupReconciler.RemoveMemberFromGroup(ctx, groupMembershipRequest)
-		if err != nil {
-			log.Error(err, "Failed to remove group membership")
-		}
-		// Remove the finalizer so the resource can be deleted
-		controllerutil.RemoveFinalizer(groupMembership, groupMembershipFinalizerKey)
-		if err := r.Update(ctx, groupMembership); err != nil {
-			return ctrl.Result{}, err
-		}
-
-		log.Info("Successfully removed group membership.")
-		return ctrl.Result{}, nil
-	}
-
-	// Add finalizer if it doesn't exist
-	if !controllerutil.ContainsFinalizer(groupMembership, groupMembershipFinalizerKey) {
-		controllerutil.AddFinalizer(groupMembership, groupMembershipFinalizerKey)
-		if err := r.Update(ctx, groupMembership); err != nil {
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{Requeue: true}, nil
-	}
-
 	// Add the group membership tuple to the OpenFGA store
 	err = userGroupReconciler.AddMemberToGroup(ctx, groupMembershipRequest)
 	if err != nil {
@@ -203,6 +246,14 @@ func (r *GroupMembershipReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		StoreID:   r.StoreID,
 		Client:    r.FgaClient,
 		K8sClient: r.Client,
+	}
+
+	r.Finalizers = finalizer.NewFinalizers()
+	if err := r.Finalizers.Register(groupMembershipFinalizerKey, &UserGroupFinalizer{
+		K8sClient:           r.Client,
+		UserGroupReconciler: &r.UserGroupReconciler,
+	}); err != nil {
+		return fmt.Errorf("failed to register group membership finalizer: %w", err)
 	}
 
 	return ctrl.NewControllerManagedBy(mgr).
