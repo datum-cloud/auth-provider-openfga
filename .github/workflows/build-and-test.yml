@@ -6,13 +6,76 @@ on:
       - main
   pull_request:
 
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: datum-cloud/${{ github.repository }}
+
 jobs:
-  test-e2e:
-    name: End-to-end testing
+  build:
+    name: Build Docker Image
     runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.image-meta.outputs.tags }}
+      digest: ${{ steps.build.outputs.digest }}
+    permissions:
+      contents: read
+      packages: write
     steps:
       - name: Clone the code
         uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: image-meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=pr
+            type=ref,event=branch
+            type=ref,event=branch,suffix=-{{commit_date 'YYYYMMDD-HHmmss'}}
+            type=semver,pattern=v{{version}}
+            type=semver,pattern=v{{major}}.{{minor}}
+            type=semver,pattern=v{{major}}
+            type=sha
+
+      - name: Build and push Docker image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.image-meta.outputs.tags }}
+          labels: ${{ steps.image-meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  test-e2e:
+    name: End-to-end testing
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@v4
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install kind
         run: |
@@ -26,9 +89,17 @@ jobs:
         run: |
           make kind-create
 
-      - name: Build and load Docker image
+      - name: Pull and load Docker image into kind
         run: |
-          make kind-load-image IMG=auth-provider-openfga:test
+          # Extract the image tag that was built in the previous job
+          IMAGE_TAG=$(echo "${{ needs.build.outputs.image }}" | head -n1)
+          echo "Pulling and loading image: $IMAGE_TAG"
+          docker pull $IMAGE_TAG
+          kind load docker-image $IMAGE_TAG --name auth-provider-openfga
+
+          # Tag the image with the expected name for the deployment
+          docker tag $IMAGE_TAG auth-provider-openfga:test
+          kind load docker-image auth-provider-openfga:test --name auth-provider-openfga
 
       - name: Deploy infrastructure via Flux bootstrap
         run: |
@@ -161,6 +232,9 @@ jobs:
           kubectl describe helmrelease openfga -n openfga-system
           echo "=== Events ==="
           kubectl get events --all-namespaces --sort-by='.lastTimestamp'
+          echo "=== Built Image Info ==="
+          echo "Image from build job: ${{ needs.build.outputs.image }}"
+          echo "Image digest: ${{ needs.build.outputs.digest }}"
           echo "=== Logs from failing pods ==="
           for ns in auth-provider-openfga-system openfga-system cert-manager flux-system; do
             echo "--- Namespace: $ns ---"
