@@ -78,8 +78,8 @@ func (r *ResourceOwnerHierarchyReconciler) Reconcile(ctx context.Context, req ct
 
 	gvk, _, err := r.Client.Scheme().ObjectKinds(project)
 	if err != nil || len(gvk) == 0 {
-		logger.Error(err, "failed to get GVK for Project", "projectKey", req.NamespacedName.String())
-		return ctrl.Result{}, fmt.Errorf("failed to get GVK for project %s: %w", req.NamespacedName, err)
+		logger.Error(err, "failed to get GVK for Project", "projectKey", req.String())
+		return ctrl.Result{}, fmt.Errorf("failed to get GVK for project %s: %w", req, err)
 	}
 
 	logger = logger.WithValues("project", project.Name, "namespace", project.Namespace, "gvk", gvk[0].String())
@@ -390,7 +390,7 @@ func (f *ResourceOwnerHierarchyFinalizerLogic) Finalize(ctx context.Context, obj
 		return finalizer.Result{}, err
 	}
 
-	var tuplesToDelete []*openfgav1.TupleKeyWithoutCondition
+	tuplesToDelete := make([]*openfgav1.TupleKeyWithoutCondition, 0, len(existingParentTuples))
 	for _, tk := range existingParentTuples {
 		tuplesToDelete = append(tuplesToDelete, &openfgav1.TupleKeyWithoutCondition{
 			User:     tk.User,
@@ -460,10 +460,10 @@ func (r *ResourceOwnerHierarchyReconciler) SetupWithManager(mgr ctrl.Manager) er
 			return true
 		},
 		UpdateFunc: func(e event.UpdateEvent) bool {
-			objOld, okOld := e.ObjectOld.(client.Object)
-			objNew, okNew := e.ObjectNew.(client.Object)
-			if !okOld || !okNew {
-				log.Log.Error(nil, "Predicate: UpdateEvent with non-client.Object types")
+			objOld := e.ObjectOld
+			objNew := e.ObjectNew
+			if objOld == nil || objNew == nil {
+				log.Log.Error(nil, "Predicate: UpdateEvent with nil objects")
 				return false
 			}
 			if objNew.GetGeneration() != objOld.GetGeneration() ||
@@ -477,9 +477,9 @@ func (r *ResourceOwnerHierarchyReconciler) SetupWithManager(mgr ctrl.Manager) er
 			return false
 		},
 		DeleteFunc: func(e event.DeleteEvent) bool {
-			obj, ok := e.Object.(client.Object)
-			if !ok {
-				log.Log.Error(nil, "Predicate: DeleteEvent with non-client.Object type")
+			obj := e.Object
+			if obj == nil {
+				log.Log.Error(nil, "Predicate: DeleteEvent with nil object")
 				return false
 			}
 			if controllerutil.ContainsFinalizer(obj, resourceOwnerHierarchyFinalizer) || e.DeleteStateUnknown {

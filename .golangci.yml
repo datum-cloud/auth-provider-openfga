@@ -19,12 +19,12 @@ linters:
     - revive
     - staticcheck
     - unconvert
-    - unparam
     - unused
   settings:
     revive:
       rules:
         - name: comment-spacings
+          disabled: true
   exclusions:
     generated: lax
     rules:

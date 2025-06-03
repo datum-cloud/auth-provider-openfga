@@ -57,8 +57,6 @@ func (r *RoleReconciler) getAllPermissions(ctx context.Context, role *iamdatumap
 }
 
 func (r *RoleReconciler) ReconcileRole(ctx context.Context, role *iamdatumapiscomv1alpha1.Role) error {
-	var expectedTuples []*openfgav1.TupleKey
-
 	// Use Role UID for the object identifier
 	roleObjectIdentifier := "iam.miloapis.com/InternalRole:" + string(role.UID)
 
@@ -74,6 +72,7 @@ func (r *RoleReconciler) ReconcileRole(ctx context.Context, role *iamdatumapisco
 		return fmt.Errorf("failed to collect permissions: %w", err)
 	}
 
+	expectedTuples := make([]*openfgav1.TupleKey, 0, len(allPermissions))
 	for _, permission := range allPermissions {
 		expectedTuples = append(
 			expectedTuples,

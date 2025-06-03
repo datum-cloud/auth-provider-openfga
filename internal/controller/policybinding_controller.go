@@ -114,7 +114,7 @@ func (r *PolicyBindingReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	if finalizeResult.Updated {
 		log.Info("finalizer updated the policy binding object, updating API server")
-		if updateErr := r.Client.Update(ctx, policyBinding); updateErr != nil {
+		if updateErr := r.Update(ctx, policyBinding); updateErr != nil {
 			return ctrl.Result{}, updateErr
 		}
 		return ctrl.Result{Requeue: true}, nil
@@ -126,9 +126,9 @@ func (r *PolicyBindingReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	// Validate the target reference in the policy binding is valid and exists in the cluster.
-	isValid, result, err := r.reconcileTargetRefValidation(ctx, policyBinding, currentGeneration)
+	isValid, err := r.reconcileTargetRefValidation(ctx, policyBinding, currentGeneration)
 	if err != nil {
-		return result, fmt.Errorf("failed to validate target reference: %w", err)
+		return ctrl.Result{}, fmt.Errorf("failed to validate target reference: %w", err)
 	}
 
 	if !isValid {
@@ -144,17 +144,17 @@ func (r *PolicyBindingReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		})
 		// Attempt to update status with the Ready=False condition.
 		if err := r.updatePolicyBindingStatus(ctx, policyBinding, currentGeneration); err != nil {
-			return result, fmt.Errorf("failed to update PolicyBinding status after TargetRef validation failure: %w", err)
+			return ctrl.Result{}, fmt.Errorf("failed to update PolicyBinding status after TargetRef validation failure: %w", err)
 		}
 		// TargetRef validation failed. Stop reconciliation. Rely on the policy binding being re-reconciled when the target
 		// resource is created.
-		return result, nil
+		return ctrl.Result{}, nil
 	}
 
 	// Validate the subjects in the policy binding are valid and exist in the cluster.
-	isValid, result, err = r.reconcileSubjectValidation(ctx, policyBinding, currentGeneration)
+	isValid, err = r.reconcileSubjectValidation(ctx, policyBinding, currentGeneration)
 	if err != nil {
-		return result, fmt.Errorf("failed to validate subjects: %w", err)
+		return ctrl.Result{}, fmt.Errorf("failed to validate subjects: %w", err)
 	}
 	if !isValid {
 		// Subject validation failed cleanly (e.g., a subject not found, UID mismatch). reconcileSubjectValidation has set
@@ -168,11 +168,11 @@ func (r *PolicyBindingReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		})
 		// Attempt to update status with the Ready=False condition.
 		if err := r.updatePolicyBindingStatus(ctx, policyBinding, currentGeneration); err != nil {
-			return result, fmt.Errorf("failed to update PolicyBinding status after Subject validation failure: %w", err)
+			return ctrl.Result{}, fmt.Errorf("failed to update PolicyBinding status after subject validation failure: %w", err)
 		}
 		// Subject validation failed. Stop reconciliation. Rely on the policy binding being re-reconciled when the subjects
 		// are created.
-		return result, nil
+		return ctrl.Result{}, nil
 	}
 
 	// At this juncture, both TargetRef and all Subjects have been successfully validated. Their respective conditions
@@ -184,9 +184,9 @@ func (r *PolicyBindingReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	// Reconcile with OpenFGA. This creates/updates/deletes tuples in OpenFGA based on the PolicyBinding. This step also
 	// implicitly validates the RoleRef by attempting to use the role.
-	result, err = r.reconcileOpenFGAPolicy(ctx, policyBinding, currentGeneration)
+	ctrl_result, err := r.reconcileOpenFGAPolicy(ctx, policyBinding, currentGeneration)
 	if err != nil {
-		return result, fmt.Errorf("failed to reconcile OpenFGA policy: %w", err)
+		return ctrl_result, fmt.Errorf("failed to reconcile OpenFGA policy: %w", err)
 	}
 
 	// All steps were successful: finalizer ensured, target validated, subjects validated, OpenFGA reconciled.
@@ -223,17 +223,17 @@ func (r *PolicyBindingReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 // If any of these validation steps fail, an appropriate status condition (ConditionTypeTargetValid=False) is set on the
 // PolicyBinding, and the function returns `isValid=false`. If an API error occurs that suggests a requeue (e.g.,
 // network issue), an error is returned to trigger that.
-func (r *PolicyBindingReconciler) reconcileTargetRefValidation(ctx context.Context, policyBinding *iamdatumapiscomv1alpha1.PolicyBinding, currentGeneration int64) (isValid bool, result ctrl.Result, err error) {
+func (r *PolicyBindingReconciler) reconcileTargetRefValidation(ctx context.Context, policyBinding *iamdatumapiscomv1alpha1.PolicyBinding, currentGeneration int64) (isValid bool, err error) {
 	log := logf.FromContext(ctx)
 
 	// Fetch all ProtectedResource CRs. These define the resource types managed by IAM.
 	var protectedResourceList iamdatumapiscomv1alpha1.ProtectedResourceList
 	if err := r.List(ctx, &protectedResourceList); err != nil {
-		return false, ctrl.Result{}, fmt.Errorf("failed to list ProtectedResources: %w", err)
+		return false, fmt.Errorf("failed to list ProtectedResources: %w", err)
 	}
 
 	// Validate if the target type specified in the PolicyBinding is registered by any ProtectedResource.
-	isKnownType, typeValidationReason := r.validatePolicyBindingTargetRefType(ctx, policyBinding.Spec, protectedResourceList.Items)
+	isKnownType, typeValidationReason := r.validatePolicyBindingTargetRefType(policyBinding.Spec, protectedResourceList.Items)
 	if !isKnownType {
 		meta.SetStatusCondition(&policyBinding.Status.Conditions, metav1.Condition{
 			Type:   ConditionTypeTargetValid,
@@ -249,9 +249,9 @@ func (r *PolicyBindingReconciler) reconcileTargetRefValidation(ctx context.Conte
 		})
 
 		if err := r.updatePolicyBindingStatus(ctx, policyBinding, currentGeneration); err != nil {
-			return false, ctrl.Result{}, fmt.Errorf("failed to update PolicyBinding status after type validation failure: %w", err)
+			return false, fmt.Errorf("failed to update PolicyBinding status after type validation failure: %w", err)
 		}
-		return false, ctrl.Result{}, nil // No requeue, type definition needs to be fixed.
+		return false, nil // No requeue, type definition needs to be fixed.
 	}
 
 	// Get the actual target resource instance.
@@ -274,7 +274,7 @@ func (r *PolicyBindingReconciler) reconcileTargetRefValidation(ctx context.Conte
 			errMsg = missingNsErr.Error()
 			reason = "TargetNamespaceMissing"
 		} else {
-			return false, ctrl.Result{}, fmt.Errorf("failed to validate target %s/%s: %w", targetSpec.Kind, targetSpec.Name, err)
+			return false, fmt.Errorf("failed to validate target %s/%s: %w", targetSpec.Kind, targetSpec.Name, err)
 		}
 
 		log.Info(errMsg, "policyBindingName", policyBinding.Name)
@@ -287,14 +287,14 @@ func (r *PolicyBindingReconciler) reconcileTargetRefValidation(ctx context.Conte
 		})
 
 		if err := r.updatePolicyBindingStatus(ctx, policyBinding, currentGeneration); err != nil {
-			return false, ctrl.Result{}, fmt.Errorf("failed to update PolicyBinding status after target validation failure: %w", err)
+			return false, fmt.Errorf("failed to update PolicyBinding status after target validation failure: %w", err)
 		}
 		if !stopReconciliation {
 			// Requeue if the error was deemed transient or requires a retry.
-			return false, ctrl.Result{}, fmt.Errorf("failed to validate target %s/%s: %w", targetSpec.Kind, targetSpec.Name, err)
+			return false, fmt.Errorf("failed to validate target %s/%s: %w", targetSpec.Kind, targetSpec.Name, err)
 		}
 		// For non-requeueable validation errors (e.g., NotFound, KindNotRecognized), stop reconciliation.
-		return false, ctrl.Result{}, nil
+		return false, nil
 	}
 
 	// At this point, the target resource was successfully fetched. The `mapping` variable contains its RESTMapping, which
@@ -316,10 +316,10 @@ func (r *PolicyBindingReconciler) reconcileTargetRefValidation(ctx context.Conte
 			ObservedGeneration: currentGeneration,
 		})
 		if err := r.updatePolicyBindingStatus(ctx, policyBinding, currentGeneration); err != nil {
-			return false, ctrl.Result{}, fmt.Errorf("failed to update PolicyBinding status after target UID mismatch: %w", err)
+			return false, fmt.Errorf("failed to update PolicyBinding status after target UID mismatch: %w", err)
 		}
 		// UID mismatch is a definitive validation failure. Stop reconciliation.
-		return false, ctrl.Result{}, nil
+		return false, nil
 	}
 
 	// All TargetRef validations (type registration, instance existence, UID match) passed.
@@ -333,7 +333,7 @@ func (r *PolicyBindingReconciler) reconcileTargetRefValidation(ctx context.Conte
 
 	// The status update to persist ConditionTypeTargetValid=True will be handled by the main Reconcile loop or subsequent
 	// helper functions before critical actions like OpenFGA reconciliation.
-	return true, ctrl.Result{}, nil
+	return true, nil
 }
 
 // reconcileSubjectValidation orchestrates the validation of all subjects (users/groups) listed in the PolicyBinding. It
@@ -351,12 +351,12 @@ func (r *PolicyBindingReconciler) reconcileTargetRefValidation(ctx context.Conte
 //
 // The function returns `isValid=true` if all subjects are valid, and `isValid=false` otherwise. It also returns a
 // `ctrl.Result` and `error` to guide the main Reconcile loop (e.g., to requeue or stop).
-func (r *PolicyBindingReconciler) reconcileSubjectValidation(ctx context.Context, policyBinding *iamdatumapiscomv1alpha1.PolicyBinding, currentGeneration int64) (isValid bool, result ctrl.Result, err error) {
+func (r *PolicyBindingReconciler) reconcileSubjectValidation(ctx context.Context, policyBinding *iamdatumapiscomv1alpha1.PolicyBinding, currentGeneration int64) (isValid bool, err error) {
 	log := logf.FromContext(ctx)
 
 	subjectsAreValid, subjectValidationMessages, err := r.validatePolicyBindingSubjects(ctx, policyBinding)
 	if err != nil {
-		return false, ctrl.Result{}, fmt.Errorf("failed to validate PolicyBinding subjects: %w", err)
+		return false, fmt.Errorf("failed to validate PolicyBinding subjects: %w", err)
 	}
 
 	if !subjectsAreValid {
@@ -365,19 +365,19 @@ func (r *PolicyBindingReconciler) reconcileSubjectValidation(ctx context.Context
 		// One or more subjects are invalid (e.g., not found, UID missing), but no error occurred that requires a requeue.
 		// Set the SubjectValid condition to False. The main Reconcile loop will handle setting Ready=False.
 		meta.SetStatusCondition(&policyBinding.Status.Conditions, metav1.Condition{
-			Type:               ConditionTypeSubjectValid,
+			Type:               "Ready",
 			Status:             metav1.ConditionFalse,
-			Reason:             ReasonValidationFailed,
+			Reason:             "SubjectValidationFailed",
 			Message:            msg,
 			LastTransitionTime: metav1.Now(),
 		})
 		// The main Reconcile loop will handle the overall Ready condition. Update status now to reflect the
 		// SubjectValid=False state due to validation failures.
 		if err := r.updatePolicyBindingStatus(ctx, policyBinding, currentGeneration); err != nil {
-			return false, ctrl.Result{}, fmt.Errorf("failed to update PolicyBinding status after subject validation failure: %w", err)
+			return false, fmt.Errorf("failed to update PolicyBinding status after subject validation failure: %w", err)
 		}
 		// Validation failed cleanly; stop reconciliation.
-		return false, ctrl.Result{}, nil
+		return false, nil
 	}
 
 	// All subjects were found, their kinds recognized, and UIDs were provided as required.
@@ -388,7 +388,7 @@ func (r *PolicyBindingReconciler) reconcileSubjectValidation(ctx context.Context
 		Message:            "All subjects validated successfully.",
 		LastTransitionTime: metav1.Now(),
 	})
-	return true, ctrl.Result{}, nil
+	return true, nil
 }
 
 // reconcileOpenFGAPolicy is responsible for synchronizing the state defined in the PolicyBinding custom resource with
@@ -517,9 +517,8 @@ func (r *PolicyBindingReconciler) getUnstructuredResourceAndMapping(
 // declared by any of the provided IAM Services. This is the part of TargetRef validation that ensures the type is known
 // to the IAM system.
 func (r *PolicyBindingReconciler) validatePolicyBindingTargetRefType(
-	ctx context.Context, // Added context for potential logging
 	bindingSpec iamdatumapiscomv1alpha1.PolicyBindingSpec,
-	protectedResources []iamdatumapiscomv1alpha1.ProtectedResource, // Changed from allServices
+	protectedResources []iamdatumapiscomv1alpha1.ProtectedResource,
 ) (isValid bool, reason string) {
 	targetAPIGroup := bindingSpec.TargetRef.APIGroup
 	targetKind := bindingSpec.TargetRef.Kind

@@ -47,7 +47,7 @@ func (f *ProtectedResourceFinalizer) Finalize(ctx context.Context, obj client.Ob
 	log.Info("Finalizing ProtectedResource, triggering OpenFGA model rebuild", "protectedResourceName", pr.Name)
 
 	var currentPRs iamdatumapiscomv1alpha1.ProtectedResourceList
-	if err := f.Client.List(ctx, &currentPRs); err != nil {
+	if err := f.List(ctx, &currentPRs); err != nil {
 		log.Error(err, "Failed to list ProtectedResources during finalization")
 		return finalizer.Result{}, fmt.Errorf("failed to list ProtectedResources during finalization: %w", err)
 	}
@@ -113,7 +113,7 @@ func (r *AuthorizationModelReconciler) Reconcile(ctx context.Context, req ctrl.R
 
 	if finalizeResult.Updated {
 		log.Info("finalizer updated the protected resource, updating API server")
-		if updateErr := r.Client.Update(ctx, triggeringPR); updateErr != nil {
+		if updateErr := r.Update(ctx, triggeringPR); updateErr != nil {
 			return ctrl.Result{}, updateErr
 		}
 	}

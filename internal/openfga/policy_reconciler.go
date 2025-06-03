@@ -62,7 +62,7 @@ func (r *PolicyReconciler) ReconcilePolicy(ctx context.Context, binding iamdatum
 		&openfgav1.TupleKey{
 			User:     policyBindingObjectIdentifier, // Use PolicyBinding UID based object
 			Relation: "iam.miloapis.com/RoleBinding",
-			Object:   fmt.Sprintf("%s/%s:%s", binding.Spec.TargetRef.APIGroup, binding.Spec.TargetRef.Kind, string(binding.Spec.TargetRef.UID)), // Use TargetRef UID
+			Object:   fmt.Sprintf("%s/%s:%s", binding.Spec.TargetRef.APIGroup, binding.Spec.TargetRef.Kind, binding.Spec.TargetRef.UID), // Use TargetRef UID
 		},
 		// Associates the role binding to the role that should be bound
 		// to the resource.
@@ -75,7 +75,7 @@ func (r *PolicyReconciler) ReconcilePolicy(ctx context.Context, binding iamdatum
 
 	for _, subject := range binding.Spec.Subjects {
 		tuples = append(tuples, &openfgav1.TupleKey{
-			User:     fmt.Sprintf("iam.miloapis.com/InternalUser:%s", string(subject.UID)), // Represent all subjects as InternalUser with their original UID
+			User:     fmt.Sprintf("iam.miloapis.com/InternalUser:%s", subject.UID), // Represent all subjects as InternalUser with their original UID
 			Relation: "iam.miloapis.com/InternalUser",
 			Object:   policyBindingObjectIdentifier, // Use PolicyBinding UID based object
 		})
@@ -167,8 +167,8 @@ func (r *PolicyReconciler) getExistingPolicyTuples(ctx context.Context, policy i
 	// 1. Get tuples where the binding object is the User (linking binding to target resource)
 	tuplesLinkingBindingToResource, err := getTupleKeys(ctx, r.StoreID, r.Client, &openfgav1.ReadRequestTupleKey{
 		User:     policyBindingObjectIdentifier,
-		Relation: "iam.miloapis.com/RoleBinding",                                                                                         // Relation used when binding is the user
-		Object:   fmt.Sprintf("%s/%s:%s", policy.Spec.TargetRef.APIGroup, policy.Spec.TargetRef.Kind, string(policy.Spec.TargetRef.UID)), // Use TargetRef UID
+		Relation: "iam.miloapis.com/RoleBinding",                                                                                 // Relation used when binding is the user
+		Object:   fmt.Sprintf("%s/%s:%s", policy.Spec.TargetRef.APIGroup, policy.Spec.TargetRef.Kind, policy.Spec.TargetRef.UID), // Use TargetRef UID
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to get tuples linking binding to resource: %w", err)
@@ -194,7 +194,7 @@ func (r *PolicyReconciler) getExistingPolicyTuples(ctx context.Context, policy i
 	// Fetch subject linkage tuples
 	for _, subject := range policy.Spec.Subjects {
 		subjectLinkageTuple, err := getTupleKeys(ctx, r.StoreID, r.Client, &openfgav1.ReadRequestTupleKey{
-			User:     fmt.Sprintf("iam.miloapis.com/InternalUser:%s", string(subject.UID)),
+			User:     fmt.Sprintf("iam.miloapis.com/InternalUser:%s", subject.UID),
 			Relation: "iam.miloapis.com/InternalUser",
 			Object:   policyBindingObjectIdentifier,
 		})
