@@ -26,11 +26,12 @@ const (
 // GroupMembershipReconciler reconciles a GroupMembership object
 type GroupMembershipReconciler struct {
 	client.Client
-	Scheme        *runtime.Scheme
-	FgaClient     openfgav1.OpenFGAServiceClient
-	StoreID       string
-	Finalizers    finalizer.Finalizers
-	EventRecorder record.EventRecorder
+	Scheme              *runtime.Scheme
+	FgaClient           openfgav1.OpenFGAServiceClient
+	StoreID             string
+	Finalizers          finalizer.Finalizers
+	EventRecorder       record.EventRecorder
+	UserGroupReconciler openfga.UserGroupReconciler
 }
 
 // +kubebuilder:rbac:groups=iam.miloapis.com,resources=groupmemberships,verbs=get;list;watch;create;update;patch;delete
@@ -83,11 +84,7 @@ func (r *GroupMembershipReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		MemberUid: user.ObjectMeta.UID,
 	}
 
-	userGroupReconciler := openfga.UserGroupReconciler{
-		StoreID:   r.StoreID,
-		Client:    r.FgaClient,
-		K8sClient: r.Client,
-	}
+	userGroupReconciler := &r.UserGroupReconciler
 
 	// Check if the resource is being deleted
 	if !groupMembership.DeletionTimestamp.IsZero() {
@@ -141,6 +138,12 @@ func (r *GroupMembershipReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *GroupMembershipReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	r.UserGroupReconciler = openfga.UserGroupReconciler{
+		StoreID:   r.StoreID,
+		Client:    r.FgaClient,
+		K8sClient: r.Client,
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&iammiloapiscomv1alpha1.GroupMembership{}).
 		Named("groupmembership").
