@@ -2,6 +2,8 @@ name: Build and Test
 
 on:
   push:
+    branches:
+      - main
   pull_request:
 
 jobs:
@@ -57,7 +59,7 @@ jobs:
           spec:
             interval: 30s
             ref:
-              commit: ${GITHUB_SHA}
+              commit: ${{ github.event.pull_request.head.sha || github.sha }}
             url: https://github.com/${GITHUB_REPOSITORY}.git
             secretRef:
               name: github-token
