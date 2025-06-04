@@ -33,7 +33,7 @@ type GroupMembershipReconciler struct {
 	StoreID             string
 	Finalizers          finalizer.Finalizers
 	EventRecorder       record.EventRecorder
-	UserGroupReconciler openfga.UserGroupReconciler
+	UserGroupReconciler *openfga.UserGroupReconciler
 }
 
 // UserGroupFinalizer implements the finalizer.Finalizer interface for GroupMembership cleanup.
@@ -220,7 +220,7 @@ func (r *GroupMembershipReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		MemberUid: user.ObjectMeta.UID,
 	}
 
-	userGroupReconciler := &r.UserGroupReconciler
+	userGroupReconciler := r.UserGroupReconciler
 
 	// Add the group membership tuple to the OpenFGA store
 	err = userGroupReconciler.AddMemberToGroup(ctx, groupMembershipRequest)
@@ -250,7 +250,7 @@ func (r *GroupMembershipReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *GroupMembershipReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	r.UserGroupReconciler = openfga.UserGroupReconciler{
+	r.UserGroupReconciler = &openfga.UserGroupReconciler{
 		StoreID:   r.StoreID,
 		Client:    r.FgaClient,
 		K8sClient: r.Client,
@@ -259,7 +259,7 @@ func (r *GroupMembershipReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	r.Finalizers = finalizer.NewFinalizers()
 	if err := r.Finalizers.Register(groupMembershipFinalizerKey, &UserGroupFinalizer{
 		K8sClient:           r.Client,
-		UserGroupReconciler: &r.UserGroupReconciler,
+		UserGroupReconciler: r.UserGroupReconciler,
 	}); err != nil {
 		return fmt.Errorf("failed to register group membership finalizer: %w", err)
 	}
