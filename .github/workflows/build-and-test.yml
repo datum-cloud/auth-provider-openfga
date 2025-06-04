@@ -1,0 +1,247 @@
+name: Build and Test
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build:
+    name: Build Docker Image
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.image-meta.outputs.tags }}
+      digest: ${{ steps.build.outputs.digest }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: image-meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=pr
+            type=ref,event=branch
+            type=ref,event=branch,suffix=-{{commit_date 'YYYYMMDD-HHmmss'}}
+            type=semver,pattern=v{{version}}
+            type=semver,pattern=v{{major}}.{{minor}}
+            type=semver,pattern=v{{major}}
+            type=sha
+
+      - name: Build and push Docker image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.image-meta.outputs.tags }}
+          labels: ${{ steps.image-meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  test-e2e:
+    name: End-to-end testing
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@v4
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install kind
+        run: |
+          # For consistency with Makefile, we could check if kind is already available
+          # but in CI it's clean every time, so we install it
+          curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+
+      - name: Create kind cluster and install Flux
+        run: |
+          make kind-create
+
+      - name: Pull and load Docker image into kind
+        run: |
+          # Extract the image tag that was built in the previous job
+          IMAGE_TAG=$(echo "${{ needs.build.outputs.image }}" | head -n1)
+          echo "Pulling and loading image: $IMAGE_TAG"
+          docker pull $IMAGE_TAG
+          kind load docker-image $IMAGE_TAG --name auth-provider-openfga
+
+          # Tag the image with the expected name for the deployment
+          docker tag $IMAGE_TAG auth-provider-openfga:test
+          kind load docker-image auth-provider-openfga:test --name auth-provider-openfga
+
+      - name: Deploy infrastructure via Flux bootstrap
+        run: |
+          echo "📦 Deploying infrastructure (cert-manager, OpenFGA) via Flux..."
+          make kustomize
+          kubectl apply --server-side --wait=true -f <(bin/kustomize build config/bootstrap)
+          echo "⏳ Waiting for infrastructure HelmReleases to be ready..."
+          kubectl wait --for=condition=Ready helmrelease/cert-manager -n cert-manager --timeout=240s
+          kubectl wait --for=condition=Ready helmrelease/cert-manager-csi-driver -n cert-manager --timeout=240s
+          kubectl wait --for=condition=Ready helmrelease/openfga -n openfga-system --timeout=240s
+          echo "✅ Infrastructure deployed successfully"
+
+      - name: Create GitHub token secret for FluxCD
+        run: |
+          kubectl create secret generic github-token \
+            --from-literal=username=git \
+            --from-literal=password=${{ secrets.GITHUB_TOKEN }} \
+            --namespace=flux-system
+
+      - name: Create FluxCD GitRepository
+        run: |
+          cat <<EOF | kubectl apply -f -
+          apiVersion: source.toolkit.fluxcd.io/v1
+          kind: GitRepository
+          metadata:
+            name: auth-provider-openfga-source
+            namespace: flux-system
+          spec:
+            interval: 30s
+            ref:
+              commit: ${{ github.event.pull_request.head.sha || github.sha }}
+            url: https://github.com/${GITHUB_REPOSITORY}.git
+            secretRef:
+              name: github-token
+          EOF
+
+          # Wait for GitRepository to be ready
+          kubectl wait --for=condition=Ready gitrepository/auth-provider-openfga-source -n flux-system --timeout=180s
+
+      - name: Create FluxCD Kustomization for deployment
+        run: |
+          cat <<EOF | kubectl apply -f -
+          apiVersion: kustomize.toolkit.fluxcd.io/v1
+          kind: Kustomization
+          metadata:
+            name: auth-provider-openfga
+            namespace: flux-system
+          spec:
+            interval: 1m
+            path: "./config/test-e2e"
+            prune: true
+            sourceRef:
+              kind: GitRepository
+              name: auth-provider-openfga-source
+            timeout: 15m
+            wait: true
+            images:
+              - name: auth-provider-openfga
+                newName: auth-provider-openfga
+                newTag: test
+            healthChecks:
+              # Cert-manager components (already deployed via bootstrap)
+              - apiVersion: apps/v1
+                kind: Deployment
+                name: cert-manager
+                namespace: cert-manager
+              - apiVersion: apps/v1
+                kind: Deployment
+                name: cert-manager-webhook
+                namespace: cert-manager
+              - apiVersion: apps/v1
+                kind: Deployment
+                name: cert-manager-cainjector
+                namespace: cert-manager
+              # Certificates and ClusterIssuers
+              - apiVersion: cert-manager.io/v1
+                kind: Certificate
+                name: auth-provider-openfga-auth-provider-openfga-ca-cert
+                namespace: cert-manager
+              - apiVersion: cert-manager.io/v1
+                kind: ClusterIssuer
+                name: auth-provider-openfga-selfsigned-cluster-issuer
+              - apiVersion: cert-manager.io/v1
+                kind: ClusterIssuer
+                name: auth-provider-openfga-auth-provider-openfga-ca-cluster-issuer
+              # Application components
+              - apiVersion: apps/v1
+                kind: Deployment
+                name: auth-provider-openfga-controller-manager
+                namespace: auth-provider-openfga-system
+              - apiVersion: apps/v1
+                kind: Deployment
+                name: auth-provider-openfga-authz-webhook
+                namespace: auth-provider-openfga-system
+              # OpenFGA (already deployed via bootstrap)
+              - apiVersion: apps/v1
+                kind: Deployment
+                name: openfga
+                namespace: openfga-system
+          EOF
+
+      - name: Wait for FluxCD Kustomization to deploy and verify all components
+        run: |
+          echo "Waiting for FluxCD Kustomization to be ready (this includes all health checks)..."
+          kubectl wait --for=condition=Ready kustomization/auth-provider-openfga -n flux-system --timeout=600s
+          echo "All components are ready and healthy via FluxCD health checks!"
+
+      - name: Install chainsaw and run tests
+        run: |
+          make chainsaw
+          echo "Running chainsaw tests against the deployed system..."
+          bin/chainsaw test test/
+
+      - name: Debug on failure
+        if: failure()
+        run: |
+          echo "=== Cluster Information ==="
+          kubectl cluster-info
+          echo "=== All Pods ==="
+          kubectl get pods --all-namespaces
+          echo "=== FluxCD Status ==="
+          bin/flux get all
+          echo "=== Kustomization Status ==="
+          kubectl describe kustomization auth-provider-openfga -n flux-system
+          echo "=== GitRepository Status ==="
+          kubectl describe gitrepository auth-provider-openfga-source -n flux-system
+          echo "=== HelmRelease Status ==="
+          kubectl describe helmrelease cert-manager -n cert-manager
+          kubectl describe helmrelease cert-manager-csi-driver -n cert-manager
+          kubectl describe helmrelease openfga -n openfga-system
+          echo "=== Events ==="
+          kubectl get events --all-namespaces --sort-by='.lastTimestamp'
+          echo "=== Built Image Info ==="
+          echo "Image from build job: ${{ needs.build.outputs.image }}"
+          echo "Image digest: ${{ needs.build.outputs.digest }}"
+          echo "=== Logs from failing pods ==="
+          for ns in auth-provider-openfga-system openfga-system cert-manager flux-system; do
+            echo "--- Namespace: $ns ---"
+            kubectl get pods -n $ns --field-selector=status.phase!=Running | tail -n +2 | while read pod rest; do
+              if [ -n "$pod" ]; then
+                echo "Logs for $pod in $ns:"
+                kubectl logs $pod -n $ns --tail=50
+              fi
+            done
+          done

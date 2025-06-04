@@ -4,7 +4,6 @@ import (
 	"crypto/tls"
 	"fmt"
 	"strings"
-	"time"
 
 	openfgav1 "github.com/openfga/api/proto/openfga/v1"
 	"github.com/spf13/cobra"
@@ -25,11 +24,7 @@ func createManagerCommand() *cobra.Command {
 	var probeAddr string
 	var openfgaAPIURL string
 	var openfgaStoreID string
-	var openfgaAPIToken string
 	var openfgaScheme string
-	var openfgaGRPCMaxRetries int
-	var openfgaGRPCBackoff time.Duration
-	var openfgaGRPCBackoffMaxDelay time.Duration
 
 	cmd := &cobra.Command{
 		Use:   "manager",
@@ -42,11 +37,7 @@ func createManagerCommand() *cobra.Command {
 				probeAddr,
 				openfgaAPIURL,
 				openfgaStoreID,
-				openfgaAPIToken,
 				openfgaScheme,
-				openfgaGRPCMaxRetries,
-				openfgaGRPCBackoff,
-				openfgaGRPCBackoffMaxDelay,
 			)
 		},
 	}
@@ -56,17 +47,18 @@ func createManagerCommand() *cobra.Command {
 	cmd.Flags().BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager. "+
 			"Ensuring that only one instance of the controller manager runs.")
-	cmd.Flags().StringVar(&openfgaAPIURL, "openfga-api-url", "", "OpenFGA API URL (e.g. localhost:8080 or api.us1.fga.dev)")
+	cmd.Flags().StringVar(&openfgaAPIURL, "openfga-api-url", "",
+		"OpenFGA API URL (e.g. localhost:8080 or api.us1.fga.dev)")
 	cmd.Flags().StringVar(&openfgaStoreID, "openfga-store-id", "", "OpenFGA Store ID")
-	cmd.Flags().StringVar(&openfgaAPIToken, "openfga-api-token", "", "OpenFGA API Token (optional)")
 	cmd.Flags().StringVar(&openfgaScheme, "openfga-scheme", "http", "OpenFGA Scheme (http or https)")
-	cmd.Flags().IntVar(&openfgaGRPCMaxRetries, "openfga-grpc-max-retries", 5, "Maximum number of retries for gRPC calls to OpenFGA")
-	cmd.Flags().DurationVar(&openfgaGRPCBackoff, "openfga-grpc-backoff", 1*time.Second, "Initial backoff duration for gRPC retries")
-	cmd.Flags().DurationVar(&openfgaGRPCBackoffMaxDelay, "openfga-grpc-backoff-max-delay", 10*time.Second, "Maximum backoff duration for gRPC retries")
 
 	// Mark required flags
-	cmd.MarkFlagRequired("openfga-api-url")
-	cmd.MarkFlagRequired("openfga-store-id")
+	if err := cmd.MarkFlagRequired("openfga-api-url"); err != nil {
+		panic(fmt.Sprintf("failed to mark openfga-api-url as required: %v", err))
+	}
+	if err := cmd.MarkFlagRequired("openfga-store-id"); err != nil {
+		panic(fmt.Sprintf("failed to mark openfga-store-id as required: %v", err))
+	}
 
 	return cmd
 }
@@ -77,11 +69,7 @@ func runManager(
 	probeAddr string,
 	openfgaAPIURL string,
 	openfgaStoreID string,
-	openfgaAPIToken string,
 	openfgaScheme string,
-	openfgaGRPCMaxRetries int,
-	openfgaGRPCBackoff time.Duration,
-	openfgaGRPCBackoffMaxDelay time.Duration,
 ) error {
 	opts := zap.Options{
 		Development: true,
@@ -110,7 +98,11 @@ func runManager(
 	if err != nil {
 		return fmt.Errorf("unable to create gRPC connection to OpenFGA: %w", err)
 	}
-	defer conn.Close()
+	defer func() {
+		if closeErr := conn.Close(); closeErr != nil {
+			ctrl.Log.Error(closeErr, "failed to close gRPC connection")
+		}
+	}()
 
 	fgaClient := openfgav1.NewOpenFGAServiceClient(conn)
 

@@ -7,9 +7,9 @@ import (
 	"slices"
 
 	openfgav1 "github.com/openfga/api/proto/openfga/v1"
+	"go.miloapis.com/auth-provider-openfga/internal/openfga"
 	iamv1alpha1 "go.miloapis.com/milo/pkg/apis/iam/v1alpha1"
 	resourcemanagerv1alpha1 "go.miloapis.com/milo/pkg/apis/resourcemanager/v1alpha1"
-	"go.miloapis.com/auth-provider-openfga/internal/openfga"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apiserver/pkg/authorization/authorizer"
 	"sigs.k8s.io/controller-runtime/pkg/client"

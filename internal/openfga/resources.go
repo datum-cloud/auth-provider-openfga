@@ -51,22 +51,21 @@ func getResourceGraph(protectedResources []iamdatumapiscomv1alpha1.ProtectedReso
 	}{}
 
 	for _, pr := range protectedResources {
-		serviceAPIGroup := pr.Spec.ServiceRef.Name
-		if serviceAPIGroup == "" {
-			fmt.Printf("Warning: ProtectedResource %s has empty ServiceRef.Name, cannot be added to graph\n", pr.ObjectMeta.Name)
+		if pr.Spec.ServiceRef.Name == "" {
+			fmt.Printf("Warning: ProtectedResource %s has empty ServiceRef.Name, cannot be added to graph\n", pr.Name)
 			continue
 		}
 
 		if pr.Spec.Kind == "" { // Ensure Kind is not empty
-			fmt.Printf("Warning: ProtectedResource %s (service %s) has an empty Kind, skipping\n", pr.ObjectMeta.Name, serviceAPIGroup)
+			fmt.Printf("Warning: ProtectedResource %s (service %s) has an empty Kind, skipping\n", pr.Name, pr.Spec.ServiceRef.Name)
 			continue
 		}
-		fqResourceType := serviceAPIGroup + "/" + pr.Spec.Kind
+		fqResourceType := pr.Spec.ServiceRef.Name + "/" + pr.Spec.Kind
 
 		resources[fqResourceType] = struct {
 			res             iamdatumapiscomv1alpha1.ProtectedResourceSpec
 			serviceAPIGroup string
-		}{res: pr.Spec, serviceAPIGroup: serviceAPIGroup}
+		}{res: pr.Spec, serviceAPIGroup: pr.Spec.ServiceRef.Name}
 
 		if len(pr.Spec.ParentResources) == 0 {
 			isAlreadyRoot := false
@@ -87,7 +86,7 @@ func getResourceGraph(protectedResources []iamdatumapiscomv1alpha1.ProtectedReso
 		effectiveParentResources := []string{}
 		for _, parentRef := range pr.Spec.ParentResources {
 			if parentRef.APIGroup == "" || parentRef.Kind == "" {
-				fmt.Printf("Warning: ProtectedResource %s (service %s) has a ParentResource with empty APIGroup or Kind, skipping parent ref\n", pr.ObjectMeta.Name, serviceAPIGroup)
+				fmt.Printf("Warning: ProtectedResource %s (service %s) has a ParentResource with empty APIGroup or Kind, skipping parent ref\n", pr.Name, pr.Spec.ServiceRef.Name)
 				continue
 			}
 			effectiveParentResources = append(effectiveParentResources, parentRef.APIGroup+"/"+parentRef.Kind)
@@ -136,7 +135,7 @@ func getResourceGraph(protectedResources []iamdatumapiscomv1alpha1.ProtectedReso
 		if !ok {
 			return nil, fmt.Errorf("root resource %s not found in processed map during graph construction", fqResourceType)
 		}
-		node, err := getResourceGraphNode(fqResourceType, resourceData.res, resourceData.serviceAPIGroup, resources, directChildren, make(map[string]bool))
+		node, err := getResourceGraphNode(fqResourceType, resourceData.res, resources, directChildren, make(map[string]bool))
 		if err != nil {
 			return nil, fmt.Errorf("could not get root graph node for %s: %v", fqResourceType, err)
 		}
@@ -153,7 +152,6 @@ func getResourceGraph(protectedResources []iamdatumapiscomv1alpha1.ProtectedReso
 func getResourceGraphNode(
 	fqResourceType string,
 	resourceSpec iamdatumapiscomv1alpha1.ProtectedResourceSpec,
-	resourceServiceAPIGroup string, // APIGroup for *this* resource, though fqResourceType also has it.
 	allResources map[string]struct {
 		res             iamdatumapiscomv1alpha1.ProtectedResourceSpec
 		serviceAPIGroup string
@@ -183,7 +181,7 @@ func getResourceGraphNode(
 			newVisited[k] = v
 		}
 
-		childNode, err := getResourceGraphNode(childFQN, childData.res, childData.serviceAPIGroup, allResources, directChildren, newVisited)
+		childNode, err := getResourceGraphNode(childFQN, childData.res, allResources, directChildren, newVisited)
 		if err != nil {
 			// If cycle detected for a child, it might be an issue with graph structure.
 			// For now, we report error. Depending on requirements, might skip child or handle differently.

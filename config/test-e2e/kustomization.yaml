@@ -1,0 +1,9 @@
+# This is the kustomization file for the test environment.
+# Prerequisites: FluxCD must be installed (use `make kind-create`)
+resources:
+  # Install the CRDs from the Milo API
+  - github.com/datum-cloud/milo/config/crd/bases
+  # Infrastructure and core services (cert-manager, OpenFGA)
+  - ../bootstrap
+  # Install the manager and authz webhook into the test environment
+  - ../default

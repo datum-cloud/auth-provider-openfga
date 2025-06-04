@@ -12,6 +12,7 @@ require (
 	github.com/onsi/gomega v1.37.0
 	github.com/openfga/api/proto v0.0.0-20250127102726-f9709139a369
 	github.com/spf13/cobra v1.9.1
+	go.miloapis.com/milo v0.0.0-20250531220459-cc1836c35fb3
 	google.golang.org/grpc v1.72.1
 	google.golang.org/protobuf v1.36.6
 	k8s.io/api v0.33.1
@@ -57,7 +58,6 @@ require (
 	github.com/prometheus/procfs v0.16.1 // indirect
 	github.com/spf13/pflag v1.0.6 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
-	go.miloapis.com/milo v0.0.0-20250531220459-cc1836c35fb3 // indirect
 	go.opentelemetry.io/otel/sdk/metric v1.35.0 // indirect
 	go.uber.org/automaxprocs v1.6.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect

@@ -77,7 +77,11 @@ func (wh *Webhook) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		wh.writeResponse(w, nil, reviewResponse)
 		return
 	}
-	defer r.Body.Close()
+	defer func() {
+		if closeErr := r.Body.Close(); closeErr != nil {
+			slog.ErrorContext(ctx, "failed to close request body", slog.String("error", closeErr.Error()))
+		}
+	}()
 
 	if body, err = io.ReadAll(r.Body); err != nil {
 		reviewResponse = Errored(err)
