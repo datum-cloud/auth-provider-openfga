@@ -3,15 +3,23 @@ set -e
 
 echo "🚀 Setting up Auth Provider OpenFGA development environment..."
 
+# Detect architecture for ARM64 compatibility
+ARCH=$(uname -m)
+if [ "$ARCH" = "aarch64" ]; then
+    ARCH="arm64"
+elif [ "$ARCH" = "x86_64" ]; then
+    ARCH="amd64"
+fi
+
 # Install Kind
 echo "📦 Installing Kind..."
-curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
+curl -Lo ./kind "https://kind.sigs.k8s.io/dl/latest/kind-linux-${ARCH}"
 chmod +x ./kind
 mv ./kind /usr/local/bin/kind
 
 # Install Kubebuilder
 echo "📦 Installing Kubebuilder..."
-curl -L -o kubebuilder https://go.kubebuilder.io/dl/latest/linux/amd64
+curl -L -o kubebuilder "https://go.kubebuilder.io/dl/latest/linux/${ARCH}"
 chmod +x kubebuilder
 mv kubebuilder /usr/local/bin/
 
@@ -19,7 +27,7 @@ mv kubebuilder /usr/local/bin/
 if ! command -v kubectl &> /dev/null; then
     echo "📦 Installing kubectl..."
     KUBECTL_VERSION=$(curl -L -s https://dl.k8s.io/release/stable.txt)
-    curl -LO "https://dl.k8s.io/release/$KUBECTL_VERSION/bin/linux/amd64/kubectl"
+    curl -LO "https://dl.k8s.io/release/$KUBECTL_VERSION/bin/linux/${ARCH}/kubectl"
     chmod +x kubectl
     mv kubectl /usr/local/bin/kubectl
 fi
@@ -36,7 +44,7 @@ fi
 # Install FluxCD CLI
 echo "📦 Installing FluxCD CLI..."
 curl -s https://fluxcd.io/install.sh | bash
-mv ./flux /usr/local/bin/flux
+# FluxCD installer already places flux in /usr/local/bin/flux
 
 # Create Kind network if it doesn't exist
 if ! docker network ls | grep -q kind; then
@@ -46,8 +54,9 @@ fi
 
 # Install Go tools
 echo "🔧 Installing Go development tools..."
-go install github.com/air-verse/air@latest
-go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+# Install a compatible version of air for Go 1.23.9
+go install github.com/air-verse/air@v1.61.1 || echo "⚠️  Warning: Could not install air, continuing..."
+go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest || echo "⚠️  Warning: Could not install golangci-lint, continuing..."
 
 # Verify installations
 echo "✅ Verifying installations..."
