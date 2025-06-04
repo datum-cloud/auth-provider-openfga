@@ -1,9 +1,14 @@
 {
-  "name": "Kubebuilder DevContainer",
+  "name": "Auth Provider OpenFGA Development",
   "image": "docker.io/golang:1.23",
   "features": {
     "ghcr.io/devcontainers/features/docker-in-docker:2": {},
-    "ghcr.io/devcontainers/features/git:1": {}
+    "ghcr.io/devcontainers/features/git:1": {},
+    "ghcr.io/devcontainers/features/kubectl-helm-minikube:1": {
+      "version": "latest",
+      "helm": "latest",
+      "minikube": "none"
+    }
   },
 
   "runArgs": ["--network=host"],
@@ -11,15 +16,32 @@
   "customizations": {
     "vscode": {
       "settings": {
-        "terminal.integrated.shell.linux": "/bin/bash"
+        "terminal.integrated.shell.linux": "/bin/bash",
+        "go.toolsManagement.checkForUpdates": "local",
+        "go.useLanguageServer": true,
+        "go.gopath": "/go",
+        "editor.formatOnSave": true
       },
       "extensions": [
         "ms-kubernetes-tools.vscode-kubernetes-tools",
-        "ms-azuretools.vscode-docker"
+        "ms-azuretools.vscode-docker",
+        "golang.go",
+        "ms-vscode.makefile-tools",
+        "redhat.vscode-yaml",
+        "ms-kubernetes-tools.vscode-kubernetes-tools"
       ]
     }
   },
 
-  "onCreateCommand": "bash .devcontainer/post-install.sh"
-}
+  "onCreateCommand": "bash .devcontainer/post-install.sh",
+  "postStartCommand": "echo 'Development environment ready! Run: make help'",
 
+  "mounts": [
+    "source=/var/run/docker.sock,target=/var/run/docker.sock,type=bind"
+  ],
+
+  "containerEnv": {
+    "CLUSTER_NAME": "auth-provider-openfga",
+    "IMG": "auth-provider-openfga:dev"
+}
+}

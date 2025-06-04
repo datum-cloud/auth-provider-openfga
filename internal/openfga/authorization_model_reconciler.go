@@ -97,10 +97,7 @@ func (r *AuthorizationModelReconciler) getCurrentAuthorizationModel(ctx context.
 }
 
 func (r *AuthorizationModelReconciler) createExpectedAuthorizationModel(protectedResources []iamdatumapiscomv1alpha1.ProtectedResource) (*openfgav1.AuthorizationModel, error) {
-	permissions, err := getAllPermissions(protectedResources)
-	if err != nil {
-		return nil, err
-	}
+	permissions := getAllPermissions(protectedResources)
 
 	resourceGraph, err := getResourceGraph(protectedResources)
 	if err != nil {
@@ -230,23 +227,22 @@ func getResourceTypeDefinition(permissions []string, resourceNode *resourceGraph
 	return typeDefinition
 }
 
-func getAllPermissions(protectedResources []iamdatumapiscomv1alpha1.ProtectedResource) ([]string, error) {
+func getAllPermissions(protectedResources []iamdatumapiscomv1alpha1.ProtectedResource) []string {
 	var permissions []string
 	for _, pr := range protectedResources {
 		if pr.Spec.ServiceRef.Name == "" {
-			// This case should ideally be prevented by validation
-			fmt.Printf("Warning: ProtectedResource %s has empty ServiceRef.Name, skipping its permissions\n", pr.ObjectMeta.Name)
+			fmt.Printf("Warning: ProtectedResource %s has empty ServiceRef.Name, skipping its permissions\n", pr.Name)
 			continue
 		}
 		for _, permission := range pr.Spec.Permissions {
 			if pr.Spec.Plural == "" {
-				fmt.Printf("Warning: ProtectedResource %s (service %s) has an empty Plural name, skipping permission '%s'\n", pr.ObjectMeta.Name, pr.Spec.ServiceRef.Name, permission)
+				fmt.Printf("Warning: ProtectedResource %s (service %s) has an empty Plural name, skipping permission '%s'\n", pr.Name, pr.Spec.ServiceRef.Name, permission)
 				continue
 			}
 			permissions = append(permissions, fmt.Sprintf("%s/%s.%s", pr.Spec.ServiceRef.Name, pr.Spec.Plural, permission))
 		}
 	}
-	return permissions, nil
+	return permissions
 }
 
 func getUserTypeDefinition() *openfgav1.TypeDefinition {

@@ -1,0 +1,4 @@
+resources:
+- authz-webhook.yaml
+- authz-webhook-service.yaml
+- selfsigned-issuer.yaml
