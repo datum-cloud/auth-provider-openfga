@@ -308,7 +308,7 @@ func getTupleUser(subject iamdatumapiscomv1alpha1.Subject) (string, error) {
 	case "User":
 		return fmt.Sprintf("iam.miloapis.com/InternalUser:%s", string(subject.UID)), nil // Represent all subjects as InternalUser with their original UID
 	case "Group":
-		return fmt.Sprintf("iam.miloapis.com/InternalUserGroup:%s%s", string(subject.UID), "#assignee"), nil // Represent all subjects as InternalUserGroup with their original UID and assignee relation
+		return fmt.Sprintf("iam.miloapis.com/InternalUserGroup:%s#assignee", string(subject.UID)), nil // Represent all subjects as InternalUserGroup with their original UID and assignee relation
 	default:
 		return "", fmt.Errorf("unsupported subject kind: %s", subject.Kind)
 	}
