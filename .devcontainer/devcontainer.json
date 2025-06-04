@@ -1,6 +1,6 @@
 {
   "name": "Auth Provider OpenFGA Development",
-  "image": "docker.io/golang:1.23",
+  "image": "mcr.microsoft.com/devcontainers/go:1.24",
   "features": {
     "ghcr.io/devcontainers/features/docker-in-docker:2": {},
     "ghcr.io/devcontainers/features/git:1": {},
@@ -10,9 +10,9 @@
       "minikube": "none"
     }
   },
-
-  "runArgs": ["--network=host"],
-
+  "runArgs": [
+    "--network=host"
+  ],
   "customizations": {
     "vscode": {
       "settings": {
@@ -32,16 +32,13 @@
       ]
     }
   },
-
-  "onCreateCommand": "bash .devcontainer/post-install.sh",
+  "onCreateCommand": "sudo bash .devcontainer/post-install.sh",
   "postStartCommand": "echo 'Development environment ready! Run: make help'",
-
   "mounts": [
     "source=/var/run/docker.sock,target=/var/run/docker.sock,type=bind"
   ],
-
   "containerEnv": {
     "CLUSTER_NAME": "auth-provider-openfga",
     "IMG": "auth-provider-openfga:dev"
-}
+  }
 }
