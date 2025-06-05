@@ -172,8 +172,8 @@ func (r *PolicyReconciler) getExistingPolicyTuples(ctx context.Context, policy i
 	// 1. Get tuples where the binding object is the User (linking binding to target resource)
 	tuplesLinkingBindingToResource, err := getTupleKeys(ctx, r.StoreID, r.Client, &openfgav1.ReadRequestTupleKey{
 		User:     policyBindingObjectIdentifier,
-		Relation: "iam.miloapis.com/RoleBinding",                                                                                         // Relation used when binding is the user
-		Object:   fmt.Sprintf("%s/%s:%s", policy.Spec.TargetRef.APIGroup, policy.Spec.TargetRef.Kind, string(policy.Spec.TargetRef.UID)), // Use TargetRef UID
+		Relation: "iam.miloapis.com/RoleBinding",                                                                                 // Relation used when binding is the user
+		Object:   fmt.Sprintf("%s/%s:%s", policy.Spec.TargetRef.APIGroup, policy.Spec.TargetRef.Kind, policy.Spec.TargetRef.UID), // Use TargetRef UID
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to get tuples linking binding to resource: %w", err)
@@ -306,9 +306,9 @@ func getTupleUser(subject iamdatumapiscomv1alpha1.Subject) (string, error) {
 	switch subject.Kind {
 	// TODO: Update Milo API to export a canonical SubjectKind type or enum, and use it here for type safety and maintainability.
 	case "User":
-		return fmt.Sprintf("iam.miloapis.com/InternalUser:%s", string(subject.UID)), nil // Represent all subjects as InternalUser with their original UID
+		return fmt.Sprintf("iam.miloapis.com/InternalUser:%s", subject.UID), nil // Represent all subjects as InternalUser with their original UID
 	case "Group":
-		return fmt.Sprintf("iam.miloapis.com/InternalUserGroup:%s#assignee", string(subject.UID)), nil // Represent all subjects as InternalUserGroup with their original UID and assignee relation
+		return fmt.Sprintf("iam.miloapis.com/InternalUserGroup:%s#assignee", subject.UID), nil // Represent all subjects as InternalUserGroup with their original UID and assignee relation
 	default:
 		return "", fmt.Errorf("unsupported subject kind: %s", subject.Kind)
 	}

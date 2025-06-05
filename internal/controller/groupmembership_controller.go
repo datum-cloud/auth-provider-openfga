@@ -70,11 +70,11 @@ func (f *UserGroupFinalizer) Finalize(ctx context.Context, obj client.Object) (f
 	}
 
 	groupMembershipRequest := openfga.GroupMembershipRequest{
-		GroupUid:  group.ObjectMeta.UID,
-		MemberUid: user.ObjectMeta.UID,
+		GroupUID:  group.UID,
+		MemberUID: user.UID,
 	}
 
-	log.Info("Removing group membership during finalization", "groupRef", group.ObjectMeta.UID, "userRef", user.ObjectMeta.UID)
+	log.Info("Removing group membership during finalization", "groupRef", group.UID, "userRef", user.UID)
 
 	// Remove the group membership tuple from the OpenFGA store
 	err = f.UserGroupReconciler.RemoveMemberFromGroup(ctx, groupMembershipRequest)
@@ -122,7 +122,7 @@ func (r *GroupMembershipReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 	if finalizeResult.Updated {
 		log.Info("finalizer updated the group membership object, updating API server")
-		if updateErr := r.Client.Update(ctx, groupMembership); updateErr != nil {
+		if updateErr := r.Update(ctx, groupMembership); updateErr != nil {
 			return ctrl.Result{}, updateErr
 		}
 		return ctrl.Result{Requeue: true}, nil
@@ -216,8 +216,8 @@ func (r *GroupMembershipReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	log.Info("GroupMembership conditions are valid. Proceeding with reconciliation.", "userRefValid", isUserRefValid, "groupRefValid", isGroupRefValid)
 
 	groupMembershipRequest := openfga.GroupMembershipRequest{
-		GroupUid:  group.ObjectMeta.UID,
-		MemberUid: user.ObjectMeta.UID,
+		GroupUID:  group.UID,
+		MemberUID: user.UID,
 	}
 
 	userGroupReconciler := r.UserGroupReconciler

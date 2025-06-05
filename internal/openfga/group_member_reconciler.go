@@ -17,8 +17,8 @@ type UserGroupReconciler struct {
 }
 
 type GroupMembershipRequest struct {
-	MemberUid types.UID
-	GroupUid  types.UID
+	MemberUID types.UID
+	GroupUID  types.UID
 }
 
 func (r *UserGroupReconciler) AddMemberToGroup(ctx context.Context, joinToGroupRequest GroupMembershipRequest) error {
@@ -34,7 +34,7 @@ func (r *UserGroupReconciler) AddMemberToGroup(ctx context.Context, joinToGroupR
 
 	checkResp, err := r.checkIfTupleKeyExists(ctx, tupleKeys[0])
 	if err != nil {
-		return fmt.Errorf("Failed to check if GroupMember tuple key exists: %w", err)
+		return fmt.Errorf("f ailed to check if GroupMember tuple key exists: %w", err)
 	}
 
 	// If the tuple key does not exist, write it to the OpenFGA store
@@ -67,7 +67,7 @@ func (r *UserGroupReconciler) RemoveMemberFromGroup(ctx context.Context, groupMe
 
 	checkResp, err := r.checkIfTupleKeyExists(ctx, tupleKeys[0])
 	if err != nil {
-		return fmt.Errorf("Failed to check if GroupMember tuple key exists: %w", err)
+		return fmt.Errorf("failed to check if GroupMember tuple key exists: %w", err)
 	}
 
 	// If the tuple key exists, delete it from the OpenFGA store
@@ -90,8 +90,8 @@ func (r *UserGroupReconciler) RemoveMemberFromGroup(ctx context.Context, groupMe
 
 // GetOpenFGAGroupAndMember returns the OpenFGA group object and member user strings for a given JoinToGroupRequest
 func (r *UserGroupReconciler) getOpenFGAGroupAndMember(joinToGroupRequest GroupMembershipRequest) (openFGAGroupObject string, openFGAUserObject string) {
-	openFGAGroupObject = fmt.Sprintf("iam.miloapis.com/InternalUserGroup:%s", joinToGroupRequest.GroupUid)
-	openFGAUserObject = fmt.Sprintf("iam.miloapis.com/InternalUser:%s", joinToGroupRequest.MemberUid)
+	openFGAGroupObject = fmt.Sprintf("iam.miloapis.com/InternalUserGroup:%s", joinToGroupRequest.GroupUID)
+	openFGAUserObject = fmt.Sprintf("iam.miloapis.com/InternalUser:%s", joinToGroupRequest.MemberUID)
 	return
 }
 
@@ -110,8 +110,8 @@ func (r *UserGroupReconciler) checkIfTupleKeyExists(ctx context.Context, tupleKe
 
 	checkResp, err := r.Client.Check(ctx, checkRequest)
 	if err != nil {
-		log.Error(err, "Failed to check group membership tuple in OpenFGA")
-		return nil, fmt.Errorf("Failed to check if GroupMember tuple key exists: %w", err)
+		log.Error(err, "failed to check group membership tuple in OpenFGA")
+		return nil, fmt.Errorf("failed to check if GroupMember tuple key exists: %w", err)
 	}
 
 	return checkResp, nil

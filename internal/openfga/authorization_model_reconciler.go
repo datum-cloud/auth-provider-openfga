@@ -442,6 +442,7 @@ func getRoleBindingTypeDefinition(permissions []string) *openfgav1.TypeDefinitio
 
 func hashPermission(permission string) string {
 	hasher := fnv.New32a()
+	//revive:disable-next-line:unhandled-error a
 	hasher.Write([]byte(permission))
 
 	return hex.EncodeToString(hasher.Sum(nil))

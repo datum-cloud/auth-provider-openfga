@@ -30,7 +30,7 @@ func createManagerCommand() *cobra.Command {
 		Use:   "manager",
 		Short: "Start the controller manager",
 		Long:  "Start the Kubernetes controller manager that reconciles IAM resources with OpenFGA.",
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(_ *cobra.Command, _ []string) error {
 			return runManager(
 				metricsAddr,
 				enableLeaderElection,

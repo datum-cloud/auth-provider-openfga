@@ -454,7 +454,7 @@ func (r *ResourceOwnerHierarchyReconciler) SetupWithManager(mgr ctrl.Manager) er
 	}
 
 	projectPredicate := predicate.Funcs{
-		CreateFunc: func(e event.CreateEvent) bool {
+		CreateFunc: func(_ event.CreateEvent) bool {
 			// Always reconcile Project creates for now, ownerRef check is done in reconcileProject
 			log.Log.V(2).Info("Predicate: Allowing CreateEvent for Project")
 			return true
@@ -488,7 +488,7 @@ func (r *ResourceOwnerHierarchyReconciler) SetupWithManager(mgr ctrl.Manager) er
 			}
 			return false // Only reconcile deletes if our finalizer is present or state is unknown
 		},
-		GenericFunc: func(e event.GenericEvent) bool {
+		GenericFunc: func(_ event.GenericEvent) bool {
 			log.Log.V(2).Info("Predicate: Allowing GenericEvent for Project")
 			return true // Reconcile all generic events for now
 		},

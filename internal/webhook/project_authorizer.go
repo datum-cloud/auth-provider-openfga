@@ -184,7 +184,7 @@ func (o *ProjectControlPlaneAuthorizer) buildPermissionString(attributes authori
 	return fmt.Sprintf("%s/%s.%s", serviceName, resource, verb)
 }
 
-func (o *ProjectControlPlaneAuthorizer) buildResource(attributes authorizer.Attributes, projectUID string) string {
+func (o *ProjectControlPlaneAuthorizer) buildResource(_ authorizer.Attributes, projectUID string) string {
 	// Build the resource identifier for OpenFGA using the correct format
 	return fmt.Sprintf("resourcemanager.miloapis.com/Project:%s", projectUID)
 }
