@@ -55,18 +55,18 @@ func (f *UserGroupFinalizer) Finalize(ctx context.Context, obj client.Object) (f
 	err := f.K8sClient.Get(ctx, client.ObjectKey{
 		Name: groupMembership.Spec.UserRef.Name,
 	}, user)
-	if err != nil {
+	if err != nil && !errors.IsNotFound(err) {
 		log.Error(err, "Failed to get User for finalization")
-		return finalizer.Result{}, nil // Don't block deletion if user is gone
+		return finalizer.Result{}, err
 	}
 	group := &iammiloapiscomv1alpha1.Group{}
 	err = f.K8sClient.Get(ctx, client.ObjectKey{
 		Name:      groupMembership.Spec.GroupRef.Name,
 		Namespace: groupMembership.Spec.GroupRef.Namespace,
 	}, group)
-	if err != nil {
+	if err != nil && !errors.IsNotFound(err) {
 		log.Error(err, "Failed to get Group for finalization")
-		return finalizer.Result{}, nil // Don't block deletion if group is gone
+		return finalizer.Result{}, err
 	}
 
 	groupMembershipRequest := openfga.GroupMembershipRequest{
