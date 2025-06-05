@@ -107,6 +107,12 @@ lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes
 lint-config: golangci-lint ## Verify golangci-lint linter configuration
 	"$(GOLANGCI_LINT)" config verify
 
+.PHONY: lint-ci
+lint-ci: golangci-lint ## Run linting with CI-like configuration
+	@echo "🔍 Running linter with same config as CI..."
+	"$(GOLANGCI_LINT)" run --config=.golangci.yml
+	@echo "✅ Linting completed successfully - ready for CI!"
+
 ##@ Build
 
 .PHONY: build
@@ -377,7 +383,7 @@ CONTROLLER_TOOLS_VERSION ?= v0.17.2
 ENVTEST_VERSION ?= $(shell go list -m -f "{{ .Version }}" sigs.k8s.io/controller-runtime | awk -F'[v.]' '{printf "release-%d.%d", $$2, $$3}')
 #ENVTEST_K8S_VERSION is the version of Kubernetes to use for setting up ENVTEST binaries (i.e. 1.31)
 ENVTEST_K8S_VERSION ?= $(shell go list -m -f "{{ .Version }}" k8s.io/api | awk -F'[v.]' '{printf "1.%d", $$3}')
-GOLANGCI_LINT_VERSION ?= v1.63.4
+GOLANGCI_LINT_VERSION ?= $(shell cat .golangci-version 2>/dev/null || echo "v2.1.6")
 CHAINSAW_VERSION ?= v0.2.12
 
 .PHONY: kustomize
@@ -406,7 +412,7 @@ $(ENVTEST): localbin-dir
 .PHONY: golangci-lint
 golangci-lint: $(GOLANGCI_LINT) ## Download golangci-lint locally if necessary.
 $(GOLANGCI_LINT): localbin-dir
-	$(call go-install-tool,$(GOLANGCI_LINT),github.com/golangci/golangci-lint/cmd/golangci-lint,$(GOLANGCI_LINT_VERSION))
+	$(call go-install-tool,$(GOLANGCI_LINT),github.com/golangci/golangci-lint/v2/cmd/golangci-lint,$(GOLANGCI_LINT_VERSION))
 
 .PHONY: chainsaw
 chainsaw: $(CHAINSAW) ## Download chainsaw locally if necessary.
