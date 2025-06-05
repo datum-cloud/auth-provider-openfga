@@ -1,0 +1,44 @@
+# Development Environment Issuer Configuration
+# Uses self-signed certificates for local development
+
+# Root self-signed issuer
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: dev-selfsigned-issuer
+  labels:
+    app.kubernetes.io/name: auth-provider-openfga
+    app.kubernetes.io/component: dev-tls
+spec:
+  selfSigned: {}
+
+---
+# CA Certificate for development
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: auth-provider-openfga-dev-ca
+  namespace: cert-manager
+  labels:
+    app.kubernetes.io/name: auth-provider-openfga
+    app.kubernetes.io/component: dev-tls
+spec:
+  isCA: true
+  commonName: auth-provider-openfga-dev-ca
+  secretName: auth-provider-openfga-dev-ca-secret
+  issuerRef:
+    name: dev-selfsigned-issuer
+    kind: ClusterIssuer
+
+---
+# CA-based issuer for application certificates
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: auth-provider-openfga-dev-ca-issuer
+  labels:
+    app.kubernetes.io/name: auth-provider-openfga
+    app.kubernetes.io/component: dev-tls
+spec:
+  ca:
+    secretName: auth-provider-openfga-dev-ca-secret

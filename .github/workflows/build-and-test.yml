@@ -101,16 +101,23 @@ jobs:
           docker tag $IMAGE_TAG auth-provider-openfga:test
           kind load docker-image auth-provider-openfga:test --name auth-provider-openfga
 
-      - name: Deploy infrastructure via Flux bootstrap
+      - name: Deploy platform infrastructure via Flux
         run: |
-          echo "📦 Deploying infrastructure (cert-manager, OpenFGA) via Flux..."
+          echo "📦 Deploying platform infrastructure (cert-manager) via Flux..."
           make kustomize
-          kubectl apply --server-side --wait=true -f <(bin/kustomize build config/bootstrap)
-          echo "⏳ Waiting for infrastructure HelmReleases to be ready..."
+          kubectl apply --server-side --wait=true -f <(bin/kustomize build config/platform)
+          echo "⏳ Waiting for platform HelmReleases to be ready..."
           kubectl wait --for=condition=Ready helmrelease/cert-manager -n cert-manager --timeout=240s
           kubectl wait --for=condition=Ready helmrelease/cert-manager-csi-driver -n cert-manager --timeout=240s
+          echo "✅ Platform infrastructure deployed successfully"
+
+      - name: Deploy application dependencies via Flux
+        run: |
+          echo "🔧 Deploying application dependencies (OpenFGA) via Flux..."
+          kubectl apply --server-side --wait=true -f <(bin/kustomize build config/dependencies)
+          echo "⏳ Waiting for dependency HelmReleases to be ready..."
           kubectl wait --for=condition=Ready helmrelease/openfga -n openfga-system --timeout=240s
-          echo "✅ Infrastructure deployed successfully"
+          echo "✅ Application dependencies deployed successfully"
 
       - name: Create GitHub token secret for FluxCD
         run: |
@@ -149,7 +156,7 @@ jobs:
             namespace: flux-system
           spec:
             interval: 1m
-            path: "./config/test-e2e"
+            path: "./config/environments/testing"
             prune: true
             sourceRef:
               kind: GitRepository

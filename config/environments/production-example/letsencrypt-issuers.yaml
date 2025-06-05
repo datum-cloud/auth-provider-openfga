@@ -1,0 +1,79 @@
+# Example Let's Encrypt Issuer Configuration for Production
+#
+# IMPORTANT: This is just an EXAMPLE. In real production:
+# 1. These issuers would be managed by your infrastructure team
+# 2. You'd need to configure DNS challenges or HTTP01 challenges
+# 3. You'd need proper domain names and DNS setup
+# 4. You might use different issuers per service/domain
+
+# Let's Encrypt Staging Issuer (for testing)
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-staging
+  labels:
+    app.kubernetes.io/name: auth-provider-openfga
+    app.kubernetes.io/component: prod-tls-example
+spec:
+  acme:
+    # The ACME server URL for Let's Encrypt staging
+    server: https://acme-staging-v02.api.letsencrypt.org/directory
+    # Email address used for ACME registration
+    email: admin@yourdomain.com # CHANGE THIS
+    # Name of a secret used to store the ACME account private key
+    privateKeySecretRef:
+      name: letsencrypt-staging-private-key
+    # Enable the HTTP-01 challenge provider
+    solvers:
+      - http01:
+          ingress:
+            class: nginx # Adjust based on your ingress controller
+
+---
+# Let's Encrypt Production Issuer
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+  labels:
+    app.kubernetes.io/name: auth-provider-openfga
+    app.kubernetes.io/component: prod-tls-example
+spec:
+  acme:
+    # The ACME server URL for Let's Encrypt production
+    server: https://acme-v02.api.letsencrypt.org/directory
+    # Email address used for ACME registration
+    email: admin@yourdomain.com # CHANGE THIS
+    # Name of a secret used to store the ACME account private key
+    privateKeySecretRef:
+      name: letsencrypt-prod-private-key
+    # Enable the HTTP-01 challenge provider
+    solvers:
+      - http01:
+          ingress:
+            class: nginx # Adjust based on your ingress controller
+
+---
+# Alternative: DNS-01 challenge example
+# Use this if you have DNS API access and want wildcard certificates
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-dns01-prod
+  labels:
+    app.kubernetes.io/name: auth-provider-openfga
+    app.kubernetes.io/component: prod-tls-example
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: admin@yourdomain.com # CHANGE THIS
+    privateKeySecretRef:
+      name: letsencrypt-dns01-private-key
+    # DNS-01 solver configuration (example for CloudDNS)
+    solvers:
+      - dns01:
+          cloudDNS:
+            project: your-gcp-project # CHANGE THIS
+            serviceAccountSecretRef:
+              name: clouddns-dns01-solver-svc-acct
+              key: key.json

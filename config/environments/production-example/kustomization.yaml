@@ -1,0 +1,83 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Production Environment Example
+# Shows how to configure TLS with Let's Encrypt for production workloads
+#
+# NOTE: This is an EXAMPLE - actual production config would be managed
+# by your infrastructure repository
+
+resources:
+  # External CRDs from Milo API
+  - github.com/datum-cloud/milo/config/crd/bases
+  # Base application components
+  - ../../base
+  # Production-specific certificate issuers (example)
+  - letsencrypt-issuers.yaml
+
+# Optional components for production
+components:
+  # Enable Prometheus ServiceMonitor for metrics scraping
+  - ../../components/prometheus-monitoring
+  # Enable TLS certificates with Let's Encrypt issuers
+  - ../../components/tls-certs
+  # Enable network policies for security
+  - ../../components/network-policies
+
+# Configure certificate issuers for production environment (CSI driver only)
+replacements:
+  # Configure webhook CSI volume issuer for production
+  - source:
+      kind: ClusterIssuer
+      name: letsencrypt-prod
+      fieldPath: metadata.name
+    targets:
+      - select:
+          kind: Deployment
+          name: authz-webhook
+        fieldPaths:
+          - spec.template.spec.volumes.[name=webhook-server-tls].csi.volumeAttributes.[csi.cert-manager.io/issuer-name]
+
+  # Configure metrics CSI volume issuer for production
+  - source:
+      kind: ClusterIssuer
+      name: letsencrypt-prod
+      fieldPath: metadata.name
+    targets:
+      - select:
+          kind: Deployment
+          name: controller-manager
+        fieldPaths:
+          - spec.template.spec.volumes.[name=metrics-certs].csi.volumeAttributes.[csi.cert-manager.io/issuer-name]
+
+# Production image configuration
+images:
+  - name: auth-provider-openfga
+    newName: your-registry.com/auth-provider-openfga
+    newTag: v1.0.0
+
+# Production-specific patches
+patches:
+  # Increase replicas for high availability
+  - target:
+      kind: Deployment
+      name: controller-manager
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 3
+
+  # Add resource limits for production
+  - target:
+      kind: Deployment
+      name: controller-manager
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/resources
+        value:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi

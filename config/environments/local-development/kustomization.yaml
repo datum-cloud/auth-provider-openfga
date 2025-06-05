@@ -1,0 +1,26 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Local development environment overlay
+# Uses base application components with development-specific configurations
+
+resources:
+  # External CRDs from Milo API
+  - github.com/datum-cloud/milo/config/crd/bases
+  # Base application components
+  - ../../base
+  # Development-specific certificate issuers
+  - issuer-config.yaml
+
+# Optional components (enable/disable as needed)
+components:
+  # Enable TLS certificates with development issuers
+  - ../../components/tls-certs
+  # Enable TLS for authz webhook
+  - webhook-tls
+
+# Development-specific image configurations
+images:
+  - name: auth-provider-openfga
+    newName: auth-provider-openfga
+    newTag: dev
