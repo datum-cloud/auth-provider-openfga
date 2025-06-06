@@ -1,0 +1,65 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: authz-webhook
+  labels:
+    app.kubernetes.io/name: openfga-authz-webhook
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: openfga-authz-webhook
+  replicas: 1
+  template:
+    metadata:
+      annotations:
+        kubectl.kubernetes.io/default-container: manager
+      labels:
+        app.kubernetes.io/name: openfga-authz-webhook
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: authz-webhook
+          image: auth-provider-openfga:latest
+          imagePullPolicy: IfNotPresent
+          args:
+            - authz-webhook
+            - --metrics-bind-address=:8080
+            - --webhook-port=8090
+            - --cert-dir=/etc/webhook/serving-certs
+            - --cert-file=tls.crt
+            - --key-file=tls.key
+            - --openfga-api-url=$(OPENFGA_API_URL)
+            - --openfga-store-id=$(OPENFGA_STORE_ID)
+          env:
+            - name: OPENFGA_API_URL
+              value: openfga.openfga-system.svc.cluster.local:8081
+            - name: OPENFGA_STORE_ID
+              value: r01JVTBDT6NJ541P1JBT22GX4PR
+          ports:
+            - containerPort: 8080
+              name: metrics
+              protocol: TCP
+            - containerPort: 8090
+              name: webhook
+              protocol: TCP
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - "ALL"
+          volumeMounts: []
+          resources:
+            limits:
+              cpu: 500m
+              memory: 128Mi
+            requests:
+              cpu: 10m
+              memory: 64Mi
+
+      serviceAccountName: controller-manager
+      terminationGracePeriodSeconds: 10
+      volumes: []

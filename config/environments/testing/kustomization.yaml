@@ -1,0 +1,29 @@
+# This is the kustomization file for the test environment.
+# Prerequisites: FluxCD must be installed (use `make kind-create`)
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Testing environment overlay for CI/CD and E2E tests
+# Uses base application components with testing-specific configurations
+
+resources:
+  # External CRDs from Milo API
+  - github.com/datum-cloud/milo/config/crd/bases
+  # Base application components
+  - ../../base
+  # Testing-specific certificate issuers (same as dev for now)
+  - testing-issuers.yaml
+
+# Components enabled for testing
+components:
+  # Enable TLS for authz webhook
+  - webhook-tls
+
+# No CSI volume replacements needed for HTTP-only testing
+
+# Testing-specific image configuration
+images:
+  - name: auth-provider-openfga
+    newName: auth-provider-openfga
+    newTag: dev
