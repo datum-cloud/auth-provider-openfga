@@ -216,3 +216,124 @@ spec:
             name: webhook-test
           status:
             phase: Succeeded
+
+    - apply:
+        file: group.yaml
+        outputs:
+          - name: grp
+            value: (@)
+    - apply:
+        resource:
+          apiVersion: iam.miloapis.com/v1alpha1
+          kind: PolicyBinding
+          metadata:
+            name: sample-group-admin-binding
+          spec:
+            roleRef:
+              name: resourcemanager.miloapis.com-organizationowner
+              namespace: ($namespace)
+            subjects:
+              - kind: Group
+                name: "sample-admin-group"
+                uid: ($grp.metadata.uid)
+                namespace: ($namespace)
+            targetRef:
+              apiGroup: "resourcemanager.miloapis.com"
+              kind: Organization
+              name: "datum"
+              uid: ($org.metadata.uid)
+
+    - wait:
+        apiVersion: iam.miloapis.com/v1alpha1
+        kind: PolicyBinding
+        name: sample-group-admin-binding
+        timeout: 5m
+        for:
+          condition:
+            name: Ready
+            value: 'true'
+
+    - apply:
+        file: group-user.yaml
+        outputs:
+          - name: grpUser
+            value: (@)
+    - apply:
+        file: group-memership.yaml
+
+    - wait:
+        apiVersion: iam.miloapis.com/v1alpha1
+        kind: GroupMembership
+        name: example-groupmembership
+        timeout: 5m
+        for:
+          condition:
+            name: Ready
+            value: 'true'
+
+    - apply:
+        resource:
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: group-user-webhook-test
+          spec:
+            restartPolicy: Never
+            containers:
+            - name: curl
+              image: curlimages/curl:latest
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  response=$(curl -ksS https://auth-provider-openfga-openfga-authz-webhook-service.auth-provider-openfga-system.svc.cluster.local:9443/core/v1alpha/webhook \
+                    -H "Content-Type: application/json" \
+                    -d @- << EOF
+                  {
+                    "apiVersion": "authorization.k8s.io/v1",
+                    "kind": "SubjectAccessReview",
+                    "spec": {
+                      "user": "group-user-admin",
+                      "extra": {
+                        "resourcemanager.miloapis.com/organization-id": ["$(ORG_UID)"],
+                        "authentication.miloapis.com/user-uid": ["$(USER_UID)"]
+                      },
+                      "groups": ["system:authenticated"],
+                      "resourceAttributes": {
+                        "group": "resourcemanager.miloapis.com",
+                        "resource": "organizations",
+                        "version": "v1alpha1",
+                        "verb": "get",
+                        "name": "datum"
+                      }
+                    }
+                  }
+                  EOF
+                  )
+                  echo "Webhook response: $response"
+                  # Check if we got a valid SubjectAccessReview response
+                  if echo "$response" | grep -q '"kind":"SubjectAccessReview"'; then
+                    echo "Webhook test completed successfully"
+                    exit 0
+                  else
+                    echo "Webhook test failed - invalid response"
+                    exit 1
+                  fi
+              env:
+                - name: USER_UID
+                  value: ($grpUser.metadata.uid)
+                - name: ORG_UID
+                  value: ($org.metadata.uid)
+    - sleep:
+        duration: 30s
+    - assert:
+        resource:
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: group-user-webhook-test
+          status:
+            phase: Succeeded
+
+
+
+    

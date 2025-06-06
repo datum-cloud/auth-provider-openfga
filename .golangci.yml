@@ -23,7 +23,7 @@ linters:
   settings:
     revive:
       rules:
-        - name: comment-spacings
+        - name: dot-imports
           disabled: true
   exclusions:
     generated: lax

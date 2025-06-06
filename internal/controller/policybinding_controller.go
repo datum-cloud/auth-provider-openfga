@@ -184,9 +184,9 @@ func (r *PolicyBindingReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	// Reconcile with OpenFGA. This creates/updates/deletes tuples in OpenFGA based on the PolicyBinding. This step also
 	// implicitly validates the RoleRef by attempting to use the role.
-	ctrl_result, err := r.reconcileOpenFGAPolicy(ctx, policyBinding, currentGeneration)
+	ctrlResult, err := r.reconcileOpenFGAPolicy(ctx, policyBinding, currentGeneration)
 	if err != nil {
-		return ctrl_result, fmt.Errorf("failed to reconcile OpenFGA policy: %w", err)
+		return ctrlResult, fmt.Errorf("failed to reconcile OpenFGA policy: %w", err)
 	}
 
 	// All steps were successful: finalizer ensured, target validated, subjects validated, OpenFGA reconciled.
