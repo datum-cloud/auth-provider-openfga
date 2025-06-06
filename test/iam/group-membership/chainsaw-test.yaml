@@ -1,0 +1,36 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  # This test is used to test the creation and deletion of a group membership
+  name: group-membership-creation-and-deletion
+spec:
+  steps:
+  - try:
+    - apply: # Create group
+        file: resources/group.yaml
+    - apply: # Create user
+        file: resources/user.yaml
+    - apply: # Create group membership
+        file: resources/group-membership.yaml
+    - wait: # Wait for group membership to be ready
+        apiVersion: iam.miloapis.com/v1alpha1
+        kind: GroupMembership
+        name: test-user-membership
+        timeout: 5m
+        for:
+          condition:
+            name: Ready
+            value: 'true'
+    - assert: # Assert that the group membership is created
+        file: resources/group-membership.yaml
+    - delete: # Delete group membership
+        file: resources/group-membership.yaml
+    - wait: # Wait for group membership to be deleted
+        apiVersion: iam.miloapis.com/v1alpha1
+        kind: GroupMembership
+        name: test-user-membership
+        timeout: 5m
+        for:
+          deletion: {}
+    - error: # Assert that the group membership is deleted
+        file: resources/group-membership.yaml
