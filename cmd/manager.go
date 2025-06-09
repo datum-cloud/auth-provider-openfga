@@ -39,7 +39,7 @@ func createManagerCommand() *cobra.Command {
 		Use:   "manager",
 		Short: "Start the controller manager",
 		Long:  "Start the Kubernetes controller manager that reconciles IAM resources with OpenFGA.",
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(_ *cobra.Command, _ []string) error {
 			return runManager(
 				metricsAddr,
 				enableLeaderElection,
@@ -191,6 +191,16 @@ func runManager(
 		FGAStoreID: openfgaStoreID,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to create controller AuthorizationModel: %w", err)
+	}
+
+	if err = (&controller.GroupMembershipReconciler{
+		Client:        mgr.GetClient(),
+		Scheme:        mgr.GetScheme(),
+		FgaClient:     fgaClient,
+		StoreID:       openfgaStoreID,
+		EventRecorder: mgr.GetEventRecorderFor("groupmembership-controller"),
+	}).SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("unable to create controller GroupMembership: %w", err)
 	}
 
 	//+kubebuilder:scaffold:builder

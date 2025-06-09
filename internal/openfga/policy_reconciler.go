@@ -74,8 +74,13 @@ func (r *PolicyReconciler) ReconcilePolicy(ctx context.Context, binding iamdatum
 	)
 
 	for _, subject := range binding.Spec.Subjects {
+		tupleUser, err := getTupleUser(subject)
+		if err != nil {
+			return fmt.Errorf("failed to get tuple user: %w", err)
+		}
+
 		tuples = append(tuples, &openfgav1.TupleKey{
-			User:     fmt.Sprintf("iam.miloapis.com/InternalUser:%s", subject.UID), // Represent all subjects as InternalUser with their original UID
+			User:     tupleUser,
 			Relation: "iam.miloapis.com/InternalUser",
 			Object:   policyBindingObjectIdentifier, // Use PolicyBinding UID based object
 		})
@@ -193,8 +198,13 @@ func (r *PolicyReconciler) getExistingPolicyTuples(ctx context.Context, policy i
 
 	// Fetch subject linkage tuples
 	for _, subject := range policy.Spec.Subjects {
+		tupleUser, err := getTupleUser(subject)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get tuple user: %w", err)
+		}
+
 		subjectLinkageTuple, err := getTupleKeys(ctx, r.StoreID, r.Client, &openfgav1.ReadRequestTupleKey{
-			User:     fmt.Sprintf("iam.miloapis.com/InternalUser:%s", subject.UID),
+			User:     tupleUser,
 			Relation: "iam.miloapis.com/InternalUser",
 			Object:   policyBindingObjectIdentifier,
 		})
@@ -290,4 +300,16 @@ func (r *PolicyReconciler) DeletePolicy(ctx context.Context, binding iamdatumapi
 
 	log.Info("Successfully deleted OpenFGA tuples for PolicyBinding", "policyBindingName", binding.Name, "tuplesDeleted", len(tuplesToDelete))
 	return nil
+}
+
+func getTupleUser(subject iamdatumapiscomv1alpha1.Subject) (string, error) {
+	switch subject.Kind {
+	// TODO: Update Milo API to export a canonical SubjectKind type or enum, and use it here for type safety and maintainability.
+	case "User":
+		return fmt.Sprintf("iam.miloapis.com/InternalUser:%s", subject.UID), nil // Represent all subjects as InternalUser with their original UID
+	case "Group":
+		return fmt.Sprintf("iam.miloapis.com/InternalUserGroup:%s#assignee", subject.UID), nil // Represent all subjects as InternalUserGroup with their original UID and assignee relation
+	default:
+		return "", fmt.Errorf("unsupported subject kind: %s", subject.Kind)
+	}
 }

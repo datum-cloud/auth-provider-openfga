@@ -37,7 +37,7 @@ func createWebhookCommand() *cobra.Command {
 		Use:   "authz-webhook",
 		Short: "Start the OpenFGA authorization webhook server",
 		Long:  "Start the authorization webhook server that validates SubjectAccessReview requests using OpenFGA.",
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(_ *cobra.Command, _ []string) error {
 			return runWebhookServer(
 				certDir,
 				certFile,
