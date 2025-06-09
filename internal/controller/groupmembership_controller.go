@@ -264,7 +264,7 @@ func (r *GroupMembershipReconciler) enqueueGroupMembershipsForChange(ctx context
 	}
 
 	var groupMembershipList iammiloapiscomv1alpha1.GroupMembershipList
-	if err := r.List(ctx, &groupMembershipList); err != nil {
+	if err := r.List(ctx, &groupMembershipList, client.InNamespace("")); err != nil {
 		log.Error(err, "failed to list GroupMemberships")
 		return nil
 	}
