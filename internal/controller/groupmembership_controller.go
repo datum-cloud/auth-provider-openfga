@@ -15,6 +15,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/finalizer"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -196,7 +197,9 @@ func (r *GroupMembershipReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 	// Set Ready condition after both validations
 	if !isUserRefValid || !isGroupRefValid {
-		log.Info("GroupMembership conditions are not valid. Skipping reconciliation.", "userRefValid", isUserRefValid, "groupRefValid", isGroupRefValid)
+		log.Info("GroupMembership conditions are not valid",
+			"userRefValid", isUserRefValid,
+			"groupRefValid", isGroupRefValid)
 
 		meta.SetStatusCondition(&groupMembership.Status.Conditions, metav1.Condition{
 			Type:               "Ready",
@@ -248,6 +251,78 @@ func (r *GroupMembershipReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	return ctrl.Result{}, nil
 }
 
+// enqueueGroupMembershipsForChange is a helper function that returns GroupMembership requests for resource changes
+func (r *GroupMembershipReconciler) enqueueGroupMembershipsForChange(ctx context.Context, obj client.Object, resourceType string, fieldName string) []ctrl.Request {
+	log := logf.FromContext(ctx)
+
+	log.Info("Enqueuing GroupMemberships for resource change", "resourceType", resourceType, "fieldName", fieldName)
+
+	_, ok := obj.(metav1.Object)
+	if !ok {
+		log.Error(fmt.Errorf("object is not a metav1.Object"), "failed to get metadata")
+		return nil
+	}
+
+	var groupMembershipList iammiloapiscomv1alpha1.GroupMembershipList
+	if err := r.List(ctx, &groupMembershipList); err != nil {
+		log.Error(err, "failed to list GroupMemberships")
+		return nil
+	}
+
+	log.Info("Processing GroupMemberships for resource change", "resourceType", resourceType, "totalGroupMemberships", len(groupMembershipList.Items))
+
+	var requests []ctrl.Request
+	switch resourceType {
+	case "user":
+		user, ok := obj.(*iammiloapiscomv1alpha1.User)
+		if !ok {
+			log.Error(fmt.Errorf("expected a User but got a %T", obj), "failed to get User from object")
+			return nil
+		}
+		for _, groupMembership := range groupMembershipList.Items {
+			if groupMembership.Spec.UserRef.Name == user.Name {
+				requests = append(requests, ctrl.Request{
+					NamespacedName: client.ObjectKey{
+						Name:      groupMembership.Name,
+						Namespace: groupMembership.Namespace,
+					},
+				})
+			}
+		}
+		log.Info("Requeuing GroupMemberships", "resourceType", resourceType, "name", user.Name, "field", fieldName, "requestCount", len(requests))
+
+	case "group":
+		group, ok := obj.(*iammiloapiscomv1alpha1.Group)
+		if !ok {
+			log.Error(fmt.Errorf("expected a Group but got a %T", obj), "failed to get Group from object")
+			return nil
+		}
+		for _, groupMembership := range groupMembershipList.Items {
+			if groupMembership.Spec.GroupRef.Name == group.Name && groupMembership.Spec.GroupRef.Namespace == group.Namespace {
+				requests = append(requests, ctrl.Request{
+					NamespacedName: client.ObjectKey{
+						Name:      groupMembership.Name,
+						Namespace: groupMembership.Namespace,
+					},
+				})
+			}
+		}
+		log.Info("Requeuing GroupMemberships", "resourceType", resourceType, "name", fmt.Sprintf("%s/%s", group.Namespace, group.Name), "field", fieldName, "requestCount", len(requests))
+	}
+
+	return requests
+}
+
+// enqueueGroupMembershipsForUserChange returns GroupMembership requests that reference the changed User
+func (r *GroupMembershipReconciler) enqueueGroupMembershipsForUserChange(ctx context.Context, obj client.Object) []ctrl.Request {
+	return r.enqueueGroupMembershipsForChange(ctx, obj, "user", "userRef")
+}
+
+// enqueueGroupMembershipsForGroupChange returns GroupMembership requests that reference the changed Group
+func (r *GroupMembershipReconciler) enqueueGroupMembershipsForGroupChange(ctx context.Context, obj client.Object) []ctrl.Request {
+	return r.enqueueGroupMembershipsForChange(ctx, obj, "group", "groupRef")
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *GroupMembershipReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	r.UserGroupReconciler = &openfga.UserGroupReconciler{
@@ -264,8 +339,19 @@ func (r *GroupMembershipReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		return fmt.Errorf("failed to register group membership finalizer: %w", err)
 	}
 
-	return ctrl.NewControllerManagedBy(mgr).
+	controllerBuilder := ctrl.NewControllerManagedBy(mgr).
 		For(&iammiloapiscomv1alpha1.GroupMembership{}).
-		Named("groupmembership").
-		Complete(r)
+		Named("groupmembership")
+
+	controllerBuilder.Watches(
+		&iammiloapiscomv1alpha1.User{},
+		handler.EnqueueRequestsFromMapFunc(r.enqueueGroupMembershipsForUserChange),
+	)
+
+	controllerBuilder.Watches(
+		&iammiloapiscomv1alpha1.Group{},
+		handler.EnqueueRequestsFromMapFunc(r.enqueueGroupMembershipsForGroupChange),
+	)
+
+	return controllerBuilder.Complete(r)
 }
