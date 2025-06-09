@@ -1,0 +1,11 @@
+apiVersion: iam.miloapis.com/v1alpha1
+kind: GroupMembership
+metadata:
+  name: non-existent-refs-membership
+  namespace: ($namespace)
+spec:
+  userRef:
+    name: non-existent-user
+  groupRef:
+    name: non-existent-group
+    namespace: ($namespace)

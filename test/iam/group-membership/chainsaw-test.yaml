@@ -34,3 +34,5 @@ spec:
           deletion: {}
     - error: # Assert that the group membership is deleted
         file: resources/group-membership.yaml
+
+# TODO: Add tests for user and group changes, and then verify that the GroupMembership is updated, once the User and Group controllers are implemented
