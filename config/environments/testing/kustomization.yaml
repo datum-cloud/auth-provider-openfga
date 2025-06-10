@@ -17,6 +17,8 @@ resources:
 
 # Components enabled for testing
 components:
+  # Create a namespace for the system
+  - ../../components/namespace
   # Enable TLS for authz webhook
   - webhook-tls
 

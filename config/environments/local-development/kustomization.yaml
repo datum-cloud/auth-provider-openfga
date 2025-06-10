@@ -14,6 +14,8 @@ resources:
 
 # Optional components (enable/disable as needed)
 components:
+  # Create a namespace for the system
+  - ../../components/namespace
   # Enable TLS certificates with development issuers
   - ../../components/tls-certs
   # Enable TLS for authz webhook
