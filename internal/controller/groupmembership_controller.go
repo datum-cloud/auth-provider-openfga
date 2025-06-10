@@ -51,7 +51,7 @@ func (f *UserGroupFinalizer) Finalize(ctx context.Context, obj client.Object) (f
 		return finalizer.Result{}, fmt.Errorf("unexpected object type %T, expected GroupMembership", obj)
 	}
 
-	// Fetch the referenced User and Group to get their UIDs
+	// Fetch the referenced User
 	user := &iammiloapiscomv1alpha1.User{}
 	err := f.K8sClient.Get(ctx, client.ObjectKey{
 		Name: groupMembership.Spec.UserRef.Name,
@@ -60,6 +60,8 @@ func (f *UserGroupFinalizer) Finalize(ctx context.Context, obj client.Object) (f
 		log.Error(err, "Failed to get User for finalization")
 		return finalizer.Result{}, err
 	}
+
+	// Fetch the referenced Group
 	group := &iammiloapiscomv1alpha1.Group{}
 	err = f.K8sClient.Get(ctx, client.ObjectKey{
 		Name:      groupMembership.Spec.GroupRef.Name,
@@ -70,14 +72,13 @@ func (f *UserGroupFinalizer) Finalize(ctx context.Context, obj client.Object) (f
 		return finalizer.Result{}, err
 	}
 
+	log.Info("Removing group membership during finalization", "GroupMembership", groupMembership.Name, "groupRef", group.UID, "userRef", user.UID)
+
+	// Remove the group membership tuple from the OpenFGA store
 	groupMembershipRequest := openfga.GroupMembershipRequest{
 		GroupUID:  group.UID,
 		MemberUID: user.UID,
 	}
-
-	log.Info("Removing group membership during finalization", "groupRef", group.UID, "userRef", user.UID)
-
-	// Remove the group membership tuple from the OpenFGA store
 	err = f.UserGroupReconciler.RemoveMemberFromGroup(ctx, groupMembershipRequest)
 	if err != nil {
 		log.Error(err, "Failed to remove group membership during finalization")
@@ -105,6 +106,7 @@ func (r *GroupMembershipReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	log := logf.FromContext(ctx)
 	log.Info("Reconciling GroupMembership")
 
+	// Get the GroupMembership object
 	groupMembership := &iammiloapiscomv1alpha1.GroupMembership{}
 	err := r.Get(ctx, req.NamespacedName, groupMembership)
 	if err != nil {
@@ -116,6 +118,7 @@ func (r *GroupMembershipReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, err
 	}
 
+	// Run the finalizer
 	finalizeResult, err := r.Finalizers.Finalize(ctx, groupMembership)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to run finalizers for GroupMembership: %w", err)
@@ -134,70 +137,39 @@ func (r *GroupMembershipReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, nil
 	}
 
-	isUserRefValid := true
 	// Validate UserRef
 	user := &iammiloapiscomv1alpha1.User{}
-	err = r.Get(ctx, client.ObjectKey{
-		Name: groupMembership.Spec.UserRef.Name,
-	}, user)
+	isUserRefValid, err := r.validateRef(
+		ctx,
+		user,
+		client.ObjectKey{Name: groupMembership.Spec.UserRef.Name},
+		ConditionTypeUserRefValid,
+		&groupMembership.Status.Conditions,
+	)
 	if err != nil {
-		if errors.IsNotFound(err) {
-			meta.SetStatusCondition(&groupMembership.Status.Conditions, metav1.Condition{
-				Type:               ConditionTypeUserRefValid,
-				Status:             metav1.ConditionFalse,
-				Reason:             ReasonValidationFailed,
-				Message:            fmt.Sprintf("UserRef not found: %v", err),
-				LastTransitionTime: metav1.Now(),
-			})
-			isUserRefValid = false
-		} else {
-			log.Error(err, "Failed to get User for GroupMembership")
-			return ctrl.Result{}, err
-		}
-	} else {
-		meta.SetStatusCondition(&groupMembership.Status.Conditions, metav1.Condition{
-			Type:               ConditionTypeUserRefValid,
-			Status:             metav1.ConditionTrue,
-			Reason:             ReasonValidationSuccessful,
-			Message:            "UserRef is valid.",
-			LastTransitionTime: metav1.Now(),
-		})
+		return ctrl.Result{}, err
 	}
 
-	isGroupRefValid := true
 	// Validate GroupRef
 	group := &iammiloapiscomv1alpha1.Group{}
-	err = r.Get(ctx, client.ObjectKey{
-		Name:      groupMembership.Spec.GroupRef.Name,
-		Namespace: groupMembership.Spec.GroupRef.Namespace,
-	}, group)
+	isGroupRefValid, err := r.validateRef(
+		ctx,
+		group,
+		client.ObjectKey{
+			Name:      groupMembership.Spec.GroupRef.Name,
+			Namespace: groupMembership.Spec.GroupRef.Namespace,
+		},
+		ConditionTypeGroupRefValid,
+		&groupMembership.Status.Conditions,
+	)
 	if err != nil {
-		if errors.IsNotFound(err) {
-			meta.SetStatusCondition(&groupMembership.Status.Conditions, metav1.Condition{
-				Type:               ConditionTypeGroupRefValid,
-				Status:             metav1.ConditionFalse,
-				Reason:             ReasonValidationFailed,
-				Message:            fmt.Sprintf("GroupRef not found: %v", err),
-				LastTransitionTime: metav1.Now(),
-			})
-			isGroupRefValid = false
-		} else {
-			log.Error(err, "Failed to get Group for GroupMembership")
-			return ctrl.Result{}, err
-		}
-	} else {
-		meta.SetStatusCondition(&groupMembership.Status.Conditions, metav1.Condition{
-			Type:               ConditionTypeGroupRefValid,
-			Status:             metav1.ConditionTrue,
-			Reason:             ReasonValidationSuccessful,
-			Message:            "GroupRef is valid.",
-			LastTransitionTime: metav1.Now(),
-		})
+		return ctrl.Result{}, err
 	}
 
 	// Set Ready condition after both validations
 	if !isUserRefValid || !isGroupRefValid {
 		log.Info("GroupMembership conditions are not valid",
+			"GroupMembership", groupMembership.Name,
 			"userRefValid", isUserRefValid,
 			"groupRefValid", isGroupRefValid)
 
@@ -216,17 +188,15 @@ func (r *GroupMembershipReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 		return ctrl.Result{}, nil
 	}
+
 	log.Info("GroupMembership conditions are valid. Proceeding with reconciliation.", "userRefValid", isUserRefValid, "groupRefValid", isGroupRefValid)
 
+	// Add the group membership tuple to the OpenFGA store
 	groupMembershipRequest := openfga.GroupMembershipRequest{
 		GroupUID:  group.UID,
 		MemberUID: user.UID,
 	}
-
-	userGroupReconciler := r.UserGroupReconciler
-
-	// Add the group membership tuple to the OpenFGA store
-	err = userGroupReconciler.AddMemberToGroup(ctx, groupMembershipRequest)
+	err = r.UserGroupReconciler.AddMemberToGroup(ctx, groupMembershipRequest)
 	if err != nil {
 		log.Error(err, "Failed to reconcile group membership")
 		r.EventRecorder.Event(groupMembership, "Warning", "OpenFGAError", fmt.Sprintf("Failed to write group membership tuple: %v", err))
@@ -241,7 +211,6 @@ func (r *GroupMembershipReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		Message:            "Group membership successfully reconciled",
 		LastTransitionTime: metav1.Now(),
 	})
-
 	if err := r.Status().Update(ctx, groupMembership); err != nil {
 		log.Error(err, "Failed to update GroupMembership status")
 		return ctrl.Result{}, err
@@ -249,6 +218,41 @@ func (r *GroupMembershipReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 	log.Info("Successfully reconciled GroupMembership")
 	return ctrl.Result{}, nil
+}
+
+// validateRef is a helper function that validates a reference to a k8s object
+func (r *GroupMembershipReconciler) validateRef(
+	ctx context.Context,
+	obj client.Object,
+	key client.ObjectKey,
+	conditionType string,
+	conditions *[]metav1.Condition,
+) (bool, error) {
+	log := logf.FromContext(ctx)
+	err := r.Get(ctx, key, obj)
+	if err != nil {
+		if errors.IsNotFound(err) {
+			meta.SetStatusCondition(conditions, metav1.Condition{
+				Type:               conditionType,
+				Status:             metav1.ConditionFalse,
+				Reason:             ReasonValidationFailed,
+				Message:            fmt.Sprintf("Reference not found: %v", err),
+				LastTransitionTime: metav1.Now(),
+			})
+			return false, nil
+		}
+		log.Error(err, "Failed to get referenced object", "conditionType", conditionType)
+		return false, err
+	}
+
+	meta.SetStatusCondition(conditions, metav1.Condition{
+		Type:               conditionType,
+		Status:             metav1.ConditionTrue,
+		Reason:             ReasonValidationSuccessful,
+		Message:            "Reference is valid.",
+		LastTransitionTime: metav1.Now(),
+	})
+	return true, nil
 }
 
 // enqueueGroupMembershipsForChange is a helper function that returns GroupMembership requests for resource changes
