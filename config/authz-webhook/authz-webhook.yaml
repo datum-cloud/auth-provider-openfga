@@ -37,7 +37,7 @@ spec:
         - name: OPENFGA_API_URL
           value: openfga.openfga-system.svc.cluster.local:8081
         - name: OPENFGA_STORE_ID
-          value: r01JVTBDT6NJ541P1JBT22GX4PR
+          value: 01JVTBDT6NJ541P1JBT22GX4PR
         ports:
           - containerPort: 8080
             name: metrics

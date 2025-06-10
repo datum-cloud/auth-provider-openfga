@@ -194,11 +194,19 @@ spec:
                   )
                   echo "Webhook response: $response"
                   # Check if we got a valid SubjectAccessReview response
-                  if echo "$response" | grep -q '"kind":"SubjectAccessReview"'; then
-                    echo "Webhook test completed successfully"
+                  if ! echo "$response" | grep -q '"kind":"SubjectAccessReview"'; then
+                    echo "Webhook test failed - invalid response format"
+                    exit 1
+                  fi
+                  # Check if the request was allowed
+                  if echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*true'; then
+                    echo "Webhook test completed successfully - access allowed"
                     exit 0
+                  elif echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*false'; then
+                    echo "Webhook test failed - access denied by authorization webhook"
+                    exit 1
                   else
-                    echo "Webhook test failed - invalid response"
+                    echo "Webhook test failed - could not determine allowed status"
                     exit 1
                   fi
               env:
@@ -311,11 +319,19 @@ spec:
                   )
                   echo "Webhook response: $response"
                   # Check if we got a valid SubjectAccessReview response
-                  if echo "$response" | grep -q '"kind":"SubjectAccessReview"'; then
-                    echo "Webhook test completed successfully"
+                  if ! echo "$response" | grep -q '"kind":"SubjectAccessReview"'; then
+                    echo "Webhook test failed - invalid response format"
+                    exit 1
+                  fi
+                  # Check if the request was allowed
+                  if echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*true'; then
+                    echo "Webhook test completed successfully - access allowed"
                     exit 0
+                  elif echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*false'; then
+                    echo "Webhook test failed - access denied by authorization webhook"
+                    exit 1
                   else
-                    echo "Webhook test failed - invalid response"
+                    echo "Webhook test failed - could not determine allowed status"
                     exit 1
                   fi
               env:
@@ -333,7 +349,3 @@ spec:
             name: group-user-webhook-test
           status:
             phase: Succeeded
-
-
-
-    
