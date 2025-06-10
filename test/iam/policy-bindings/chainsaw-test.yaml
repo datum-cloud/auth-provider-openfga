@@ -225,6 +225,8 @@ spec:
           status:
             phase: Succeeded
 
+  
+  # Test that user can inherit the PolicyBinding of the group.
     - apply:
         file: group.yaml
         outputs:
@@ -349,6 +351,8 @@ spec:
             name: group-user-webhook-test
           status:
             phase: Succeeded
+
+  # Test that user lost the PolicyBinding of the group after the group membership is deleted.
     - delete: # Delete group membership
         file: group-memership.yaml
     - wait: # Wait for group membership to be deleted
@@ -398,11 +402,19 @@ spec:
                   )
                   echo "Webhook response: $response"
                   # Check if we got a valid SubjectAccessReview response
-                  if echo "$response" | grep -q '"kind":"SubjectAccessReview"'; then
-                    echo "Webhook test completed successfully"
+                  if ! echo "$response" | grep -q '"kind":"SubjectAccessReview"'; then
+                    echo "Webhook test failed - invalid response format"
+                    exit 1
+                  fi
+                  # Check if the request was allowed
+                  if echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*true'; then
+                    echo "Webhook test completed successfully - access allowed"
                     exit 0
+                  elif echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*false'; then
+                    echo "Webhook test failed - access denied by authorization webhook"
+                    exit 1
                   else
-                    echo "Webhook test failed - invalid response"
+                    echo "Webhook test failed - could not determine allowed status"
                     exit 1
                   fi
               env:
@@ -411,7 +423,7 @@ spec:
                 - name: ORG_UID
                   value: ($org.metadata.uid)
     - sleep:
-        duration: 5s
+        duration: 30s
     - assert:
         resource:
           apiVersion: v1
@@ -419,7 +431,7 @@ spec:
           metadata:
             name: group-user-webhook-test-deletion
           status:
-            phase: Failed
+            phase: Failed # This should be failed because the group membership is deleted, and the user is not a member of the group anymore.
 
 
 
