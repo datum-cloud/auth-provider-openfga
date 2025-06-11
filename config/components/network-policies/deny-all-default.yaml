@@ -1,0 +1,14 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: deny-all-default
+  labels:
+    app.kubernetes.io/name: auth-provider-openfga
+    app.kubernetes.io/component: network-policy
+spec:
+  podSelector: {} # Applies to all pods in the namespace
+  policyTypes:
+    - Ingress
+    - Egress
+  # No ingress or egress rules means deny all
+  # Other NetworkPolicies will create specific allow rules

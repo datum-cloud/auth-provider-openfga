@@ -1,0 +1,44 @@
+# Testing Environment Issuer Configuration
+# Uses self-signed certificates for CI/CD and E2E testing
+
+# Root self-signed issuer for testing
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: test-selfsigned-issuer
+  labels:
+    app.kubernetes.io/name: auth-provider-openfga
+    app.kubernetes.io/component: test-tls
+spec:
+  selfSigned: {}
+
+---
+# CA Certificate for testing
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: auth-provider-openfga-test-ca
+  namespace: cert-manager
+  labels:
+    app.kubernetes.io/name: auth-provider-openfga
+    app.kubernetes.io/component: test-tls
+spec:
+  isCA: true
+  commonName: auth-provider-openfga-test-ca
+  secretName: auth-provider-openfga-test-ca-secret
+  issuerRef:
+    name: test-selfsigned-issuer
+    kind: ClusterIssuer
+
+---
+# CA-based issuer for application certificates in testing
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: auth-provider-openfga-test-ca-issuer
+  labels:
+    app.kubernetes.io/name: auth-provider-openfga
+    app.kubernetes.io/component: test-tls
+spec:
+  ca:
+    secretName: auth-provider-openfga-test-ca-secret

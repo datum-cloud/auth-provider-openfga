@@ -1,0 +1,95 @@
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+# TLS Certificate Component (Environment-agnostic)
+# Enables HTTPS for metrics and webhook endpoints using cert-manager CSI driver
+#
+# The CSI driver automatically creates certificates based on volume attributes,
+# so no separate Certificate resources are needed.
+#
+# Usage:
+#   components:
+#     - ../../components/tls-certs
+#
+#   replacements:
+#     - source:
+#         kind: ClusterIssuer
+#         name: your-environment-issuer
+#         fieldPath: metadata.name
+#       targets:
+#         - select:
+#             kind: Deployment
+#             name: authz-webhook
+#         fieldPaths:
+#           - spec.template.spec.volumes.[name=webhook-server-tls].csi.volumeAttributes.[csi.cert-manager.io/issuer-name]
+
+# No resources needed - CSI driver handles certificate creation automatically
+
+# Patches to enable TLS using cert-manager CSI driver
+patches:
+  # Enable HTTPS on metrics service port
+  - target:
+      kind: Service
+      name: controller-manager-metrics-service
+    patch: |-
+      - op: replace
+        path: /spec/ports/0/name
+        value: https
+      - op: replace
+        path: /spec/ports/0/port
+        value: 8443
+      - op: replace
+        path: /spec/ports/0/targetPort
+        value: 8443
+
+  # Configure controller manager for HTTPS metrics with CSI driver
+  - target:
+      kind: Deployment
+      name: controller-manager
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/args/3
+        value: --metrics-bind-address=:8443
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: --metrics-cert-path=/etc/metrics/serving-certs
+      - op: add
+        path: /spec/template/spec/containers/0/volumeMounts/-
+        value:
+          mountPath: /etc/metrics/serving-certs
+          name: metrics-certs
+          readOnly: true
+      - op: add
+        path: /spec/template/spec/volumes/-
+        value:
+          name: metrics-certs
+          csi:
+            driver: csi.cert-manager.io
+            readOnly: true
+            volumeAttributes:
+              csi.cert-manager.io/issuer-name: default-metrics-csi-issuer
+              csi.cert-manager.io/issuer-kind: ClusterIssuer
+              csi.cert-manager.io/common-name: controller-manager-metrics
+              csi.cert-manager.io/dns-names: controller-manager-metrics-service,controller-manager-metrics-service.auth-provider-openfga-system.svc,controller-manager-metrics-service.auth-provider-openfga-system.svc.cluster.local
+              csi.cert-manager.io/fs-group: "65532"
+
+  # Update ServiceMonitor for HTTPS with CSI certificates
+  - target:
+      kind: ServiceMonitor
+      name: controller-manager-metrics-monitor
+    patch: |-
+      - op: replace
+        path: /spec/endpoints/0/port
+        value: https
+      - op: replace
+        path: /spec/endpoints/0/scheme
+        value: https
+      - op: replace
+        path: /spec/endpoints/0/tlsConfig/insecureSkipVerify
+        value: false
+      - op: add
+        path: /spec/endpoints/0/tlsConfig/ca
+        value:
+          configMap:
+            name: kube-root-ca.crt
+            key: ca.crt

@@ -1,0 +1,9 @@
+resources:
+- authz-webhook.yaml
+- authz-webhook-service.yaml
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+images:
+- name: auth-provider-openfga
+  newName: auth-provider-openfga
+  newTag: dev

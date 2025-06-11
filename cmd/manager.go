@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"strings"
+	"time"
 
 	openfgav1 "github.com/openfga/api/proto/openfga/v1"
 	"github.com/spf13/cobra"
@@ -26,6 +27,14 @@ func createManagerCommand() *cobra.Command {
 	var openfgaStoreID string
 	var openfgaScheme string
 
+	// Leader election configuration options
+	var leaderElectionID string
+	var leaderElectionNamespace string
+	var leaderElectionResourceLock string
+	var leaseDuration time.Duration
+	var renewDeadline time.Duration
+	var retryPeriod time.Duration
+
 	cmd := &cobra.Command{
 		Use:   "manager",
 		Short: "Start the controller manager",
@@ -38,6 +47,12 @@ func createManagerCommand() *cobra.Command {
 				openfgaAPIURL,
 				openfgaStoreID,
 				openfgaScheme,
+				leaderElectionID,
+				leaderElectionNamespace,
+				leaderElectionResourceLock,
+				leaseDuration,
+				renewDeadline,
+				retryPeriod,
 			)
 		},
 	}
@@ -47,6 +62,15 @@ func createManagerCommand() *cobra.Command {
 	cmd.Flags().BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager. "+
 			"Ensuring that only one instance of the controller manager runs.")
+
+	// Leader election configuration flags
+	cmd.Flags().StringVar(&leaderElectionID, "leader-election-id", "4b85f171.miloapis.com", "The name of the resource that leader election will use for holding the leader lock.")
+	cmd.Flags().StringVar(&leaderElectionNamespace, "leader-election-namespace", "", "Namespace to use for leader election. If empty, the controller will discover the namespace it is running in.")
+	cmd.Flags().StringVar(&leaderElectionResourceLock, "leader-election-resource-lock", "leases", "The type of resource object that is used for locking during leader election. Supported options are 'leases', 'endpointsleases' and 'configmapsleases'.")
+	cmd.Flags().DurationVar(&leaseDuration, "leader-election-lease-duration", 15*time.Second, "The duration that non-leader candidates will wait after observing a leadership renewal until attempting to acquire leadership of a led but unrenewed leader slot.")
+	cmd.Flags().DurationVar(&renewDeadline, "leader-election-renew-deadline", 10*time.Second, "The interval between attempts by the acting master to renew a leadership slot before it stops leading.")
+	cmd.Flags().DurationVar(&retryPeriod, "leader-election-retry-period", 2*time.Second, "The duration the clients should wait between attempting acquisition and renewal of a leadership.")
+
 	cmd.Flags().StringVar(&openfgaAPIURL, "openfga-api-url", "",
 		"OpenFGA API URL (e.g. localhost:8080 or api.us1.fga.dev)")
 	cmd.Flags().StringVar(&openfgaStoreID, "openfga-store-id", "", "OpenFGA Store ID")
@@ -70,6 +94,12 @@ func runManager(
 	openfgaAPIURL string,
 	openfgaStoreID string,
 	openfgaScheme string,
+	leaderElectionID string,
+	leaderElectionNamespace string,
+	leaderElectionResourceLock string,
+	leaseDuration time.Duration,
+	renewDeadline time.Duration,
+	retryPeriod time.Duration,
 ) error {
 	opts := zap.Options{
 		Development: true,
@@ -107,11 +137,16 @@ func runManager(
 	fgaClient := openfgav1.NewOpenFGAServiceClient(conn)
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Scheme:                 scheme,
-		Metrics:                metricsserver.Options{BindAddress: metricsAddr},
-		HealthProbeBindAddress: probeAddr,
-		LeaderElection:         enableLeaderElection,
-		LeaderElectionID:       "4b85f171.miloapis.com",
+		Scheme:                     scheme,
+		Metrics:                    metricsserver.Options{BindAddress: metricsAddr},
+		HealthProbeBindAddress:     probeAddr,
+		LeaderElection:             enableLeaderElection,
+		LeaderElectionID:           leaderElectionID,
+		LeaderElectionNamespace:    leaderElectionNamespace,
+		LeaderElectionResourceLock: leaderElectionResourceLock,
+		LeaseDuration:              &leaseDuration,
+		RenewDeadline:              &renewDeadline,
+		RetryPeriod:                &retryPeriod,
 	})
 	if err != nil {
 		return fmt.Errorf("unable to start manager: %w", err)

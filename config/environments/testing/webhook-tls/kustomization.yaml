@@ -1,0 +1,31 @@
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+# Webhook TLS only - doesn't include controller manager TLS
+# since the application doesn't support --metrics-cert-path yet
+
+patches:
+  # Configure authz webhook deployment for TLS with CSI driver
+  - target:
+      kind: Deployment
+      name: authz-webhook
+    patch: |-
+      - op: add
+        path: /spec/template/spec/volumes/-
+        value:
+          name: webhook-server-tls
+          csi:
+            driver: csi.cert-manager.io
+            readOnly: true
+            volumeAttributes:
+              csi.cert-manager.io/issuer-name: auth-provider-openfga-test-ca-issuer
+              csi.cert-manager.io/issuer-kind: ClusterIssuer
+              csi.cert-manager.io/common-name: authz-webhook
+              csi.cert-manager.io/dns-names: openfga-authz-webhook-service,openfga-authz-webhook-service.auth-provider-openfga-system.svc,openfga-authz-webhook-service.auth-provider-openfga-system.svc.cluster.local
+              csi.cert-manager.io/fs-group: "65532"
+      - op: add
+        path: /spec/template/spec/containers/0/volumeMounts/-
+        value:
+          mountPath: /etc/webhook/serving-certs
+          name: webhook-server-tls
+          readOnly: true
