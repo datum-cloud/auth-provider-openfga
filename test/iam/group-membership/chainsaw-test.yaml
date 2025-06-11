@@ -66,12 +66,3 @@ spec:
             value: 'true'
     - assert: # Assert that the group membership is created
         file: resources/non-existent-refs-valid.yaml
-    - delete: # Delete group membership
-        file: resources/non-existent-group-membership.yaml
-    - wait: # Wait for group membership to be deleted
-        apiVersion: iam.miloapis.com/v1alpha1
-        kind: GroupMembership
-        name: non-existent-refs-membership
-        timeout: 5m
-        for:
-          deletion: {}

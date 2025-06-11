@@ -72,6 +72,11 @@ func (f *UserGroupFinalizer) Finalize(ctx context.Context, obj client.Object) (f
 		return finalizer.Result{}, err
 	}
 
+	if group.UID == "" || user.UID == "" {
+		log.Info("Group or user is not found, skipping finalization", "groupName", group.Name, "userName", user.Name)
+		return finalizer.Result{}, nil
+	}
+
 	log.Info("Removing group membership during finalization", "GroupMembership", groupMembership.Name, "groupRef", group.UID, "userRef", user.UID)
 
 	// Remove the group membership tuple from the OpenFGA store
