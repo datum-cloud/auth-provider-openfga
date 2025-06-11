@@ -65,7 +65,7 @@ jobs:
       id-token: write
       contents: read
       packages: write
-    uses: datum-cloud/actions/.github/workflows/publish-kustomize-bundle.yaml@output-build-tags
+    uses: datum-cloud/actions/.github/workflows/publish-kustomize-bundle.yaml@v1.5.0
     with:
       bundle-name: ghcr.io/datum-cloud/auth-provider-openfga-kustomize
       bundle-path: config
