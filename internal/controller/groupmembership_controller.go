@@ -255,32 +255,41 @@ func (r *GroupMembershipReconciler) validateRef(
 	return true, nil
 }
 
+// GroupMembershipChangeRequest contains the parameters for enqueuing GroupMemberships for changes
+type GroupMembershipChangeRequest struct {
+	Ctx          context.Context
+	Obj          client.Object
+	ResourceType string
+	FieldName    string
+	Namespace    string
+}
+
 // enqueueGroupMembershipsForChange is a helper function that returns GroupMembership requests for resource changes
-func (r *GroupMembershipReconciler) enqueueGroupMembershipsForChange(ctx context.Context, obj client.Object, resourceType string, fieldName string) []ctrl.Request {
-	log := logf.FromContext(ctx)
+func (r *GroupMembershipReconciler) enqueueGroupMembershipsForChange(req GroupMembershipChangeRequest) []ctrl.Request {
+	log := logf.FromContext(req.Ctx)
 
-	log.Info("Enqueuing GroupMemberships for resource change", "resourceType", resourceType, "fieldName", fieldName)
+	log.Info("Enqueuing GroupMemberships for resource change", "resourceType", req.ResourceType, "fieldName", req.FieldName)
 
-	_, ok := obj.(metav1.Object)
+	_, ok := req.Obj.(metav1.Object)
 	if !ok {
 		log.Error(fmt.Errorf("object is not a metav1.Object"), "failed to get metadata")
 		return nil
 	}
 
 	var groupMembershipList iammiloapiscomv1alpha1.GroupMembershipList
-	if err := r.List(ctx, &groupMembershipList, client.InNamespace("")); err != nil {
+	if err := r.List(req.Ctx, &groupMembershipList, client.InNamespace(req.Namespace)); err != nil {
 		log.Error(err, "failed to list GroupMemberships")
 		return nil
 	}
 
-	log.Info("Processing GroupMemberships for resource change", "resourceType", resourceType, "totalGroupMemberships", len(groupMembershipList.Items))
+	log.Info("Processing GroupMemberships for resource change", "resourceType", req.ResourceType, "totalGroupMemberships", len(groupMembershipList.Items))
 
 	var requests []ctrl.Request
-	switch resourceType {
+	switch req.ResourceType {
 	case "user":
-		user, ok := obj.(*iammiloapiscomv1alpha1.User)
+		user, ok := req.Obj.(*iammiloapiscomv1alpha1.User)
 		if !ok {
-			log.Error(fmt.Errorf("expected a User but got a %T", obj), "failed to get User from object")
+			log.Error(fmt.Errorf("expected a User but got a %T", req.Obj), "failed to get User from object")
 			return nil
 		}
 		for _, groupMembership := range groupMembershipList.Items {
@@ -293,12 +302,12 @@ func (r *GroupMembershipReconciler) enqueueGroupMembershipsForChange(ctx context
 				})
 			}
 		}
-		log.Info("Requeuing GroupMemberships", "resourceType", resourceType, "name", user.Name, "field", fieldName, "requestCount", len(requests))
+		log.Info("Requeuing GroupMemberships", "resourceType", req.ResourceType, "name", user.Name, "field", req.FieldName, "requestCount", len(requests))
 
 	case "group":
-		group, ok := obj.(*iammiloapiscomv1alpha1.Group)
+		group, ok := req.Obj.(*iammiloapiscomv1alpha1.Group)
 		if !ok {
-			log.Error(fmt.Errorf("expected a Group but got a %T", obj), "failed to get Group from object")
+			log.Error(fmt.Errorf("expected a Group but got a %T", req.Obj), "failed to get Group from object")
 			return nil
 		}
 		for _, groupMembership := range groupMembershipList.Items {
@@ -311,7 +320,7 @@ func (r *GroupMembershipReconciler) enqueueGroupMembershipsForChange(ctx context
 				})
 			}
 		}
-		log.Info("Requeuing GroupMemberships", "resourceType", resourceType, "name", fmt.Sprintf("%s/%s", group.Namespace, group.Name), "field", fieldName, "requestCount", len(requests))
+		log.Info("Requeuing GroupMemberships", "resourceType", req.ResourceType, "name", fmt.Sprintf("%s/%s", group.Namespace, group.Name), "field", req.FieldName, "requestCount", len(requests))
 	}
 
 	return requests
@@ -319,12 +328,24 @@ func (r *GroupMembershipReconciler) enqueueGroupMembershipsForChange(ctx context
 
 // enqueueGroupMembershipsForUserChange returns GroupMembership requests that reference the changed User
 func (r *GroupMembershipReconciler) enqueueGroupMembershipsForUserChange(ctx context.Context, obj client.Object) []ctrl.Request {
-	return r.enqueueGroupMembershipsForChange(ctx, obj, "user", "userRef")
+	return r.enqueueGroupMembershipsForChange(GroupMembershipChangeRequest{
+		Ctx:          ctx,
+		Obj:          obj,
+		ResourceType: "user",
+		FieldName:    "userRef",
+		Namespace:    "", // "" means all namespaces
+	})
 }
 
 // enqueueGroupMembershipsForGroupChange returns GroupMembership requests that reference the changed Group
 func (r *GroupMembershipReconciler) enqueueGroupMembershipsForGroupChange(ctx context.Context, obj client.Object) []ctrl.Request {
-	return r.enqueueGroupMembershipsForChange(ctx, obj, "group", "groupRef")
+	return r.enqueueGroupMembershipsForChange(GroupMembershipChangeRequest{
+		Ctx:          ctx,
+		Obj:          obj,
+		ResourceType: "group",
+		FieldName:    "groupRef",
+		Namespace:    obj.GetNamespace(),
+	})
 }
 
 // SetupWithManager sets up the controller with the Manager.
