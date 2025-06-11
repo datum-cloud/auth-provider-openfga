@@ -11,8 +11,6 @@ namespace: auth-provider-openfga-system
 namePrefix: auth-provider-openfga-
 
 resources:
-  # Application namespace
-  - namespace.yaml
   # RBAC resources (service accounts, roles, bindings)
   - rbac
   # Application services
