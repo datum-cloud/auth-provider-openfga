@@ -408,11 +408,11 @@ spec:
                   fi
                   # Check if the request was allowed
                   if echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*true'; then
-                    echo "Webhook test completed successfully - access allowed"
-                    exit 0
-                  elif echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*false'; then
-                    echo "Webhook test failed - access denied by authorization webhook"
+                    echo "Webhook test failed - access was allowed"
                     exit 1
+                  elif echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*false'; then
+                    echo "Webhook test succeeded - access denied by authorization webhook"
+                    exit 0
                   else
                     echo "Webhook test failed - could not determine allowed status"
                     exit 1
@@ -431,7 +431,7 @@ spec:
           metadata:
             name: group-user-webhook-test-deletion
           status:
-            phase: Failed # This should be failed because the group membership is deleted, and the user is not a member of the group anymore.
+            phase: Succeeded
 
 
 
