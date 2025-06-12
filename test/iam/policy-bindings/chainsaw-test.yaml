@@ -225,6 +225,8 @@ spec:
           status:
             phase: Succeeded
 
+  
+  # Test that user can inherit the PolicyBinding of the group.
     - apply:
         file: group.yaml
         outputs:
@@ -349,3 +351,88 @@ spec:
             name: group-user-webhook-test
           status:
             phase: Succeeded
+
+  # Test that user lost the PolicyBinding of the group after the group membership is deleted.
+    - delete: # Delete group membership
+        file: group-memership.yaml
+    - wait: # Wait for group membership to be deleted
+        apiVersion: iam.miloapis.com/v1alpha1
+        kind: GroupMembership
+        name: example-groupmembership
+        timeout: 5m
+        for:
+          deletion: {}
+    - apply:
+        resource:
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: group-user-webhook-test-deletion
+          spec:
+            restartPolicy: Never
+            containers:
+            - name: curl
+              image: curlimages/curl:latest
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  response=$(curl -ksS https://auth-provider-openfga-openfga-authz-webhook-service.auth-provider-openfga-system.svc.cluster.local:9443/core/v1alpha/webhook \
+                    -H "Content-Type: application/json" \
+                    -d @- << EOF
+                  {
+                    "apiVersion": "authorization.k8s.io/v1",
+                    "kind": "SubjectAccessReview",
+                    "spec": {
+                      "user": "group-user-admin",
+                      "extra": {
+                        "resourcemanager.miloapis.com/organization-id": ["$(ORG_UID)"],
+                        "authentication.miloapis.com/user-uid": ["$(USER_UID)"]
+                      },
+                      "groups": ["system:authenticated"],
+                      "resourceAttributes": {
+                        "group": "resourcemanager.miloapis.com",
+                        "resource": "organizations",
+                        "version": "v1alpha1",
+                        "verb": "get",
+                        "name": "datum"
+                      }
+                    }
+                  }
+                  EOF
+                  )
+                  echo "Webhook response: $response"
+                  # Check if we got a valid SubjectAccessReview response
+                  if ! echo "$response" | grep -q '"kind":"SubjectAccessReview"'; then
+                    echo "Webhook test failed - invalid response format"
+                    exit 1
+                  fi
+                  # Check if the request was allowed
+                  if echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*true'; then
+                    echo "Webhook test failed - access was allowed"
+                    exit 1
+                  elif echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*false'; then
+                    echo "Webhook test succeeded - access denied by authorization webhook"
+                    exit 0
+                  else
+                    echo "Webhook test failed - could not determine allowed status"
+                    exit 1
+                  fi
+              env:
+                - name: USER_UID
+                  value: ($grpUser.metadata.uid)
+                - name: ORG_UID
+                  value: ($org.metadata.uid)
+    - sleep:
+        duration: 30s
+    - assert:
+        resource:
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: group-user-webhook-test-deletion
+          status:
+            phase: Succeeded
+
+
+
+    
