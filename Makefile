@@ -310,7 +310,7 @@ dev-deploy: manifests generate kustomize docker-build kind-load-image ## Deploy 
 	cd config/manager && "$(KUSTOMIZE)" edit set image controller=${IMG}
 	"$(KUSTOMIZE)" build config/local-dev | $(KUBECTL) apply --server-side --wait=true -f -
 	@echo "⏳ Waiting for application deployments to be ready..."
-	@$(KUBECTL) wait --for=condition=Available deployment --all -n auth-provider-openfga-system --timeout=180s
+	@$(KUBECTL) wait --for=condition=Available deployment --all -n auth-provider-openfga-system --timeout=1800s
 	@echo "✅ Development environment deployed successfully!"
 
 .PHONY: dev-undeploy
