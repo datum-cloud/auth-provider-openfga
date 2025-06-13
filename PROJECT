@@ -35,4 +35,9 @@ resources:
   kind: GroupMembership
   path: go.miloapis.com/milo/pkg/apis/iam/v1alpha1
   version: v1alpha1
+- controller: true
+  domain: go.miloapis.com/milo/pkg/apis/iam/v1alpha1
+  group: iam.miloapis.com
+  kind: Group
+  version: v1alpha1
 version: "3"
