@@ -30,7 +30,7 @@ patches:
   # Enable HTTPS on metrics service port
   - target:
       kind: Service
-      name: controller-manager-metrics-service
+      name: controller-manager-metrics
     patch: |-
       - op: replace
         path: /spec/ports/0/name
@@ -70,7 +70,7 @@ patches:
               csi.cert-manager.io/issuer-name: default-metrics-csi-issuer
               csi.cert-manager.io/issuer-kind: ClusterIssuer
               csi.cert-manager.io/common-name: controller-manager-metrics
-              csi.cert-manager.io/dns-names: controller-manager-metrics-service,controller-manager-metrics-service.auth-provider-openfga-system.svc,controller-manager-metrics-service.auth-provider-openfga-system.svc.cluster.local
+              csi.cert-manager.io/dns-names: controller-manager-metrics,controller-manager-metrics.auth-provider-openfga-system.svc,controller-manager-metrics.auth-provider-openfga-system.svc.cluster.local
               csi.cert-manager.io/fs-group: "65532"
 
   # Update ServiceMonitor for HTTPS with CSI certificates

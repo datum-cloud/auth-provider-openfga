@@ -1,7 +1,7 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: controller-manager-metrics-service
+  name: controller-manager-metrics
   labels:
     control-plane: controller-manager
     app.kubernetes.io/name: auth-provider-openfga

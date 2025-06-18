@@ -193,7 +193,7 @@ spec:
                   command: ["/bin/sh", "-c"]
                   args:
                     - |
-                      response=$(curl -ksS https://auth-provider-openfga-openfga-authz-webhook-service.auth-provider-openfga-system.svc.cluster.local:9443/core/v1alpha/webhook \
+                      response=$(curl -ksS https://auth-provider-openfga-openfga-authz-webhook.auth-provider-openfga-system.svc.cluster.local:9443/core/v1alpha/webhook \
                         -H "Content-Type: application/json" \
                         -d @- << EOF
                       {
@@ -301,7 +301,7 @@ spec:
                   command: ["/bin/sh", "-c"]
                   args:
                     - |
-                      response=$(curl -ksS https://auth-provider-openfga-openfga-authz-webhook-service.auth-provider-openfga-system.svc.cluster.local:9443/core/v1alpha/webhook \
+                      response=$(curl -ksS https://auth-provider-openfga-openfga-authz-webhook.auth-provider-openfga-system.svc.cluster.local:9443/core/v1alpha/webhook \
                         -H "Content-Type: application/json" \
                         -d @- << EOF
                       {
@@ -382,7 +382,7 @@ spec:
                   command: ["/bin/sh", "-c"]
                   args:
                     - |
-                      response=$(curl -ksS https://auth-provider-openfga-openfga-authz-webhook-service.auth-provider-openfga-system.svc.cluster.local:9443/core/v1alpha/webhook \
+                      response=$(curl -ksS https://auth-provider-openfga-openfga-authz-webhook.auth-provider-openfga-system.svc.cluster.local:9443/core/v1alpha/webhook \
                         -H "Content-Type: application/json" \
                         -d @- << EOF
                       {

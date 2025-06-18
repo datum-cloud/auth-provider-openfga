@@ -382,7 +382,7 @@ dev-status: ## Show development environment status
 dev-forward-metrics: ## Forward metrics port for local access
 	@echo "Forwarding metrics port 8080..."
 	@echo "Access metrics at http://localhost:8080/metrics"
-	@$(KUBECTL) port-forward -n auth-provider-openfga-system svc/auth-provider-openfga-controller-manager-metrics-service 8080:8080
+	@$(KUBECTL) port-forward -n auth-provider-openfga-system svc/auth-provider-openfga-controller-manager-metrics 8080:8080
 
 .PHONY: dev-forward-openfga
 dev-forward-openfga: ## Forward OpenFGA port for local access

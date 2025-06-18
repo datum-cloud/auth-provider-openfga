@@ -1,7 +1,7 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: openfga-authz-webhook-service
+  name: openfga-authz-webhook
   labels:
     app.kubernetes.io/name: openfga-authz-webhook
     app.kubernetes.io/managed-by: kustomize
