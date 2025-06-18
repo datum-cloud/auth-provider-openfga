@@ -3,19 +3,19 @@ kind: Deployment
 metadata:
   name: authz-webhook
   labels:
-    app.kubernetes.io/name: openfga-authz-webhook
+    app.kubernetes.io/name: authz-webhook
     app.kubernetes.io/managed-by: kustomize
 spec:
   selector:
     matchLabels:
-      app.kubernetes.io/name: openfga-authz-webhook
+      app.kubernetes.io/name: authz-webhook
   replicas: 1
   template:
     metadata:
       annotations:
         kubectl.kubernetes.io/default-container: manager
       labels:
-        app.kubernetes.io/name: openfga-authz-webhook
+        app.kubernetes.io/name: authz-webhook
     spec:
       securityContext:
         runAsNonRoot: true

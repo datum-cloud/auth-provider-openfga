@@ -1,13 +1,13 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: openfga-authz-webhook
+  name: authz-webhook
   labels:
-    app.kubernetes.io/name: openfga-authz-webhook
+    app.kubernetes.io/name: authz-webhook
     app.kubernetes.io/managed-by: kustomize
 spec:
   selector:
-    app.kubernetes.io/name: openfga-authz-webhook
+    app.kubernetes.io/name: authz-webhook
   ports:
     - name: webhook-https
       port: 8090

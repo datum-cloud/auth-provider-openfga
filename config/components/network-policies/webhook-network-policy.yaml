@@ -8,7 +8,7 @@ metadata:
 spec:
   podSelector:
     matchLabels:
-      app.kubernetes.io/name: openfga-authz-webhook
+      app.kubernetes.io/name: authz-webhook
   policyTypes:
     - Ingress
   ingress:
