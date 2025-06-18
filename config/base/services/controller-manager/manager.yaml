@@ -35,11 +35,26 @@ spec:
           - --metrics-bind-address=:8080
           - --openfga-api-url=$(OPENFGA_API_URL)
           - --openfga-store-id=$(OPENFGA_STORE_ID)
+          - --leader-election-namespace=$(LEADER_ELECTION_NAMESPACE)
+          - --leader-election-id=$(LEADER_ELECTION_ID)
+          - --leader-election-lease-duration=$(LEADER_ELECTION_LEASE_DURATION)
+          - --leader-election-renew-deadline=$(LEADER_ELECTION_RENEW_DEADLINE)
+          - --leader-election-retry-period=$(LEADER_ELECTION_RETRY_PERIOD)
         env:
         - name: OPENFGA_API_URL
           value: openfga.openfga-system.svc.cluster.local:8081
         - name: OPENFGA_STORE_ID
           value: 01JVTBDT6NJ541P1JBT22GX4PR
+        - name: LEADER_ELECTION_NAMESPACE
+          value: ""
+        - name: LEADER_ELECTION_ID
+          value: 4b85f171.miloapis.com
+        - name: LEADER_ELECTION_LEASE_DURATION
+          value: 15s
+        - name: LEADER_ELECTION_RENEW_DEADLINE
+          value: 10s
+        - name: LEADER_ELECTION_RETRY_PERIOD
+          value: 2s
         ports:
           - containerPort: 8080
             name: metrics

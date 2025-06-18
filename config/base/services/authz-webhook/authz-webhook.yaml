@@ -37,8 +37,10 @@ spec:
           env:
             - name: OPENFGA_API_URL
               value: openfga.openfga-system.svc.cluster.local:8081
+            # Fake OpenFGA store ID that should be replaced with an actual store
+            # ID that's created in the OpenFGA server.
             - name: OPENFGA_STORE_ID
-              value: r01JVTBDT6NJ541P1JBT22GX4PR
+              value: 01JVTBDT6NJ541P1JBT22GX4PR
           ports:
             - containerPort: 8080
               name: metrics
