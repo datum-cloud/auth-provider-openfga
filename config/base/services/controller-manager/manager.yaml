@@ -27,7 +27,7 @@ spec:
       containers:
       - name: manager
         image: auth-provider-openfga:latest
-        imagePullPolicy: IfNotPresent
+        imagePullPolicy: Always
         args:
           - manager
           - --leader-elect
