@@ -80,13 +80,9 @@ func (o *ProjectControlPlaneAuthorizer) Authorize(
 	}
 
 	// Get user UID - this should be provided as an extra field from the authentication system
-	var userUID string
-	if userUIDs, set := attributes.GetUser().GetExtra()["authentication.miloapis.com/user-uid"]; !set {
-		return authorizer.DecisionDeny, "", fmt.Errorf("extra 'authentication.miloapis.com/user-uid' is required by project control plane authorizer")
-	} else if len(userUIDs) > 1 {
-		return authorizer.DecisionDeny, "", fmt.Errorf("extra 'authentication.miloapis.com/user-uid' only supports one value, but multiple were provided: %v", userUIDs)
-	} else {
-		userUID = userUIDs[0]
+	userUID := attributes.GetUser().GetUID()
+	if userUID == "" {
+		return authorizer.DecisionDeny, "", fmt.Errorf("user UID is required by project control plane authorizer")
 	}
 
 	user := fmt.Sprintf("iam.miloapis.com/InternalUser:%s", userUID)
