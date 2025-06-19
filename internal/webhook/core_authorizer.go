@@ -211,9 +211,9 @@ func (o *CoreControlPlaneAuthorizer) buildContextualTuples(ctx context.Context, 
 	// For project resources, establish the parent relationship with the organization
 	if attributes.GetResource() == "projects" && attributes.GetName() != "" {
 		parentTuple := &openfgav1.TupleKey{
-			User:     fmt.Sprintf("resourcemanager.miloapis.com/Project:%s", attributes.GetName()),
+			User:     fmt.Sprintf("resourcemanager.miloapis.com/Organization:%s", organizationName),
 			Relation: "parent",
-			Object:   fmt.Sprintf("resourcemanager.miloapis.com/Organization:%s", organizationName),
+			Object:   fmt.Sprintf("resourcemanager.miloapis.com/Project:%s", attributes.GetName()),
 		}
 		contextualTuples = append(contextualTuples, parentTuple)
 
