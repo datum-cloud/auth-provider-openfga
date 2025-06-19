@@ -314,7 +314,7 @@ func getTupleUser(subject iamdatumapiscomv1alpha1.Subject) (string, error) {
 	switch subject.Kind {
 	// TODO: Update Milo API to export a canonical SubjectKind type or enum, and use it here for type safety and maintainability.
 	case "User":
-		return fmt.Sprintf("iam.miloapis.com/InternalUser:%s", subject.UID), nil // Represent all subjects as InternalUser with their original UID
+		return fmt.Sprintf("iam.miloapis.com/InternalUser:%s", subject.Name), nil // Represent all subjects as InternalUser with their original UID
 	case "Group":
 		return fmt.Sprintf("iam.miloapis.com/InternalUserGroup:%s#assignee", subject.UID), nil // Represent all subjects as InternalUserGroup with their original UID and assignee relation
 	default:
