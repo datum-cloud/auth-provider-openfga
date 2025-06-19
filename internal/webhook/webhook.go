@@ -10,7 +10,6 @@ import (
 	"k8s.io/apiserver/pkg/authorization/authorizer"
 )
 
-const OrganizationIDExtraKey = "resourcemanager.miloapis.com/organization-id"
 const ProjectExtraKey = "resourcemanager.miloapis.com/project-name"
 
 func NewAuthorizerWebhook(authzer authorizer.Authorizer) *Webhook {

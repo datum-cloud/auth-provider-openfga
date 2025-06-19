@@ -50,10 +50,10 @@ func (o *CoreControlPlaneAuthorizer) Authorize(ctx context.Context, attributes a
 	}
 
 	var organizationUID string
-	if orgUIDs, set := attributes.GetUser().GetExtra()[OrganizationIDExtraKey]; !set {
-		return authorizer.DecisionDeny, "", fmt.Errorf("extra '%s' is required by core control plane authorizer", OrganizationIDExtraKey)
+	if orgUIDs, set := attributes.GetUser().GetExtra()[resourcemanagerv1alpha1.OrganizationNameLabel]; !set {
+		return authorizer.DecisionDeny, "", fmt.Errorf("extra '%s' is required by core control plane authorizer", resourcemanagerv1alpha1.OrganizationNameLabel)
 	} else if len(orgUIDs) > 1 {
-		return authorizer.DecisionDeny, "", fmt.Errorf("extra '%s' only supports one value, but multiple were provided: %v", OrganizationIDExtraKey, orgUIDs)
+		return authorizer.DecisionDeny, "", fmt.Errorf("extra '%s' only supports one value, but multiple were provided: %v", resourcemanagerv1alpha1.OrganizationNameLabel, orgUIDs)
 	} else {
 		organizationUID = orgUIDs[0]
 	}
