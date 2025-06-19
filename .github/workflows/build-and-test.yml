@@ -2,8 +2,6 @@ name: Build and Test
 
 on:
   push:
-    branches:
-      - main
   pull_request:
 
 env:
@@ -53,16 +51,28 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
+          platforms: linux/amd64
           push: true
           tags: ${{ steps.image-meta.outputs.tags }}
           labels: ${{ steps.image-meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+  publish-kustomize-bundles:
+    permissions:
+      id-token: write
+      contents: read
+      packages: write
+    uses: datum-cloud/actions/.github/workflows/publish-kustomize-bundle.yaml@v1.5.1
+    with:
+      bundle-name: ghcr.io/datum-cloud/auth-provider-openfga-kustomize
+      bundle-path: config
+    secrets: inherit
+
   test-e2e:
     name: End-to-end testing
     runs-on: ubuntu-latest
-    needs: build
+    needs: [build, publish-kustomize-bundles]
     permissions:
       contents: read
       packages: read
@@ -101,43 +111,60 @@ jobs:
           docker tag $IMAGE_TAG auth-provider-openfga:test
           kind load docker-image auth-provider-openfga:test --name auth-provider-openfga
 
-      - name: Deploy infrastructure via Flux bootstrap
+      - name: Deploy platform infrastructure via Flux
         run: |
-          echo "📦 Deploying infrastructure (cert-manager, OpenFGA) via Flux..."
+          echo "📦 Deploying platform infrastructure (cert-manager) via Flux..."
           make kustomize
-          kubectl apply --server-side --wait=true -f <(bin/kustomize build config/bootstrap)
-          echo "⏳ Waiting for infrastructure HelmReleases to be ready..."
+          kubectl apply --server-side --wait=true -f <(bin/kustomize build config/platform)
+          echo "⏳ Waiting for platform HelmReleases to be ready..."
           kubectl wait --for=condition=Ready helmrelease/cert-manager -n cert-manager --timeout=240s
           kubectl wait --for=condition=Ready helmrelease/cert-manager-csi-driver -n cert-manager --timeout=240s
+          echo "✅ Platform infrastructure deployed successfully"
+
+      - name: Deploy application dependencies via Flux
+        run: |
+          echo "🔧 Deploying application dependencies (OpenFGA) via Flux..."
+          kubectl apply --server-side --wait=true -f <(bin/kustomize build config/dependencies)
+          echo "⏳ Waiting for dependency HelmReleases to be ready..."
           kubectl wait --for=condition=Ready helmrelease/openfga -n openfga-system --timeout=240s
-          echo "✅ Infrastructure deployed successfully"
+          echo "✅ Application dependencies deployed successfully"
 
-      - name: Create GitHub token secret for FluxCD
+      - name: Create FluxCD OCIRepository
         run: |
-          kubectl create secret generic github-token \
-            --from-literal=username=git \
-            --from-literal=password=${{ secrets.GITHUB_TOKEN }} \
-            --namespace=flux-system
+          # Use the first tag from the published bundle (exact same tags that were published)
+          echo "All published tags:"
+          echo "${{ needs.publish-kustomize-bundles.outputs.tags }}"
 
-      - name: Create FluxCD GitRepository
-        run: |
+          # Validate that we received tags from the publish job
+          if [ -z "${{ needs.publish-kustomize-bundles.outputs.tags }}" ]; then
+            echo "ERROR: No tags received from publish-kustomize-bundles job"
+            exit 1
+          fi
+
+          OCI_TAG=$(echo "${{ needs.publish-kustomize-bundles.outputs.tags }}" | head -n1 | cut -d: -f2)
+          echo "Selected OCI bundle tag: ${OCI_TAG}"
+
+          # Validate that we extracted a valid tag
+          if [ -z "${OCI_TAG}" ]; then
+            echo "ERROR: Failed to extract OCI tag from published tags"
+            exit 1
+          fi
+
           cat <<EOF | kubectl apply -f -
-          apiVersion: source.toolkit.fluxcd.io/v1
-          kind: GitRepository
+          apiVersion: source.toolkit.fluxcd.io/v1beta2
+          kind: OCIRepository
           metadata:
             name: auth-provider-openfga-source
             namespace: flux-system
           spec:
             interval: 30s
+            url: oci://ghcr.io/datum-cloud/auth-provider-openfga-kustomize
             ref:
-              commit: ${{ github.event.pull_request.head.sha || github.sha }}
-            url: https://github.com/${GITHUB_REPOSITORY}.git
-            secretRef:
-              name: github-token
+              tag: ${OCI_TAG}
           EOF
 
-          # Wait for GitRepository to be ready
-          kubectl wait --for=condition=Ready gitrepository/auth-provider-openfga-source -n flux-system --timeout=180s
+          # Wait for OCIRepository to be ready
+          kubectl wait --for=condition=Ready ocirepository/auth-provider-openfga-source -n flux-system --timeout=180s
 
       - name: Create FluxCD Kustomization for deployment
         run: |
@@ -149,10 +176,10 @@ jobs:
             namespace: flux-system
           spec:
             interval: 1m
-            path: "./config/test-e2e"
+            path: "./environments/testing"
             prune: true
             sourceRef:
-              kind: GitRepository
+              kind: OCIRepository
               name: auth-provider-openfga-source
             timeout: 15m
             wait: true
@@ -224,8 +251,8 @@ jobs:
           bin/flux get all
           echo "=== Kustomization Status ==="
           kubectl describe kustomization auth-provider-openfga -n flux-system
-          echo "=== GitRepository Status ==="
-          kubectl describe gitrepository auth-provider-openfga-source -n flux-system
+          echo "=== OCIRepository Status ==="
+          kubectl describe ocirepository auth-provider-openfga-source -n flux-system
           echo "=== HelmRelease Status ==="
           kubectl describe helmrelease cert-manager -n cert-manager
           kubectl describe helmrelease cert-manager-csi-driver -n cert-manager
@@ -235,6 +262,10 @@ jobs:
           echo "=== Built Image Info ==="
           echo "Image from build job: ${{ needs.build.outputs.image }}"
           echo "Image digest: ${{ needs.build.outputs.digest }}"
+          echo "=== Published Bundle Info ==="
+          echo "Bundle tags: ${{ needs.publish-kustomize-bundles.outputs.tags }}"
+          echo "Bundle digest: ${{ needs.publish-kustomize-bundles.outputs.digest }}"
+          echo "Bundle labels: ${{ needs.publish-kustomize-bundles.outputs.labels }}"
           echo "=== Logs from failing pods ==="
           for ns in auth-provider-openfga-system openfga-system cert-manager flux-system; do
             echo "--- Namespace: $ns ---"

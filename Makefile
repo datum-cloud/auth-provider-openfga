@@ -76,16 +76,25 @@ test-e2e: manifests generate fmt vet docker-build chainsaw ## Run the e2e tests.
 		exit 1; \
 	}
 	$(KIND) load docker-image ${IMG} --name $(CLUSTER_NAME)
-	kustomize build config/test-e2e --enable-helm | kubectl apply --server-side --wait=true -f -
+	"$(KUSTOMIZE)" build config/platform | $(KUBECTL) apply --server-side --wait=true -f -
+	@echo "⏳ Waiting for platform HelmReleases to be ready..."
+	@$(KUBECTL) wait --for=condition=Ready helmrelease/cert-manager -n cert-manager --timeout=240s
+	@$(KUBECTL) wait --for=condition=Ready helmrelease/cert-manager-csi-driver -n cert-manager --timeout=240s
+	@echo "🔧 Deploying application dependencies..."
+	"$(KUSTOMIZE)" build config/dependencies | $(KUBECTL) apply --server-side --wait=true -f -
+	@echo "⏳ Waiting for dependency HelmReleases to be ready..."
+	@$(KUBECTL) wait --for=condition=Ready helmrelease/openfga -n openfga-system --timeout=240s
+	@echo "🛠️ Deploying application components..."
+	"$(KUSTOMIZE)" build config/environments/testing | $(KUBECTL) apply --server-side --wait=true -f -
 	@echo "Waiting for cert-manager components to be ready..."
 	@kubectl wait --for=condition=Available deployment cert-manager -n cert-manager --timeout=300s
 	@kubectl wait --for=condition=Available deployment cert-manager-webhook -n cert-manager --timeout=300s
 	@kubectl wait --for=condition=Available deployment cert-manager-cainjector -n cert-manager --timeout=300s
 	@echo "Waiting for CA certificate to be ready..."
-	@kubectl wait --for=condition=Ready certificate auth-provider-openfga-auth-provider-openfga-ca-cert -n cert-manager --timeout=300s
+	@kubectl wait --for=condition=Ready certificate auth-provider-openfga-test-ca -n default --timeout=300s
 	@echo "Waiting for ClusterIssuers to be ready..."
-	@kubectl wait --for=condition=Ready clusterissuer auth-provider-openfga-selfsigned-cluster-issuer --timeout=300s
-	@kubectl wait --for=condition=Ready clusterissuer auth-provider-openfga-auth-provider-openfga-ca-cluster-issuer --timeout=300s
+	@kubectl wait --for=condition=Ready clusterissuer test-selfsigned-issuer --timeout=300s
+	@kubectl wait --for=condition=Ready clusterissuer auth-provider-openfga-test-ca-issuer --timeout=300s
 	@echo "Waiting for controller manager to be ready..."
 	@kubectl wait --for=condition=Available deployment auth-provider-openfga-controller-manager -n auth-provider-openfga-system --timeout=300s
 	@echo "Waiting for webhook to be ready..."
@@ -297,26 +306,49 @@ dev-setup: dev-check-prereqs ## Setup complete development environment
 	@echo "  make dev-forward-metrics # Access metrics at localhost:8080"
 	@echo "  make help               # View all available commands"
 
-.PHONY: dev-deploy
-dev-deploy: manifests generate kustomize docker-build kind-load-image ## Deploy to development environment
-	@echo "🚀 Deploying to development environment..."
-	@echo "📦 Deploying infrastructure and core services via Flux..."
-	"$(KUSTOMIZE)" build config/bootstrap | $(KUBECTL) apply --server-side --wait=true -f -
-	@echo "⏳ Waiting for infrastructure HelmReleases to be ready..."
+.PHONY: platform-deploy
+platform-deploy: kustomize ## Deploy platform-level cluster infrastructure
+	@echo "🏗️ Deploying platform infrastructure (cert-manager, etc.)..."
+	"$(KUSTOMIZE)" build config/platform | $(KUBECTL) apply --server-side --wait=true -f -
+	@echo "⏳ Waiting for platform services to be ready..."
 	@$(KUBECTL) wait --for=condition=Ready helmrelease/cert-manager -n cert-manager --timeout=240s
 	@$(KUBECTL) wait --for=condition=Ready helmrelease/cert-manager-csi-driver -n cert-manager --timeout=240s
+	@echo "✅ Platform infrastructure deployed successfully!"
+
+.PHONY: dependencies-deploy
+dependencies-deploy: kustomize ## Deploy application-specific dependencies
+	@echo "📦 Deploying application dependencies (OpenFGA, etc.)..."
+	"$(KUSTOMIZE)" build config/dependencies | $(KUBECTL) apply --server-side --wait=true -f -
+	@echo "⏳ Waiting for dependencies to be ready..."
 	@$(KUBECTL) wait --for=condition=Ready helmrelease/openfga -n openfga-system --timeout=240s
-	@echo "🛠️ Deploying application components..."
-	cd config/manager && "$(KUSTOMIZE)" edit set image controller=${IMG}
-	"$(KUSTOMIZE)" build config/local-dev | $(KUBECTL) apply --server-side --wait=true -f -
+	@echo "✅ Application dependencies deployed successfully!"
+
+.PHONY: infrastructure-deploy
+infrastructure-deploy: platform-deploy dependencies-deploy ## Deploy all infrastructure (platform + dependencies)
+	@echo "✅ Complete infrastructure deployment finished!"
+
+.PHONY: dev-deploy
+dev-deploy: manifests generate docker-build kind-load-image infrastructure-deploy ## Deploy to development environment
+	@echo "🚀 Deploying application to development environment..."
+	cd config/base/services/controller-manager && "$(KUSTOMIZE)" edit set image auth-provider-openfga=${IMG}
+	"$(KUSTOMIZE)" build config/environments/local-development | $(KUBECTL) apply --server-side --wait=true -f -
 	@echo "⏳ Waiting for application deployments to be ready..."
 	@$(KUBECTL) wait --for=condition=Available deployment --all -n auth-provider-openfga-system --timeout=180s
 	@echo "✅ Development environment deployed successfully!"
 
+.PHONY: dev-deploy-fast
+dev-deploy-fast: manifests generate docker-build kind-load-image dependencies-deploy ## Deploy app quickly (assumes platform exists)
+	@echo "🚀 Fast deployment (skipping platform setup)..."
+	cd config/base/services/controller-manager && "$(KUSTOMIZE)" edit set image auth-provider-openfga=${IMG}
+	"$(KUSTOMIZE)" build config/environments/local-development | $(KUBECTL) apply --server-side --wait=true -f -
+	@echo "⏳ Waiting for application deployments to be ready..."
+	@$(KUBECTL) wait --for=condition=Available deployment --all -n auth-provider-openfga-system --timeout=180s
+	@echo "✅ Fast development deployment complete!"
+
 .PHONY: dev-undeploy
 dev-undeploy: kustomize ## Remove development environment deployments
 	@echo "🗑️ Removing development environment..."
-	"$(KUSTOMIZE)" build config/local-dev | $(KUBECTL) delete --ignore-not-found=true -f -
+	"$(KUSTOMIZE)" build config/environments/local-development | $(KUBECTL) delete --ignore-not-found=true -f -
 
 .PHONY: dev-reset
 dev-reset: dev-undeploy dev-deploy ## Reset development environment
@@ -350,7 +382,7 @@ dev-status: ## Show development environment status
 dev-forward-metrics: ## Forward metrics port for local access
 	@echo "Forwarding metrics port 8080..."
 	@echo "Access metrics at http://localhost:8080/metrics"
-	@$(KUBECTL) port-forward -n auth-provider-openfga-system svc/auth-provider-openfga-controller-manager-metrics-service 8080:8080
+	@$(KUBECTL) port-forward -n auth-provider-openfga-system svc/auth-provider-openfga-controller-manager-metrics 8080:8080
 
 .PHONY: dev-forward-openfga
 dev-forward-openfga: ## Forward OpenFGA port for local access
@@ -436,20 +468,22 @@ ln -sf "$(1)-$(3)" "$(1)"
 endef
 
 .PHONY: validate-local-dev
-validate-local-dev: kustomize ## Validate local-dev configuration
-	@echo "🔍 Validating local-dev configuration..."
-	@echo "Building configuration:"
-	@"$(KUSTOMIZE)" build config/local-dev | head -20
-	@echo "Checking for deployment resources with correct names:"
-	@"$(KUSTOMIZE)" build config/local-dev | grep -A 5 "kind: Deployment" | grep "name:" || echo "No deployments found"
-	@echo "✅ Local-dev configuration validated"
+validate-local-dev: kustomize ## Validate local development configuration
+	@echo "🔍 Validating local development configuration..."
+	@"$(KUSTOMIZE)" build config/environments/local-development > /dev/null && echo "✅ Local development config builds successfully"
+	@echo "Checking for deployment resources:"
+	@"$(KUSTOMIZE)" build config/environments/local-development | grep -A 1 "kind: Deployment" | grep "name:" || echo "No deployments found"
+	@echo "✅ Local development configuration validated"
 
 .PHONY: validate-configs
 validate-configs: validate-local-dev ## Validate all configurations
 	@echo "🔍 Validating core configurations..."
-	@echo "Bootstrap configuration:"
-	@"$(KUSTOMIZE)" build config/bootstrap > /dev/null && echo "✅ Bootstrap config builds successfully"
-	@echo "Default configuration:"
-	@"$(KUSTOMIZE)" build config/default > /dev/null && echo "✅ Default config builds successfully"
-	@echo "✅ Core configurations validated"
-	@echo "Note: test-e2e validation skipped (requires external dependencies)"
+	@echo "Platform configuration:"
+	@"$(KUSTOMIZE)" build config/platform > /dev/null && echo "✅ Platform config builds successfully"
+	@echo "Dependencies configuration:"
+	@"$(KUSTOMIZE)" build config/dependencies > /dev/null && echo "✅ Dependencies config builds successfully"
+	@echo "Base configuration:"
+	@"$(KUSTOMIZE)" build config/base > /dev/null && echo "✅ Base config builds successfully"
+	@echo "Testing configuration:"
+	@"$(KUSTOMIZE)" build config/environments/testing > /dev/null && echo "✅ Testing config builds successfully"
+	@echo "✅ All configurations validated"
