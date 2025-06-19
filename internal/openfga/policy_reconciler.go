@@ -62,7 +62,11 @@ func (r *PolicyReconciler) ReconcilePolicy(ctx context.Context, binding iamdatum
 		&openfgav1.TupleKey{
 			User:     policyBindingObjectIdentifier, // Use PolicyBinding UID based object
 			Relation: "iam.miloapis.com/RoleBinding",
-			Object:   fmt.Sprintf("%s/%s:%s", binding.Spec.TargetRef.APIGroup, binding.Spec.TargetRef.Kind, binding.Spec.TargetRef.UID), // Use TargetRef UID
+			// TODO: Consider how we could leverage the UID here instead of the name.
+			//       The authorization webhook that kubernetes uses does not provide
+			//       the UID of the resource being acted on so it's more difficult to
+			//       resolve the UID and leverage it in the tuple.
+			Object: fmt.Sprintf("%s/%s:%s", binding.Spec.TargetRef.APIGroup, binding.Spec.TargetRef.Kind, binding.Spec.TargetRef.Name),
 		},
 		// Associates the role binding to the role that should be bound
 		// to the resource.
@@ -172,8 +176,12 @@ func (r *PolicyReconciler) getExistingPolicyTuples(ctx context.Context, policy i
 	// 1. Get tuples where the binding object is the User (linking binding to target resource)
 	tuplesLinkingBindingToResource, err := getTupleKeys(ctx, r.StoreID, r.Client, &openfgav1.ReadRequestTupleKey{
 		User:     policyBindingObjectIdentifier,
-		Relation: "iam.miloapis.com/RoleBinding",                                                                                 // Relation used when binding is the user
-		Object:   fmt.Sprintf("%s/%s:%s", policy.Spec.TargetRef.APIGroup, policy.Spec.TargetRef.Kind, policy.Spec.TargetRef.UID), // Use TargetRef UID
+		Relation: "iam.miloapis.com/RoleBinding",
+		// TODO: Consider how we could leverage the UID here instead of the name.
+		//       The authorization webhook that kubernetes uses does not provide
+		//       the UID of the resource being acted on so it's more difficult to
+		//       resolve the UID and leverage it in the tuple.
+		Object: fmt.Sprintf("%s/%s:%s", policy.Spec.TargetRef.APIGroup, policy.Spec.TargetRef.Kind, policy.Spec.TargetRef.Name),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to get tuples linking binding to resource: %w", err)
