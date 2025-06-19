@@ -10,7 +10,6 @@ import (
 	"go.miloapis.com/auth-provider-openfga/internal/openfga"
 	iamv1alpha1 "go.miloapis.com/milo/pkg/apis/iam/v1alpha1"
 	resourcemanagerv1alpha1 "go.miloapis.com/milo/pkg/apis/resourcemanager/v1alpha1"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apiserver/pkg/authorization/authorizer"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -49,13 +48,13 @@ func (o *CoreControlPlaneAuthorizer) Authorize(ctx context.Context, attributes a
 		return authorizer.DecisionNoOpinion, "", nil
 	}
 
-	var organizationUID string
+	var organizationName string
 	if orgUIDs, set := attributes.GetUser().GetExtra()[resourcemanagerv1alpha1.OrganizationNameLabel]; !set {
 		return authorizer.DecisionDeny, "", fmt.Errorf("extra '%s' is required by core control plane authorizer", resourcemanagerv1alpha1.OrganizationNameLabel)
 	} else if len(orgUIDs) > 1 {
 		return authorizer.DecisionDeny, "", fmt.Errorf("extra '%s' only supports one value, but multiple were provided: %v", resourcemanagerv1alpha1.OrganizationNameLabel, orgUIDs)
 	} else {
-		organizationUID = orgUIDs[0]
+		organizationName = orgUIDs[0]
 	}
 
 	// Retrieve the user ID from the attributes.
@@ -65,7 +64,7 @@ func (o *CoreControlPlaneAuthorizer) Authorize(ctx context.Context, attributes a
 	}
 
 	user := fmt.Sprintf("iam.miloapis.com/InternalUser:%s", userUID)
-	resource := o.buildResource(attributes, organizationUID)
+	resource := o.buildResource(attributes, organizationName)
 	relation := o.buildRelation(attributes)
 
 	slog.DebugContext(ctx, "checking OpenFGA authorization",
@@ -81,6 +80,17 @@ func (o *CoreControlPlaneAuthorizer) Authorize(ctx context.Context, attributes a
 			Relation: relation,
 			Object:   resource,
 		},
+	}
+
+	// Add contextual tuples for parent relationships when dealing with projects
+	contextualTuples := o.buildContextualTuples(ctx, attributes, organizationName)
+	if len(contextualTuples) > 0 {
+		checkReq.ContextualTuples = &openfgav1.ContextualTupleKeys{
+			TupleKeys: contextualTuples,
+		}
+		slog.DebugContext(ctx, "adding contextual tuples for parent relationships",
+			slog.Int("tuple_count", len(contextualTuples)),
+		)
 	}
 
 	resp, err := o.FGAClient.Check(ctx, checkReq)
@@ -133,10 +143,10 @@ func (o *CoreControlPlaneAuthorizer) buildPermissionString(attributes authorizer
 	return fmt.Sprintf("%s/%s.%s", apiGroup, resource, verb)
 }
 
-func (o *CoreControlPlaneAuthorizer) buildResource(attributes authorizer.Attributes, organizationUID string) string {
+func (o *CoreControlPlaneAuthorizer) buildResource(attributes authorizer.Attributes, organizationName string) string {
 	// Use the organization resource when acting on resource collections.
 	if slices.Contains([]string{"list", "create", "watch"}, attributes.GetVerb()) {
-		result := fmt.Sprintf("resourcemanager.miloapis.com/Organization:%s", organizationUID)
+		result := fmt.Sprintf("resourcemanager.miloapis.com/Organization:%s", organizationName)
 		slog.Debug("buildResource for collection operation",
 			slog.String("result", result),
 			slog.String("verb", attributes.GetVerb()),
@@ -148,7 +158,7 @@ func (o *CoreControlPlaneAuthorizer) buildResource(attributes authorizer.Attribu
 	resourceName := attributes.GetName()
 	if resourceName == "" {
 		// For collection operations on specific resource types
-		result := fmt.Sprintf("resourcemanager.miloapis.com/Organization:%s", organizationUID)
+		result := fmt.Sprintf("resourcemanager.miloapis.com/Organization:%s", organizationName)
 		slog.Debug("buildResource for empty resource name",
 			slog.String("result", result),
 		)
@@ -163,53 +173,16 @@ func (o *CoreControlPlaneAuthorizer) buildResource(attributes authorizer.Attribu
 		openFGAResourceType = kubernetesResource
 	}
 
-	// Resolve the resource name to its UID
-	resourceUID, err := o.resolveResourceUID(context.Background(), kubernetesResource, resourceName)
-	if err != nil {
-		slog.Error("failed to resolve resource UID",
-			slog.String("resource", kubernetesResource),
-			slog.String("name", resourceName),
-			slog.String("error", err.Error()),
-		)
-		// Fallback to using the name if UID resolution fails
-		resourceUID = resourceName
-	}
-
 	// Build the fully qualified resource type using the correct OpenFGA format
-	result := fmt.Sprintf("%s/%s:%s", attributes.GetAPIGroup(), openFGAResourceType, resourceUID)
+	result := fmt.Sprintf("%s/%s:%s", attributes.GetAPIGroup(), openFGAResourceType, resourceName)
 	slog.Debug("buildResource for specific resource",
 		slog.String("result", result),
 		slog.String("kubernetesResource", kubernetesResource),
 		slog.String("openFGAResourceType", openFGAResourceType),
 		slog.String("resourceName", resourceName),
-		slog.String("resourceUID", resourceUID),
 		slog.String("apiGroup", attributes.GetAPIGroup()),
 	)
 	return result
-}
-
-// resolveResourceUID resolves a resource name to its UID by querying the Kubernetes cluster
-func (o *CoreControlPlaneAuthorizer) resolveResourceUID(ctx context.Context, resourceType, resourceName string) (string, error) {
-	switch resourceType {
-	case "projects":
-		// Look up the Project resource to get its UID
-		project := &resourcemanagerv1alpha1.Project{}
-		err := o.K8sClient.Get(ctx, types.NamespacedName{Name: resourceName}, project)
-		if err != nil {
-			return "", fmt.Errorf("failed to get project %s: %w", resourceName, err)
-		}
-		return string(project.UID), nil
-	case "organizations":
-		// Look up the Organization resource to get its UID
-		org := &resourcemanagerv1alpha1.Organization{}
-		err := o.K8sClient.Get(ctx, types.NamespacedName{Name: resourceName}, org)
-		if err != nil {
-			return "", fmt.Errorf("failed to get organization %s: %w", resourceName, err)
-		}
-		return string(org.UID), nil
-	default:
-		return "", fmt.Errorf("unsupported resource type: %s", resourceType)
-	}
 }
 
 func (o *CoreControlPlaneAuthorizer) buildRelation(attributes authorizer.Attributes) string {
@@ -226,4 +199,29 @@ func (o *CoreControlPlaneAuthorizer) buildRelation(attributes authorizer.Attribu
 		slog.String("verb", attributes.GetVerb()),
 	)
 	return hashedPermission
+}
+
+func (o *CoreControlPlaneAuthorizer) buildContextualTuples(ctx context.Context, attributes authorizer.Attributes, organizationName string) []*openfgav1.TupleKey {
+	if attributes.GetAPIGroup() != "resourcemanager.miloapis.com" {
+		return nil
+	}
+
+	var contextualTuples []*openfgav1.TupleKey
+
+	// For project resources, establish the parent relationship with the organization
+	if attributes.GetResource() == "projects" && attributes.GetName() != "" {
+		parentTuple := &openfgav1.TupleKey{
+			User:     fmt.Sprintf("resourcemanager.miloapis.com/Project:%s", attributes.GetName()),
+			Relation: "parent",
+			Object:   fmt.Sprintf("resourcemanager.miloapis.com/Organization:%s", organizationName),
+		}
+		contextualTuples = append(contextualTuples, parentTuple)
+
+		slog.DebugContext(ctx, "added parent relationship contextual tuple",
+			slog.String("project_name", attributes.GetName()),
+			slog.String("organization_id", organizationName),
+		)
+	}
+
+	return contextualTuples
 }
