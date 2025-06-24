@@ -13,7 +13,7 @@ require (
 	github.com/openfga/api/proto v0.0.0-20250127102726-f9709139a369
 	github.com/spf13/cobra v1.9.1
 	github.com/stretchr/testify v1.10.0
-	go.miloapis.com/milo v0.0.0-20250624122106-7c1d2ab4de9c
+	go.miloapis.com/milo v0.0.0-20250624162758-130f47947086
 	google.golang.org/grpc v1.72.1
 	google.golang.org/protobuf v1.36.6
 	k8s.io/api v0.33.1

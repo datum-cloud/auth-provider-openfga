@@ -15,8 +15,8 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 
-	iammiloapiscomv1alpha1 "go.miloapis.com/milo/pkg/apis/iam/v1alpha1"
-	resourcemanagerdatumapiscomv1alpha1 "go.miloapis.com/milo/pkg/apis/resourcemanager/v1alpha1"
+	iamv1alpha1 "go.miloapis.com/milo/pkg/apis/iam/v1alpha1"
+	resourcemanagerv1alpha1 "go.miloapis.com/milo/pkg/apis/resourcemanager/v1alpha1"
 	//+kubebuilder:scaffold:imports
 )
 
@@ -28,8 +28,8 @@ var (
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 
-	utilruntime.Must(resourcemanagerdatumapiscomv1alpha1.AddToScheme(scheme))
-	utilruntime.Must(iammiloapiscomv1alpha1.AddToScheme(scheme))
+	utilruntime.Must(resourcemanagerv1alpha1.AddToScheme(scheme))
+	utilruntime.Must(iamv1alpha1.AddToScheme(scheme))
 	//+kubebuilder:scaffold:scheme
 }
 
