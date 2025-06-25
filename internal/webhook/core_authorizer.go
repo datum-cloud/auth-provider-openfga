@@ -23,6 +23,8 @@ type CoreControlPlaneAuthorizer struct {
 
 // Authorize implements authorizer.Authorizer.
 func (o *CoreControlPlaneAuthorizer) Authorize(ctx context.Context, attributes authorizer.Attributes) (authorizer.Decision, string, error) {
+	slog.InfoContext(ctx, "authorizing request", slog.Any("attributes", attributes))
+
 	// Validate that the permission exists
 	permissionExists, err := o.validatePermissionExists(ctx, attributes)
 	if err != nil {
@@ -46,7 +48,7 @@ func (o *CoreControlPlaneAuthorizer) Authorize(ctx context.Context, attributes a
 		return authorizer.DecisionDeny, "", fmt.Errorf("failed to build resource: %w", err)
 	}
 
-	slog.DebugContext(ctx, "checking OpenFGA authorization",
+	slog.InfoContext(ctx, "checking OpenFGA authorization",
 		slog.String("user", checkReq.TupleKey.User),
 		slog.String("resource", checkReq.TupleKey.Object),
 		slog.String("relation", checkReq.TupleKey.Relation),
