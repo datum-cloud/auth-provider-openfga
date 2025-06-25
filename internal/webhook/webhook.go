@@ -37,19 +37,23 @@ func NewAuthorizerWebhook(authzer authorizer.Authorizer) *Webhook {
 				},
 			}
 
-			fieldSelectorRequirements, err := fields.ParseSelector(r.Spec.ResourceAttributes.FieldSelector.RawSelector)
-			if err != nil {
-				slog.ErrorContext(ctx, "error parsing field selector", slog.String("error", err.Error()))
-				return Errored(err)
+			if r.Spec.ResourceAttributes != nil && r.Spec.ResourceAttributes.FieldSelector != nil {
+				fieldSelectorRequirements, err := fields.ParseSelector(r.Spec.ResourceAttributes.FieldSelector.RawSelector)
+				if err != nil {
+					slog.ErrorContext(ctx, "error parsing field selector", slog.String("error", err.Error()))
+					return Errored(err)
+				}
+				attrs.FieldSelectorRequirements = fieldSelectorRequirements.Requirements()
 			}
-			attrs.FieldSelectorRequirements = fieldSelectorRequirements.Requirements()
 
-			labelSelectorRequirements, err := labels.ParseToRequirements(r.Spec.ResourceAttributes.LabelSelector.RawSelector)
-			if err != nil {
-				slog.ErrorContext(ctx, "error parsing label selector", slog.String("error", err.Error()))
-				return Errored(err)
+			if r.Spec.ResourceAttributes != nil && r.Spec.ResourceAttributes.LabelSelector != nil {
+				labelSelectorRequirements, err := labels.ParseToRequirements(r.Spec.ResourceAttributes.LabelSelector.RawSelector)
+				if err != nil {
+					slog.ErrorContext(ctx, "error parsing label selector", slog.String("error", err.Error()))
+					return Errored(err)
+				}
+				attrs.LabelSelectorRequirements = labelSelectorRequirements
 			}
-			attrs.LabelSelectorRequirements = labelSelectorRequirements
 
 			if resourceAttrs := r.Spec.ResourceAttributes; resourceAttrs != nil {
 				attrs.Verb = resourceAttrs.Verb
