@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"strings"
 
 	openfgav1 "github.com/openfga/api/proto/openfga/v1"
 	"go.miloapis.com/auth-provider-openfga/internal/openfga"
@@ -146,34 +147,44 @@ func (o *CoreControlPlaneAuthorizer) buildCheckRequest(ctx context.Context, attr
 
 	// For resource specific operations, we want to use the resource name from the
 	// resource as the main object and then add the parent resource as a contextual
-	// tuple.
-
-	parentResource, err := o.buildParentResource(attributes)
-	if err != nil {
-		slog.Error("failed to build parent resource", slog.String("error", err.Error()))
-		return nil, fmt.Errorf("failed to build parent resource for resource specific operation: %w", err)
-	}
+	// tuple only if the parent is registered in the ProtectedResource definition.
 
 	// Build the fully qualified resource type using the correct OpenFGA format
 	resource := fmt.Sprintf("%s/%s:%s", protectedResource.Spec.ServiceRef.Name, protectedResource.Spec.Kind, attributes.GetName())
 
-	return &openfgav1.CheckRequest{
+	checkRequest := &openfgav1.CheckRequest{
 		StoreId: o.FGAStoreID,
 		TupleKey: &openfgav1.CheckRequestTupleKey{
 			User:     o.buildUser(attributes),
 			Relation: o.buildRelation(attributes),
 			Object:   resource,
 		},
-		ContextualTuples: &openfgav1.ContextualTupleKeys{
-			TupleKeys: []*openfgav1.TupleKey{
-				{
-					User:     parentResource,
-					Relation: "parent",
-					Object:   resource,
+	}
+
+	// Only add contextual tuple if parent resource is registered in ProtectedResource
+	parentResource, err := o.buildParentResource(attributes)
+	if err != nil {
+		slog.Debug("no parent resource in context", slog.String("error", err.Error()))
+	} else {
+		// Check if this parent resource type is registered in the ProtectedResource
+		if o.isParentResourceRegistered(protectedResource, parentResource) {
+			checkRequest.ContextualTuples = &openfgav1.ContextualTupleKeys{
+				TupleKeys: []*openfgav1.TupleKey{
+					{
+						User:     parentResource,
+						Relation: "parent",
+						Object:   resource,
+					},
 				},
-			},
-		},
-	}, nil
+			}
+		} else {
+			slog.Debug("parent resource not registered in ProtectedResource definition",
+				slog.String("parent_resource", parentResource),
+				slog.String("protected_resource", protectedResource.Name))
+		}
+	}
+
+	return checkRequest, nil
 }
 
 func (o *CoreControlPlaneAuthorizer) buildUser(attributes authorizer.Attributes) string {
@@ -214,4 +225,34 @@ func (o *CoreControlPlaneAuthorizer) getProtectedResource(ctx context.Context, a
 	}
 
 	return nil, fmt.Errorf("no ProtectedResource found for APIGroup=%s, Resource=%s", apiGroup, resource)
+}
+
+// isParentResourceRegistered checks if the given parent resource type is registered
+// in the ProtectedResource's ParentResources list
+func (o *CoreControlPlaneAuthorizer) isParentResourceRegistered(protectedResource *iamv1alpha1.ProtectedResource, parentResource string) bool {
+	// Extract the parent resource type from the parent resource string
+	// Parent resource format: "{APIGroup}/{Kind}:{Name}" (e.g., "resourcemanager.miloapis.com/Organization:org-123")
+	// We need to extract the "{APIGroup}/{Kind}" part
+	parts := strings.Split(parentResource, ":")
+	if len(parts) != 2 {
+		return false
+	}
+	parentResourceType := parts[0] // This is "{APIGroup}/{Kind}"
+
+	// Split the parent resource type into APIGroup and Kind
+	typeParts := strings.Split(parentResourceType, "/")
+	if len(typeParts) != 2 {
+		return false
+	}
+	parentAPIGroup := typeParts[0]
+	parentKind := typeParts[1]
+
+	// Check if this parent resource type is registered in the ProtectedResource
+	for _, parentRef := range protectedResource.Spec.ParentResources {
+		if parentRef.APIGroup == parentAPIGroup && parentRef.Kind == parentKind {
+			return true
+		}
+	}
+
+	return false
 }
