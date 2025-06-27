@@ -1,0 +1,295 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: system-groups-policy-bindings
+spec:
+  description: Test system groups support in PolicyBinding resources
+  steps:
+    - name: setup-protected-resources-and-roles
+      try:
+        # Set up protected resources for IAM User management
+        - apply:
+            file: protected-resources/iam-user.yaml
+        - wait:
+            apiVersion: iam.miloapis.com/v1alpha1
+            kind: ProtectedResource
+            name: iam-user
+            timeout: 5m
+            for:
+              condition:
+                name: Ready
+                value: "true"
+
+        - apply:
+            file: protected-resources/resourcemanager-organizationmembership.yaml
+        - wait:
+            apiVersion: iam.miloapis.com/v1alpha1
+            kind: ProtectedResource
+            name: resourcemanager-organizationmembership
+            timeout: 5m
+            for:
+              condition:
+                name: Ready
+                value: "true"
+
+        # Set up a role that allows user creation
+        - apply:
+            file: roles/resourcemanager-organizationmembership-creator.yaml
+        - wait:
+            apiVersion: iam.miloapis.com/v1alpha1
+            kind: Role
+            name: resourcemanager-organizationmembership-creator
+            timeout: 5m
+            for:
+              condition:
+                name: Ready
+                value: "true"
+
+    - name: create-system-group-policy-binding
+      try:
+        # Create a PolicyBinding that binds system:authenticated-users to the user creator role
+        - apply:
+            resource:
+              apiVersion: iam.miloapis.com/v1alpha1
+              kind: PolicyBinding
+              metadata:
+                name: system-authenticated-users-binding
+              spec:
+                roleRef:
+                  name: resourcemanager-organizationmembership-creator
+                  namespace: ($namespace)
+                subjects:
+                  - kind: Group
+                    name: "system:authenticated-users"
+                    # Note: No UID required for system groups
+                resourceSelector:
+                  resourceKind:
+                    apiGroup: "iam.miloapis.com"
+                    kind: User
+
+        # Wait for the PolicyBinding to be ready
+        - wait:
+            apiVersion: iam.miloapis.com/v1alpha1
+            kind: PolicyBinding
+            name: system-authenticated-users-binding
+            timeout: 5m
+            for:
+              condition:
+                name: Ready
+                value: 'true'
+
+    - name: test-authenticated-user-access
+      try:
+        # Test that a user with system:authenticated-users group gets access
+        - apply:
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: authenticated-user-test
+              spec:
+                restartPolicy: Never
+                containers:
+                - name: curl
+                  image: curlimages/curl:latest
+                  command: ["/bin/sh", "-c"]
+                  args:
+                    - |
+                      response=$(curl -ksS https://auth-provider-openfga-authz-webhook.auth-provider-openfga-system.svc.cluster.local:8090/core/v1alpha/webhook \
+                        -H "Content-Type: application/json" \
+                        -d @- << EOF
+                      {
+                        "apiVersion": "authorization.k8s.io/v1",
+                        "kind": "SubjectAccessReview",
+                        "spec": {
+                          "user": "authenticated-test-user",
+                          "uid": "authenticated-test-user",
+                          "groups": ["system:authenticated-users", "system:authenticated"],
+                          "extra": {
+                            "iam.miloapis.com/parent-api-group": ["iam.miloapis.com"],
+                            "iam.miloapis.com/parent-type": ["User"],
+                            "iam.miloapis.com/parent-name": ["authenticated-test-user"]
+                          },
+                          "resourceAttributes": {
+                            "group": "resourcemanager.miloapis.com",
+                            "resource": "organizationmemberships",
+                            "version": "v1alpha1",
+                            "verb": "create"
+                          }
+                        }
+                      }
+                      EOF
+                      )
+                      echo "Webhook response for authenticated user: $response"
+                      # Check if we got a valid SubjectAccessReview response
+                      if ! echo "$response" | grep -q '"kind":"SubjectAccessReview"'; then
+                        echo "Webhook test failed - invalid response format"
+                        exit 1
+                      fi
+                      # Check if the request was allowed
+                      if echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*true'; then
+                        echo "Webhook test completed successfully - access allowed for authenticated user"
+                        exit 0
+                      elif echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*false'; then
+                        echo "Webhook test failed - access denied for authenticated user"
+                        exit 1
+                      else
+                        echo "Webhook test failed - could not determine allowed status"
+                        exit 1
+                      fi
+
+        - sleep:
+            duration: 30s
+
+        - assert:
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: authenticated-user-test
+              status:
+                phase: Succeeded
+
+    - name: test-unauthenticated-user-access
+      try:
+        # Test that a user without system:authenticated-users group is denied access
+        - apply:
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: unauthenticated-user-test
+              spec:
+                restartPolicy: Never
+                containers:
+                - name: curl
+                  image: curlimages/curl:latest
+                  command: ["/bin/sh", "-c"]
+                  args:
+                    - |
+                      response=$(curl -ksS https://auth-provider-openfga-authz-webhook.auth-provider-openfga-system.svc.cluster.local:8090/core/v1alpha/webhook \
+                        -H "Content-Type: application/json" \
+                        -d @- << EOF
+                      {
+                        "apiVersion": "authorization.k8s.io/v1",
+                        "kind": "SubjectAccessReview",
+                        "spec": {
+                          "user": "unauthenticated-test-user",
+                          "uid": "unauthenticated-test-user",
+                          "groups": ["system:unauthenticated"],
+                          "extra": {
+                            "iam.miloapis.com/parent-api-group": ["iam.miloapis.com"],
+                            "iam.miloapis.com/parent-type": ["User"],
+                            "iam.miloapis.com/parent-name": ["unauthenticated-test-user"]
+                          },
+                          "resourceAttributes": {
+                            "group": "resourcemanager.miloapis.com",
+                            "resource": "organizationmemberships",
+                            "version": "v1alpha1",
+                            "verb": "create"
+                          }
+                        }
+                      }
+                      EOF
+                      )
+                      echo "Webhook response for unauthenticated user: $response"
+                      # Check if we got a valid SubjectAccessReview response
+                      if ! echo "$response" | grep -q '"kind":"SubjectAccessReview"'; then
+                        echo "Webhook test failed - invalid response format"
+                        exit 1
+                      fi
+                      # Check if the request was denied (which is expected)
+                      if echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*false'; then
+                        echo "Webhook test completed successfully - access correctly denied for unauthenticated user"
+                        exit 0
+                      elif echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*true'; then
+                        echo "Webhook test failed - access was incorrectly allowed for unauthenticated user"
+                        exit 1
+                      else
+                        echo "Webhook test failed - could not determine allowed status"
+                        exit 1
+                      fi
+
+        - sleep:
+            duration: 30s
+
+        - assert:
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: unauthenticated-user-test
+              status:
+                phase: Succeeded
+
+    - name: test-different-authenticated-user
+      try:
+        # Test another authenticated user to ensure the system group works for multiple users
+        - apply:
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: another-authenticated-user-test
+              spec:
+                restartPolicy: Never
+                containers:
+                - name: curl
+                  image: curlimages/curl:latest
+                  command: ["/bin/sh", "-c"]
+                  args:
+                    - |
+                      response=$(curl -ksS https://auth-provider-openfga-authz-webhook.auth-provider-openfga-system.svc.cluster.local:8090/core/v1alpha/webhook \
+                        -H "Content-Type: application/json" \
+                        -d @- << EOF
+                      {
+                        "apiVersion": "authorization.k8s.io/v1",
+                        "kind": "SubjectAccessReview",
+                        "spec": {
+                          "user": "another-authenticated-user",
+                          "uid": "another-authenticated-user",
+                          "groups": ["system:authenticated-users", "system:authenticated", "custom:developers"],
+                          "extra": {
+                            "iam.miloapis.com/parent-api-group": ["iam.miloapis.com"],
+                            "iam.miloapis.com/parent-type": ["User"],
+                            "iam.miloapis.com/parent-name": ["another-authenticated-user"]
+                          },
+                          "resourceAttributes": {
+                            "group": "resourcemanager.miloapis.com",
+                            "resource": "organizationmemberships",
+                            "version": "v1alpha1",
+                            "verb": "create"
+                          }
+                        }
+                      }
+                      EOF
+                      )
+                      echo "Webhook response for another authenticated user: $response"
+                      # Check if we got a valid SubjectAccessReview response
+                      if ! echo "$response" | grep -q '"kind":"SubjectAccessReview"'; then
+                        echo "Webhook test failed - invalid response format"
+                        exit 1
+                      fi
+                      # Check if the request was allowed
+                      if echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*true'; then
+                        echo "Webhook test completed successfully - access allowed for another authenticated user"
+                        exit 0
+                      elif echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*false'; then
+                        echo "Webhook test failed - access denied for another authenticated user"
+                        exit 1
+                      else
+                        echo "Webhook test failed - could not determine allowed status"
+                        exit 1
+                      fi
+
+        - sleep:
+            duration: 30s
+
+        - assert:
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: another-authenticated-user-test
+              status:
+                phase: Succeeded

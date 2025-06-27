@@ -3,6 +3,7 @@ package openfga
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
@@ -330,6 +331,13 @@ func getTupleUser(subject iamdatumapiscomv1alpha1.Subject) (string, error) {
 		}
 		return "iam.miloapis.com/InternalUser:" + subject.Name, nil
 	case "Group":
+		// System groups (names starting with "system:") don't require UID and use the group name directly
+		if strings.HasPrefix(subject.Name, "system:") {
+			// Replace colons with underscores to avoid OpenFGA tuple parsing issues
+			escapedName := strings.ReplaceAll(subject.Name, ":", "_")
+			return "iam.miloapis.com/InternalUserGroup:" + escapedName + "#assignee", nil
+		}
+		// Regular groups require UID
 		if subject.UID == "" {
 			return "", fmt.Errorf("group subject must have a UID")
 		}

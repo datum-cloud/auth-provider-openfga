@@ -577,6 +577,12 @@ func (r *PolicyBindingReconciler) validatePolicyBindingSubjects(ctx context.Cont
 	for i := range policyBinding.Spec.Subjects {
 		subject := policyBinding.Spec.Subjects[i]
 
+		// System groups (names starting with "system:") don't require UID or existence validation
+		if subject.Kind == "Group" && strings.HasPrefix(subject.Name, "system:") {
+			// System groups are always considered valid
+			continue
+		}
+
 		// The controller requires that users explicitly provide the UID for each subject in the PolicyBinding spec. This
 		// ensures unambiguous identification.
 		if subject.UID == "" {
