@@ -9,7 +9,7 @@ kind: Kustomization
 
 resources:
   # External CRDs from Milo API
-  - github.com/datum-cloud/milo/config/crd/bases
+  - github.com/datum-cloud/milo/config/crd/overlays/core-control-plane?ref=use-controller-runtime-webhooks
   # Base application components
   - ../../base
   # Testing-specific certificate issuers (same as dev for now)

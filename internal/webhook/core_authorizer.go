@@ -161,26 +161,42 @@ func (o *CoreControlPlaneAuthorizer) buildCheckRequest(ctx context.Context, attr
 		},
 	}
 
-	// Only add contextual tuple if parent resource is registered in ProtectedResource
+	// Initialize contextual tuples slice
+	var contextualTuples []*openfgav1.TupleKey
+
+	// Add context tuple for resource kind root binding
+	// This creates a relationship between the specific resource and the root of its type
+	// to support ResourceKind policy bindings that grant access to all resources of a kind
+	rootObject := fmt.Sprintf("iam.miloapis.com/Root:%s/%s", protectedResource.Spec.ServiceRef.Name, protectedResource.Spec.Kind)
+	contextualTuples = append(contextualTuples, &openfgav1.TupleKey{
+		User:     rootObject,
+		Relation: "iam.miloapis.com/RootBinding",
+		Object:   resource,
+	})
+
+	// Only add parent contextual tuple if parent resource is registered in ProtectedResource
 	parentResource, err := o.buildParentResource(attributes)
 	if err != nil {
 		slog.Debug("no parent resource in context", slog.String("error", err.Error()))
 	} else {
 		// Check if this parent resource type is registered in the ProtectedResource
 		if o.isParentResourceRegistered(protectedResource, parentResource) {
-			checkRequest.ContextualTuples = &openfgav1.ContextualTupleKeys{
-				TupleKeys: []*openfgav1.TupleKey{
-					{
-						User:     parentResource,
-						Relation: "parent",
-						Object:   resource,
-					},
-				},
-			}
+			contextualTuples = append(contextualTuples, &openfgav1.TupleKey{
+				User:     parentResource,
+				Relation: "parent",
+				Object:   resource,
+			})
 		} else {
 			slog.Debug("parent resource not registered in ProtectedResource definition",
 				slog.String("parent_resource", parentResource),
 				slog.String("protected_resource", protectedResource.Name))
+		}
+	}
+
+	// Add contextual tuples to the check request if any exist
+	if len(contextualTuples) > 0 {
+		checkRequest.ContextualTuples = &openfgav1.ContextualTupleKeys{
+			TupleKeys: contextualTuples,
 		}
 	}
 

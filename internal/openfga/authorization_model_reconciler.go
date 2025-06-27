@@ -39,9 +39,26 @@ func (r *AuthorizationModelReconciler) ReconcileAuthorizationModel(ctx context.C
 		Conditions: currentAuthorizationModel.Conditions,
 	}
 
+	// Create a map to track existing types and prevent duplicates
+	existingTypes := make(map[string]bool)
+
+	// IAM system managed types - these will be replaced with new definitions
+	iamSystemTypes := map[string]bool{
+		"iam.miloapis.com/InternalUser":      true,
+		"iam.miloapis.com/InternalUserGroup": true,
+		"iam.miloapis.com/Role":              true,
+		"iam.miloapis.com/RoleBinding":       true,
+		"iam.miloapis.com/Root":              true,
+	}
+
 	// Go through the existing type definitions and add any that were provided
-	// through the OpenFGA schema language.
+	// through the OpenFGA schema language, excluding IAM system managed types.
 	for _, typeDefinition := range currentAuthorizationModel.TypeDefinitions {
+		// Skip IAM system managed types as they will be regenerated
+		if iamSystemTypes[typeDefinition.Type] {
+			continue
+		}
+
 		// The type definitions added by the IAM system will always be in the
 		// format `{service_name}/{resource_type}`. Since this format is only
 		// valid when building the resource model in JSON, we can safely
@@ -49,10 +66,17 @@ func (r *AuthorizationModelReconciler) ReconcileAuthorizationModel(ctx context.C
 		// schema language will never contain a "/" character.
 		if len(strings.Split(typeDefinition.Type, "/")) == 1 {
 			mergedAuthorizationModel.TypeDefinitions = append(mergedAuthorizationModel.TypeDefinitions, typeDefinition)
+			existingTypes[typeDefinition.Type] = true
 		}
 	}
 
-	mergedAuthorizationModel.TypeDefinitions = append(mergedAuthorizationModel.TypeDefinitions, newAuthorizationModel.TypeDefinitions...)
+	// Add new type definitions, but only if they don't already exist
+	for _, typeDefinition := range newAuthorizationModel.TypeDefinitions {
+		if !existingTypes[typeDefinition.Type] {
+			mergedAuthorizationModel.TypeDefinitions = append(mergedAuthorizationModel.TypeDefinitions, typeDefinition)
+			existingTypes[typeDefinition.Type] = true
+		}
+	}
 
 	_, err = r.OpenFGA.WriteAuthorizationModel(ctx, &openfgav1.WriteAuthorizationModelRequest{
 		StoreId:         r.StoreID,
@@ -97,6 +121,11 @@ func (r *AuthorizationModelReconciler) getCurrentAuthorizationModel(ctx context.
 }
 
 func (r *AuthorizationModelReconciler) createExpectedAuthorizationModel(protectedResources []iamdatumapiscomv1alpha1.ProtectedResource) (*openfgav1.AuthorizationModel, error) {
+	// If no ProtectedResources exist, return a minimal authorization model
+	if len(protectedResources) == 0 {
+		return getMinimalAuthorizationModel(), nil
+	}
+
 	permissions := getAllPermissions(protectedResources)
 
 	resourceGraph, err := getResourceGraph(protectedResources)
@@ -104,11 +133,15 @@ func (r *AuthorizationModelReconciler) createExpectedAuthorizationModel(protecte
 		return nil, fmt.Errorf("failed to get resource graph: %v", err)
 	}
 
+	// Collect all resource types from the resource graph
+	resourceTypes := getAllResourceTypes(resourceGraph)
+
 	typeDefinitions := []*openfgav1.TypeDefinition{
 		getUserTypeDefinition(),
 		getUserGroupTypeDefinition(),
 		getRoleTypeDefinition(permissions),
 		getRoleBindingTypeDefinition(permissions),
+		getRootTypeDefinition(permissions, resourceTypes),
 	}
 
 	// TODO: We may be able to optimize which permissions are assigned to each
@@ -159,6 +192,15 @@ func getResourceTypeDefinition(permissions []string, resourceNode *resourceGraph
 						},
 					},
 				},
+				// RootBinding relation allows specific resource instances to be linked
+				// to their corresponding root objects for ResourceKind policy bindings
+				"iam.miloapis.com/RootBinding": {
+					DirectlyRelatedUserTypes: []*openfgav1.RelationReference{
+						{
+							Type: "iam.miloapis.com/Root",
+						},
+					},
+				},
 			},
 			SourceInfo: &openfgav1.SourceInfo{
 				File: "dynamically_managed_iam_datumapis_com.fga",
@@ -167,6 +209,9 @@ func getResourceTypeDefinition(permissions []string, resourceNode *resourceGraph
 		},
 		Relations: map[string]*openfgav1.Userset{
 			"iam.miloapis.com/RoleBinding": {
+				Userset: &openfgav1.Userset_This{},
+			},
+			"iam.miloapis.com/RootBinding": {
 				Userset: &openfgav1.Userset_This{},
 			},
 		},
@@ -190,11 +235,25 @@ func getResourceTypeDefinition(permissions []string, resourceNode *resourceGraph
 			Userset: &openfgav1.Userset_Union{
 				Union: &openfgav1.Usersets{
 					Child: []*openfgav1.Userset{
+						// Direct role binding to this specific resource
 						{
 							Userset: &openfgav1.Userset_TupleToUserset{
 								TupleToUserset: &openfgav1.TupleToUserset{
 									Tupleset: &openfgav1.ObjectRelation{
 										Relation: "iam.miloapis.com/RoleBinding",
+									},
+									ComputedUserset: &openfgav1.ObjectRelation{
+										Relation: hashedPermission,
+									},
+								},
+							},
+						},
+						// Inherit permission from root binding (ResourceKind policy bindings)
+						{
+							Userset: &openfgav1.Userset_TupleToUserset{
+								TupleToUserset: &openfgav1.TupleToUserset{
+									Tupleset: &openfgav1.ObjectRelation{
+										Relation: "iam.miloapis.com/RootBinding",
 									},
 									ComputedUserset: &openfgav1.ObjectRelation{
 										Relation: hashedPermission,
@@ -244,6 +303,41 @@ func getAllPermissions(protectedResources []iamdatumapiscomv1alpha1.ProtectedRes
 		}
 	}
 	return permissions
+}
+
+func getAllResourceTypes(node *resourceGraphNode) []string {
+	if node == nil {
+		return []string{}
+	}
+
+	var resourceTypes []string
+
+	// Add current node's resource type if it's not the root
+	if node.ResourceType != "iam.miloapis.com/Root" {
+		resourceTypes = append(resourceTypes, node.ResourceType)
+	}
+
+	// Recursively collect resource types from child nodes
+	for _, child := range node.ChildResources {
+		resourceTypes = append(resourceTypes, getAllResourceTypes(child)...)
+	}
+
+	return resourceTypes
+}
+
+func getMinimalAuthorizationModel() *openfgav1.AuthorizationModel {
+	// Return a minimal authorization model with just the basic IAM types
+	// and no permissions when no ProtectedResources exist
+	return &openfgav1.AuthorizationModel{
+		SchemaVersion: "1.2",
+		TypeDefinitions: []*openfgav1.TypeDefinition{
+			getUserTypeDefinition(),
+			getUserGroupTypeDefinition(),
+			getRoleTypeDefinition([]string{}),        // Empty permissions
+			getRoleBindingTypeDefinition([]string{}), // Empty permissions
+			// Skip Root type entirely when no resources exist
+		},
+	}
 }
 
 func getUserTypeDefinition() *openfgav1.TypeDefinition {
@@ -438,6 +532,71 @@ func getRoleBindingTypeDefinition(permissions []string) *openfgav1.TypeDefinitio
 	}
 
 	return roleBinding
+}
+
+func getRootTypeDefinition(permissions []string, resourceTypes []string) *openfgav1.TypeDefinition {
+	// Build the list of relation references for all resource types
+	var relationReferences []*openfgav1.RelationReference
+	for _, resourceType := range resourceTypes {
+		relationReferences = append(relationReferences, &openfgav1.RelationReference{
+			Type: resourceType,
+		})
+	}
+
+	// This function should only be called when ProtectedResources exist,
+	// so we should always have at least one resource type
+	if len(relationReferences) == 0 {
+		panic("getRootTypeDefinition called with no resource types - this should not happen when ProtectedResources exist")
+	}
+
+	root := &openfgav1.TypeDefinition{
+		Type: "iam.miloapis.com/Root",
+		Metadata: &openfgav1.Metadata{
+			Relations: map[string]*openfgav1.RelationMetadata{
+				"iam.miloapis.com/RoleBinding": {
+					DirectlyRelatedUserTypes: []*openfgav1.RelationReference{
+						{
+							Type: "iam.miloapis.com/RoleBinding",
+						},
+					},
+				},
+				"iam.miloapis.com/RootBinding": {
+					DirectlyRelatedUserTypes: relationReferences,
+				},
+			},
+			SourceInfo: &openfgav1.SourceInfo{
+				File: "dynamically_managed_iam_datumapis_com.fga",
+			},
+			Module: "iam.miloapis.com",
+		},
+		Relations: map[string]*openfgav1.Userset{
+			"iam.miloapis.com/RoleBinding": {
+				Userset: &openfgav1.Userset_This{},
+			},
+			"iam.miloapis.com/RootBinding": {
+				Userset: &openfgav1.Userset_This{},
+			},
+		},
+	}
+
+	// Add all permissions to the Root type so ResourceKind bindings can grant any permission
+	for _, permission := range permissions {
+		hashedPermission := hashPermission(permission)
+		root.Relations[hashedPermission] = &openfgav1.Userset{
+			Userset: &openfgav1.Userset_TupleToUserset{
+				TupleToUserset: &openfgav1.TupleToUserset{
+					Tupleset: &openfgav1.ObjectRelation{
+						Relation: "iam.miloapis.com/RoleBinding",
+					},
+					ComputedUserset: &openfgav1.ObjectRelation{
+						Relation: hashedPermission,
+					},
+				},
+			},
+		}
+	}
+
+	return root
 }
 
 func hashPermission(permission string) string {

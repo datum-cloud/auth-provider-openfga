@@ -53,6 +53,13 @@ func (r *PolicyReconciler) ReconcilePolicy(ctx context.Context, binding iamdatum
 	}
 
 	tuples := []*openfgav1.TupleKey{}
+
+	// Get the target object identifier from the resource selector
+	targetObject, err := r.getTargetObjectFromResourceSelector(binding.Spec.ResourceSelector)
+	if err != nil {
+		return fmt.Errorf("failed to get target object from resource selector: %w", err)
+	}
+
 	// Only create tuples to bind the role to the resource when we haven't
 	// seen this role binding before.
 	tuples = append(
@@ -62,11 +69,7 @@ func (r *PolicyReconciler) ReconcilePolicy(ctx context.Context, binding iamdatum
 		&openfgav1.TupleKey{
 			User:     policyBindingObjectIdentifier, // Use PolicyBinding UID based object
 			Relation: "iam.miloapis.com/RoleBinding",
-			// TODO: Consider how we could leverage the UID here instead of the name.
-			//       The authorization webhook that kubernetes uses does not provide
-			//       the UID of the resource being acted on so it's more difficult to
-			//       resolve the UID and leverage it in the tuple.
-			Object: fmt.Sprintf("%s/%s:%s", binding.Spec.TargetRef.APIGroup, binding.Spec.TargetRef.Kind, binding.Spec.TargetRef.Name),
+			Object:   targetObject,
 		},
 		// Associates the role binding to the role that should be bound
 		// to the resource.
@@ -118,6 +121,21 @@ func (r *PolicyReconciler) ReconcilePolicy(ctx context.Context, binding iamdatum
 	}
 
 	return nil
+}
+
+// getTargetObjectFromResourceSelector extracts the target object identifier from ResourceSelector
+func (r *PolicyReconciler) getTargetObjectFromResourceSelector(selector iamdatumapiscomv1alpha1.ResourceSelector) (string, error) {
+	if selector.ResourceRef != nil {
+		// For specific resource instances: apiGroup/Kind:name
+		return fmt.Sprintf("%s/%s:%s", selector.ResourceRef.APIGroup, selector.ResourceRef.Kind, selector.ResourceRef.Name), nil
+	}
+
+	if selector.ResourceKind != nil {
+		// For all instances of a resource kind: iam.miloapis.com/Root:apiGroup/Kind
+		return fmt.Sprintf("iam.miloapis.com/Root:%s/%s", selector.ResourceKind.APIGroup, selector.ResourceKind.Kind), nil
+	}
+
+	return "", fmt.Errorf("resourceSelector must specify either resourceRef or resourceKind")
 }
 
 func convertTuplesForDelete(tuples []*openfgav1.TupleKey) []*openfgav1.TupleKeyWithoutCondition {
@@ -173,15 +191,17 @@ func (r *PolicyReconciler) getExistingPolicyTuples(ctx context.Context, policy i
 
 	var allExistingTuples []*openfgav1.TupleKey
 
+	// Get the target object identifier from the resource selector
+	targetObject, err := r.getTargetObjectFromResourceSelector(policy.Spec.ResourceSelector)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get target object from resource selector: %w", err)
+	}
+
 	// 1. Get tuples where the binding object is the User (linking binding to target resource)
 	tuplesLinkingBindingToResource, err := getTupleKeys(ctx, r.StoreID, r.Client, &openfgav1.ReadRequestTupleKey{
 		User:     policyBindingObjectIdentifier,
 		Relation: "iam.miloapis.com/RoleBinding",
-		// TODO: Consider how we could leverage the UID here instead of the name.
-		//       The authorization webhook that kubernetes uses does not provide
-		//       the UID of the resource being acted on so it's more difficult to
-		//       resolve the UID and leverage it in the tuple.
-		Object: fmt.Sprintf("%s/%s:%s", policy.Spec.TargetRef.APIGroup, policy.Spec.TargetRef.Kind, policy.Spec.TargetRef.Name),
+		Object:   targetObject,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to get tuples linking binding to resource: %w", err)
@@ -257,11 +277,10 @@ func getTupleKeys(ctx context.Context, storeID string, client openfgav1.OpenFGAS
 func (r *PolicyReconciler) DeletePolicy(ctx context.Context, binding iamdatumapiscomv1alpha1.PolicyBinding) error {
 	log := logf.FromContext(ctx)
 
-	// Fetch the Role to get its UID (needed for getExistingPolicyTuples)
+	// Fetch the Role to get its UID
 	roleToFetch := &iamdatumapiscomv1alpha1.Role{}
 	roleNamespace := binding.Spec.RoleRef.Namespace
 	if roleNamespace == "" {
-		// RoleRef.Namespace is required for lookup
 		return fmt.Errorf("RoleRef.Namespace is required but was not provided for Role '%s' in PolicyBinding '%s/%s'", binding.Spec.RoleRef.Name, binding.Namespace, binding.Name)
 	}
 	roleNamespacedName := types.NamespacedName{
@@ -270,53 +289,51 @@ func (r *PolicyReconciler) DeletePolicy(ctx context.Context, binding iamdatumapi
 	}
 	if err := r.K8sClient.Get(ctx, roleNamespacedName, roleToFetch); err != nil {
 		if apierrors.IsNotFound(err) {
-			log.Info("Role not found during deletion, assuming tuples already cleaned up", "roleName", binding.Spec.RoleRef.Name)
-			return nil // If role doesn't exist, assume cleanup is not needed
+			log.Info("Role not found during deletion, skipping tuple cleanup", "role", binding.Spec.RoleRef.Name)
+			return nil
 		}
-		return fmt.Errorf("failed to get role '%s' during deletion: %w", binding.Spec.RoleRef.Name, err)
+		return fmt.Errorf("failed to get role '%s': %w", binding.Spec.RoleRef.Name, err)
 	}
 	roleUID := roleToFetch.UID
 
-	// Get all existing tuples for this PolicyBinding
 	existingTuples, err := r.getExistingPolicyTuples(ctx, binding, roleUID)
 	if err != nil {
 		return fmt.Errorf("failed to retrieve existing tuples for deletion: %w", err)
 	}
 
-	// If no tuples exist, nothing to delete
 	if len(existingTuples) == 0 {
-		log.Info("No existing tuples found for PolicyBinding, deletion complete", "policyBindingName", binding.Name)
+		log.Info("No existing tuples found for PolicyBinding, nothing to delete", "binding", binding.Name)
 		return nil
 	}
 
-	// Convert tuples for deletion
-	tuplesToDelete := convertTuplesForDelete(existingTuples)
-
-	// Create the delete request
 	writeReq := &openfgav1.WriteRequest{
 		StoreId: r.StoreID,
 		Deletes: &openfgav1.WriteRequestDeletes{
-			TupleKeys: tuplesToDelete,
+			TupleKeys: convertTuplesForDelete(existingTuples),
 		},
 	}
 
-	// Execute the deletion
 	_, err = r.Client.Write(ctx, writeReq)
 	if err != nil {
 		return fmt.Errorf("failed to delete policy tuples: %w", err)
 	}
 
-	log.Info("Successfully deleted OpenFGA tuples for PolicyBinding", "policyBindingName", binding.Name, "tuplesDeleted", len(tuplesToDelete))
+	log.Info("Successfully deleted tuples for PolicyBinding", "binding", binding.Name, "tupleCount", len(existingTuples))
 	return nil
 }
 
 func getTupleUser(subject iamdatumapiscomv1alpha1.Subject) (string, error) {
 	switch subject.Kind {
-	// TODO: Update Milo API to export a canonical SubjectKind type or enum, and use it here for type safety and maintainability.
 	case "User":
-		return fmt.Sprintf("iam.miloapis.com/InternalUser:%s", subject.Name), nil // Represent all subjects as InternalUser with their original UID
+		if subject.UID == "" {
+			return "", fmt.Errorf("User subject must have a UID")
+		}
+		return "iam.miloapis.com/InternalUser:" + subject.Name, nil
 	case "Group":
-		return fmt.Sprintf("iam.miloapis.com/InternalUserGroup:%s#assignee", subject.UID), nil // Represent all subjects as InternalUserGroup with their original UID and assignee relation
+		if subject.UID == "" {
+			return "", fmt.Errorf("Group subject must have a UID")
+		}
+		return "iam.miloapis.com/InternalUserGroup:" + subject.UID + "#assignee", nil
 	default:
 		return "", fmt.Errorf("unsupported subject kind: %s", subject.Kind)
 	}

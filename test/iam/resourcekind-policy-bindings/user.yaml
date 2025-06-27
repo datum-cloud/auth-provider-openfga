@@ -1,0 +1,6 @@
+apiVersion: iam.miloapis.com/v1alpha1
+kind: User
+metadata:
+  name: test-system-admin
+spec:
+  email: "test-system-admin@example.com"
