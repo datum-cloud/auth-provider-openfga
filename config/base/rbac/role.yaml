@@ -24,6 +24,7 @@ rules:
 - apiGroups:
   - iam.miloapis.com
   resources:
+  - groupmemberships
   - policybindings
   - roles
   verbs:
@@ -37,6 +38,7 @@ rules:
 - apiGroups:
   - iam.miloapis.com
   resources:
+  - groupmemberships/finalizers
   - policybindings/finalizers
   - protectedresources/finalizers
   - roles/finalizers
@@ -45,6 +47,7 @@ rules:
 - apiGroups:
   - iam.miloapis.com
   resources:
+  - groupmemberships/status
   - policybindings/status
   - protectedresources/status
   - roles/status
