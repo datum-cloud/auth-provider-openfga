@@ -91,7 +91,7 @@ test-e2e: manifests generate fmt vet docker-build chainsaw ## Run the e2e tests.
 	@kubectl wait --for=condition=Available deployment cert-manager-webhook -n cert-manager --timeout=300s
 	@kubectl wait --for=condition=Available deployment cert-manager-cainjector -n cert-manager --timeout=300s
 	@echo "Waiting for CA certificate to be ready..."
-	@kubectl wait --for=condition=Ready certificate auth-provider-openfga-test-ca -n default --timeout=300s
+	@kubectl wait --for=condition=Ready certificate auth-provider-openfga-test-ca -n cert-manager --timeout=300s
 	@echo "Waiting for ClusterIssuers to be ready..."
 	@kubectl wait --for=condition=Ready clusterissuer test-selfsigned-issuer --timeout=300s
 	@kubectl wait --for=condition=Ready clusterissuer auth-provider-openfga-test-ca-issuer --timeout=300s
@@ -102,7 +102,7 @@ test-e2e: manifests generate fmt vet docker-build chainsaw ## Run the e2e tests.
 	@echo "Waiting for OpenFGA to be ready..."
 	@kubectl wait --for=condition=Available deployment openfga -n openfga-system --timeout=300s
 	@echo "All components are ready. Running chainsaw tests..."
-	"$(CHAINSAW)" test test/
+	"$(CHAINSAW)" test test/ --parallel 10
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter
