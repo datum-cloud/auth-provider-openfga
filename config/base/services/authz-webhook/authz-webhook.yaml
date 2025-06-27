@@ -24,7 +24,7 @@ spec:
       containers:
         - name: authz-webhook
           image: auth-provider-openfga:latest
-          imagePullPolicy: Always
+          imagePullPolicy: IfNotPresent
           args:
             - authz-webhook
             - --metrics-bind-address=:8080
