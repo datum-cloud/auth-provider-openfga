@@ -135,14 +135,36 @@ func (o *CoreControlPlaneAuthorizer) buildCheckRequest(ctx context.Context, attr
 			return nil, fmt.Errorf("failed to build parent resource for collection operation: %w", err)
 		}
 
-		return &openfgav1.CheckRequest{
+		checkRequest := &openfgav1.CheckRequest{
 			StoreId: o.FGAStoreID,
 			TupleKey: &openfgav1.CheckRequestTupleKey{
 				User:     o.buildUser(attributes),
 				Relation: o.buildRelation(attributes),
 				Object:   parentResource,
 			},
-		}, nil
+		}
+
+		// Build all contextual tuples (root binding + groups) using shared utility
+		// Use the ProtectedResource that corresponds to the actual resource being accessed (parentResource)
+		// not the one from SubjectAccessReview attributes
+		parentProtectedResource, err := o.getProtectedResourceFromResourceString(ctx, parentResource)
+		if err != nil {
+			slog.Debug("failed to get protected resource for parent resource", slog.String("parent_resource", parentResource), slog.String("error", err.Error()))
+			// Fallback to using the protectedResource from SubjectAccessReview attributes
+			parentProtectedResource = protectedResource
+		}
+
+		rootResourceType := parentProtectedResource.Spec.ServiceRef.Name + "/" + parentProtectedResource.Spec.Kind
+		contextualTuples := buildAllContextualTuples(attributes, rootResourceType, parentResource)
+
+		// Add contextual tuples to the check request if any exist
+		if len(contextualTuples) > 0 {
+			checkRequest.ContextualTuples = &openfgav1.ContextualTupleKeys{
+				TupleKeys: contextualTuples,
+			}
+		}
+
+		return checkRequest, nil
 	}
 
 	// For resource specific operations, we want to use the resource name from the
@@ -161,18 +183,9 @@ func (o *CoreControlPlaneAuthorizer) buildCheckRequest(ctx context.Context, attr
 		},
 	}
 
-	// Initialize contextual tuples slice
-	var contextualTuples []*openfgav1.TupleKey
-
-	// Add context tuple for resource kind root binding
-	// This creates a relationship between the specific resource and the root of its type
-	// to support ResourceKind policy bindings that grant access to all resources of a kind
-	rootObject := fmt.Sprintf("iam.miloapis.com/Root:%s/%s", protectedResource.Spec.ServiceRef.Name, protectedResource.Spec.Kind)
-	contextualTuples = append(contextualTuples, &openfgav1.TupleKey{
-		User:     rootObject,
-		Relation: "iam.miloapis.com/RootBinding",
-		Object:   resource,
-	})
+	// Build all contextual tuples (root binding + groups) using shared utility
+	rootResourceType := protectedResource.Spec.ServiceRef.Name + "/" + protectedResource.Spec.Kind
+	contextualTuples := buildAllContextualTuples(attributes, rootResourceType, resource)
 
 	// Only add parent contextual tuple if parent resource is registered in ProtectedResource
 	parentResource, err := o.buildParentResource(attributes)
@@ -181,11 +194,12 @@ func (o *CoreControlPlaneAuthorizer) buildCheckRequest(ctx context.Context, attr
 	} else {
 		// Check if this parent resource type is registered in the ProtectedResource
 		if o.isParentResourceRegistered(protectedResource, parentResource) {
-			contextualTuples = append(contextualTuples, &openfgav1.TupleKey{
+			parentTuple := &openfgav1.TupleKey{
 				User:     parentResource,
 				Relation: "parent",
 				Object:   resource,
-			})
+			}
+			contextualTuples = append(contextualTuples, parentTuple)
 		} else {
 			slog.Debug("parent resource not registered in ProtectedResource definition",
 				slog.String("parent_resource", parentResource),
@@ -271,4 +285,37 @@ func (o *CoreControlPlaneAuthorizer) isParentResourceRegistered(protectedResourc
 	}
 
 	return false
+}
+
+// getProtectedResourceFromResourceString retrieves the ProtectedResource for a given resource string
+// Resource string format: "{APIGroup}/{Kind}:{Name}" (e.g., "iam.miloapis.com/User:user-123")
+func (o *CoreControlPlaneAuthorizer) getProtectedResourceFromResourceString(ctx context.Context, resourceString string) (*iamv1alpha1.ProtectedResource, error) {
+	// Extract the resource type from the resource string
+	parts := strings.Split(resourceString, ":")
+	if len(parts) != 2 {
+		return nil, fmt.Errorf("invalid resource string format: %s", resourceString)
+	}
+	resourceType := parts[0] // This is "{APIGroup}/{Kind}"
+
+	// Split the resource type into APIGroup and Kind
+	typeParts := strings.Split(resourceType, "/")
+	if len(typeParts) != 2 {
+		return nil, fmt.Errorf("invalid resource type format in resource string: %s", resourceType)
+	}
+	apiGroup := typeParts[0]
+	kind := typeParts[1]
+
+	// Find the ProtectedResource that matches this resource type
+	protectedResourceList := &iamv1alpha1.ProtectedResourceList{}
+	if err := o.K8sClient.List(ctx, protectedResourceList); err != nil {
+		return nil, fmt.Errorf("failed to list ProtectedResources: %w", err)
+	}
+
+	for _, pr := range protectedResourceList.Items {
+		if pr.Spec.ServiceRef.Name == apiGroup && pr.Spec.Kind == kind {
+			return &pr, nil
+		}
+	}
+
+	return nil, fmt.Errorf("no ProtectedResource found for resource type %s/%s", apiGroup, kind)
 }
