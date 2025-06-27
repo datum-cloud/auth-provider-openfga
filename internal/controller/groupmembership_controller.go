@@ -200,7 +200,7 @@ func (r *GroupMembershipReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// Add the group membership tuple to the OpenFGA store
 	groupMembershipRequest := openfga.GroupMembershipRequest{
 		GroupUID:  group.UID,
-		MemberUID: user.UID,
+		MemberUID: types.UID(user.Name),
 	}
 	err = r.UserGroupReconciler.AddMemberToGroup(ctx, groupMembershipRequest)
 	if err != nil {
