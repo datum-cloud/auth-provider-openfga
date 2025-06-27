@@ -326,12 +326,12 @@ func getTupleUser(subject iamdatumapiscomv1alpha1.Subject) (string, error) {
 	switch subject.Kind {
 	case "User":
 		if subject.UID == "" {
-			return "", fmt.Errorf("User subject must have a UID")
+			return "", fmt.Errorf("user subject must have a UID")
 		}
 		return "iam.miloapis.com/InternalUser:" + subject.Name, nil
 	case "Group":
 		if subject.UID == "" {
-			return "", fmt.Errorf("Group subject must have a UID")
+			return "", fmt.Errorf("group subject must have a UID")
 		}
 		return "iam.miloapis.com/InternalUserGroup:" + subject.UID + "#assignee", nil
 	default:

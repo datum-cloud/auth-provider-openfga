@@ -536,7 +536,7 @@ func getRoleBindingTypeDefinition(permissions []string) *openfgav1.TypeDefinitio
 
 func getRootTypeDefinition(permissions []string, resourceTypes []string) *openfgav1.TypeDefinition {
 	// Build the list of relation references for all resource types
-	var relationReferences []*openfgav1.RelationReference
+	relationReferences := make([]*openfgav1.RelationReference, 0, len(resourceTypes))
 	for _, resourceType := range resourceTypes {
 		relationReferences = append(relationReferences, &openfgav1.RelationReference{
 			Type: resourceType,
