@@ -199,26 +199,8 @@ kind-create: ## Create a new kind cluster with FluxCD installed.
 	@if $(KIND) get clusters | grep -q "^$(CLUSTER_NAME)$$"; then \
 		echo "Kind cluster '$(CLUSTER_NAME)' already exists"; \
 	else \
-		echo "Creating kind cluster configuration..."; \
-		echo 'kind: Cluster' > /tmp/kind-config.yaml; \
-		echo 'apiVersion: kind.x-k8s.io/v1alpha4' >> /tmp/kind-config.yaml; \
-		echo 'nodes:' >> /tmp/kind-config.yaml; \
-		echo '- role: control-plane' >> /tmp/kind-config.yaml; \
-		echo '  kubeadmConfigPatches:' >> /tmp/kind-config.yaml; \
-		echo '  - |' >> /tmp/kind-config.yaml; \
-		echo '    kind: InitConfiguration' >> /tmp/kind-config.yaml; \
-		echo '    nodeRegistration:' >> /tmp/kind-config.yaml; \
-		echo '      kubeletExtraArgs:' >> /tmp/kind-config.yaml; \
-		echo '        node-labels: "ingress-ready=true"' >> /tmp/kind-config.yaml; \
-		echo '  extraPortMappings:' >> /tmp/kind-config.yaml; \
-		echo '  - containerPort: 80' >> /tmp/kind-config.yaml; \
-		echo '    hostPort: 80' >> /tmp/kind-config.yaml; \
-		echo '    protocol: TCP' >> /tmp/kind-config.yaml; \
-		echo '  - containerPort: 443' >> /tmp/kind-config.yaml; \
-		echo '    hostPort: 443' >> /tmp/kind-config.yaml; \
-		echo '    protocol: TCP' >> /tmp/kind-config.yaml; \
-		$(KIND) create cluster --name $(CLUSTER_NAME) --config /tmp/kind-config.yaml || exit 1; \
-		rm -f /tmp/kind-config.yaml; \
+		echo "Creating kind cluster using config/kind/cluster-config.yaml..."; \
+		$(KIND) create cluster --name $(CLUSTER_NAME) --config config/kind/cluster-config.yaml || exit 1; \
 		echo "Kind cluster '$(CLUSTER_NAME)' created successfully"; \
 	fi
 	@echo "Waiting for cluster to be ready..."
