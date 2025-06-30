@@ -1,0 +1,309 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: root-resource-fallback
+spec:
+  steps:
+    - try:
+        # Set up all necessary protected resources
+        - apply:
+            file: ../policy-bindings/protected-resources/iam-role.yaml
+        - wait:
+            apiVersion: iam.miloapis.com/v1alpha1
+            kind: ProtectedResource
+            name: iam-role
+            timeout: 5m
+            for:
+              condition:
+                name: Ready
+                value: "true"
+        - apply:
+            file: ../policy-bindings/protected-resources/iam-user.yaml
+        - wait:
+            apiVersion: iam.miloapis.com/v1alpha1
+            kind: ProtectedResource
+            name: iam-user
+            timeout: 5m
+            for:
+              condition:
+                name: Ready
+                value: "true"
+        - apply:
+            file: ../policy-bindings/protected-resources/resourcemanager-project.yaml
+        - wait:
+            apiVersion: iam.miloapis.com/v1alpha1
+            kind: ProtectedResource
+            name: resourcemanager-project
+            timeout: 5m
+            for:
+              condition:
+                name: Ready
+                value: "true"
+
+        # Create a role for project management
+        - apply:
+            file: roles/root-fallback-admin.yaml
+        - wait:
+            apiVersion: iam.miloapis.com/v1alpha1
+            kind: Role
+            name: root-fallback.miloapis.com-projectadmin
+            timeout: 5m
+            for:
+              condition:
+                name: Ready
+                value: "true"
+
+        # Create test users
+        - apply:
+            file: user.yaml
+            outputs:
+              - name: user
+                value: (@)
+        - apply:
+            file: unauthorized-user.yaml
+            outputs:
+              - name: unauthorized_user
+                value: (@)
+
+        # Create ResourceKind PolicyBinding that grants access to ALL projects
+        - apply:
+            resource:
+              apiVersion: iam.miloapis.com/v1alpha1
+              kind: PolicyBinding
+              metadata:
+                name: root-fallback-project-admin-binding
+              spec:
+                roleRef:
+                  name: root-fallback.miloapis.com-projectadmin
+                  namespace: ($namespace)
+                subjects:
+                  - kind: User
+                    name: "test-root-fallback-user"
+                    uid: ($user.metadata.uid)
+                resourceSelector:
+                  resourceKind:
+                    apiGroup: "resourcemanager.miloapis.com"
+                    kind: Project
+
+        # Wait for PolicyBinding to be ready
+        - wait:
+            apiVersion: iam.miloapis.com/v1alpha1
+            kind: PolicyBinding
+            name: root-fallback-project-admin-binding
+            timeout: 5m
+            for:
+              condition:
+                name: Ready
+                value: 'true'
+
+        # Test 1: Collection operation (list) without parent context - should succeed
+        - apply:
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: root-fallback-list-test-authorized
+              spec:
+                restartPolicy: Never
+                containers:
+                - name: curl
+                  image: curlimages/curl:latest
+                  command: ["/bin/sh", "-c"]
+                  args:
+                    - |
+                      response=$(curl -ksS https://auth-provider-openfga-authz-webhook.auth-provider-openfga-system.svc.cluster.local:8090/core/v1alpha/webhook \
+                        -H "Content-Type: application/json" \
+                        -d @- << EOF
+                      {
+                        "apiVersion": "authorization.k8s.io/v1",
+                        "kind": "SubjectAccessReview",
+                        "spec": {
+                          "user": "test-root-fallback-user",
+                          "uid": "test-root-fallback-user",
+                          "groups": ["system:authenticated"],
+                          "resourceAttributes": {
+                            "group": "resourcemanager.miloapis.com",
+                            "resource": "projects",
+                            "version": "v1alpha1",
+                            "verb": "list"
+                          }
+                        }
+                      }
+                      EOF
+                      )
+                      echo "Root fallback webhook response for list: $response"
+                      # Check if we got a valid SubjectAccessReview response
+                      if ! echo "$response" | grep -q '"kind":"SubjectAccessReview"'; then
+                        echo "Root fallback test failed - invalid response format"
+                        exit 1
+                      fi
+                      # Check if the request was allowed
+                      if echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*true'; then
+                        echo "Root fallback test PASSED - list operation allowed without parent context"
+                        exit 0
+                      elif echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*false'; then
+                        echo "Root fallback test FAILED - list operation denied (should be allowed with ResourceKind binding)"
+                        exit 1
+                      else
+                        echo "Root fallback test FAILED - could not determine allowed status"
+                        exit 1
+                      fi
+                  env:
+                    - name: USER_UID
+                      value: ($user.metadata.uid)
+
+        # Wait for first test to complete
+        - sleep:
+            duration: 30s
+        - assert:
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: root-fallback-list-test-authorized
+              status:
+                phase: Succeeded
+
+        # Test 2: Collection operation (create) without parent context - should succeed
+        - apply:
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: root-fallback-create-test-authorized
+              spec:
+                restartPolicy: Never
+                containers:
+                - name: curl
+                  image: curlimages/curl:latest
+                  command: ["/bin/sh", "-c"]
+                  args:
+                    - |
+                      response=$(curl -ksS https://auth-provider-openfga-authz-webhook.auth-provider-openfga-system.svc.cluster.local:8090/core/v1alpha/webhook \
+                        -H "Content-Type: application/json" \
+                        -d @- << EOF
+                      {
+                        "apiVersion": "authorization.k8s.io/v1",
+                        "kind": "SubjectAccessReview",
+                        "spec": {
+                          "user": "test-root-fallback-user",
+                          "uid": "test-root-fallback-user",
+                          "groups": ["system:authenticated"],
+                          "resourceAttributes": {
+                            "group": "resourcemanager.miloapis.com",
+                            "resource": "projects",
+                            "version": "v1alpha1",
+                            "verb": "create"
+                          }
+                        }
+                      }
+                      EOF
+                      )
+                      echo "Root fallback webhook response for create: $response"
+                      # Check if we got a valid SubjectAccessReview response
+                      if ! echo "$response" | grep -q '"kind":"SubjectAccessReview"'; then
+                        echo "Root fallback test failed - invalid response format"
+                        exit 1
+                      fi
+                      # Check if the request was allowed
+                      if echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*true'; then
+                        echo "Root fallback test PASSED - create operation allowed without parent context"
+                        exit 0
+                      elif echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*false'; then
+                        echo "Root fallback test FAILED - create operation denied (should be allowed with ResourceKind binding)"
+                        exit 1
+                      else
+                        echo "Root fallback test FAILED - could not determine allowed status"
+                        exit 1
+                      fi
+
+        # Wait for second test to complete
+        - sleep:
+            duration: 30s
+        - assert:
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: root-fallback-create-test-authorized
+              status:
+                phase: Succeeded
+
+        # Test 3: Unauthorized user should be denied - validates access control still works
+        - apply:
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: root-fallback-unauthorized-test
+              spec:
+                restartPolicy: Never
+                containers:
+                - name: curl
+                  image: curlimages/curl:latest
+                  command: ["/bin/sh", "-c"]
+                  args:
+                    - |
+                      response=$(curl -ksS https://auth-provider-openfga-authz-webhook.auth-provider-openfga-system.svc.cluster.local:8090/core/v1alpha/webhook \
+                        -H "Content-Type: application/json" \
+                        -d @- << EOF
+                      {
+                        "apiVersion": "authorization.k8s.io/v1",
+                        "kind": "SubjectAccessReview",
+                        "spec": {
+                          "user": "test-unauthorized-user",
+                          "uid": "test-unauthorized-user",
+                          "groups": ["system:authenticated"],
+                          "resourceAttributes": {
+                            "group": "resourcemanager.miloapis.com",
+                            "resource": "projects",
+                            "version": "v1alpha1",
+                            "verb": "list"
+                          }
+                        }
+                      }
+                      EOF
+                      )
+                      echo "Root fallback webhook response for unauthorized user: $response"
+                      # Check if we got a valid SubjectAccessReview response
+                      if ! echo "$response" | grep -q '"kind":"SubjectAccessReview"'; then
+                        echo "Root fallback test failed - invalid response format"
+                        exit 1
+                      fi
+                      # Check if the request was denied (this is expected)
+                      if echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*false'; then
+                        echo "Root fallback test PASSED - unauthorized user correctly denied"
+                        exit 0
+                      elif echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*true'; then
+                        echo "Root fallback test FAILED - unauthorized user was allowed (should be denied)"
+                        exit 1
+                      else
+                        echo "Root fallback test FAILED - could not determine allowed status"
+                        exit 1
+                      fi
+
+        # Wait for third test to complete
+        - sleep:
+            duration: 30s
+        - assert:
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: root-fallback-unauthorized-test
+              status:
+                phase: Succeeded
+
+      catch:
+        - describe:
+            apiVersion: v1
+            kind: Pod
+        - describe:
+            apiVersion: iam.miloapis.com/v1alpha1
+            kind: PolicyBinding
+        - describe:
+            apiVersion: iam.miloapis.com/v1alpha1
+            kind: Role
+        - describe:
+            apiVersion: iam.miloapis.com/v1alpha1
+            kind: User

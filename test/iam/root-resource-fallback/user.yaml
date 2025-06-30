@@ -1,0 +1,6 @@
+apiVersion: iam.miloapis.com/v1alpha1
+kind: User
+metadata:
+  name: test-root-fallback-user
+spec:
+  email: "test-root-fallback-user@example.com"

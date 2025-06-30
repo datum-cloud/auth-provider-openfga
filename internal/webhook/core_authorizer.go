@@ -119,6 +119,33 @@ func (o *CoreControlPlaneAuthorizer) buildParentResource(attributes authorizer.A
 	return "", fmt.Errorf("parent resource not found in extra data")
 }
 
+// buildRootResource constructs a root resource string for ResourceKind policy bindings
+// when no parent resource is available in the request context
+func (o *CoreControlPlaneAuthorizer) buildRootResource(protectedResource *iamv1alpha1.ProtectedResource) string {
+	// Root resource format: "iam.miloapis.com/Root:{resource_type}"
+	// where resource_type is "{APIGroup}/{Kind}" format used by the authorization model
+	resourceType := fmt.Sprintf("%s/%s", protectedResource.Spec.ServiceRef.Name, protectedResource.Spec.Kind)
+	return fmt.Sprintf("iam.miloapis.com/Root:%s", resourceType)
+}
+
+func (o *CoreControlPlaneAuthorizer) buildParentResourceType(attributes authorizer.Attributes) (string, error) {
+	// Extract parent resource type from the extra data
+	user := attributes.GetUser()
+	extra := user.GetExtra()
+
+	parentAPIGroup, ok := extra["iam.miloapis.com/parent-api-group"]
+	if !ok || len(parentAPIGroup) == 0 {
+		return "", fmt.Errorf("missing iam.miloapis.com/parent-api-group in extra data")
+	}
+
+	parentType, ok := extra["iam.miloapis.com/parent-type"]
+	if !ok || len(parentType) == 0 {
+		return "", fmt.Errorf("missing iam.miloapis.com/parent-type in extra data")
+	}
+
+	return fmt.Sprintf("%s/%s", parentAPIGroup[0], parentType[0]), nil
+}
+
 func (o *CoreControlPlaneAuthorizer) buildCheckRequest(ctx context.Context, attributes authorizer.Attributes) (*openfgav1.CheckRequest, error) {
 	// First, get the ProtectedResource to understand the correct resource structure
 	protectedResource, err := o.getProtectedResource(ctx, attributes)
@@ -129,10 +156,19 @@ func (o *CoreControlPlaneAuthorizer) buildCheckRequest(ctx context.Context, attr
 	// For collection operations, we use the parent resource from the extra data
 	// included in the request context.
 	if slices.Contains([]string{"list", "create", "watch"}, attributes.GetVerb()) || attributes.GetName() == "" {
+		var targetResource string
+		var useRootFallback bool
+
+		// Try to get parent resource from context first
 		parentResource, err := o.buildParentResource(attributes)
 		if err != nil {
-			slog.Error("failed to build parent resource", slog.String("error", err.Error()))
-			return nil, fmt.Errorf("failed to build parent resource for collection operation: %w", err)
+			slog.Debug("no parent resource found in context, falling back to root resource", slog.String("error", err.Error()))
+			// Fallback to using root resource for ResourceKind policy bindings
+			targetResource = o.buildRootResource(protectedResource)
+			useRootFallback = true
+		} else {
+			targetResource = parentResource
+			useRootFallback = false
 		}
 
 		checkRequest := &openfgav1.CheckRequest{
@@ -140,27 +176,38 @@ func (o *CoreControlPlaneAuthorizer) buildCheckRequest(ctx context.Context, attr
 			TupleKey: &openfgav1.CheckRequestTupleKey{
 				User:     o.buildUser(attributes),
 				Relation: o.buildRelation(attributes),
-				Object:   parentResource,
+				Object:   targetResource,
 			},
 		}
 
-		// Build all contextual tuples (root binding + groups) using shared utility
-		// Use the ProtectedResource that corresponds to the actual resource being accessed (parentResource)
-		// not the one from SubjectAccessReview attributes
-		parentProtectedResource, err := o.getProtectedResourceFromResourceString(ctx, parentResource)
-		if err != nil {
-			slog.Debug("failed to get protected resource for parent resource", slog.String("parent_resource", parentResource), slog.String("error", err.Error()))
-			// Fallback to using the protectedResource from SubjectAccessReview attributes
-			parentProtectedResource = protectedResource
-		}
-
-		rootResourceType := parentProtectedResource.Spec.ServiceRef.Name + "/" + parentProtectedResource.Spec.Kind
-		contextualTuples := buildAllContextualTuples(attributes, rootResourceType, parentResource)
-
-		// Add contextual tuples to the check request if any exist
-		if len(contextualTuples) > 0 {
-			checkRequest.ContextualTuples = &openfgav1.ContextualTupleKeys{
-				TupleKeys: contextualTuples,
+		// For collection operations, add contextual tuples based on target resource type
+		if useRootFallback {
+			// Root resources don't need RootBinding contextual tuples - they have direct RoleBinding relations
+			groupTuples := buildGroupContextualTuples(attributes)
+			if len(groupTuples) > 0 {
+				checkRequest.ContextualTuples = &openfgav1.ContextualTupleKeys{
+					TupleKeys: groupTuples,
+				}
+			}
+		} else {
+			// When using parent resource, we need all contextual tuples
+			// The rootResourceType should be the type of the parent resource, not the child resource
+			parentResourceType, err := o.buildParentResourceType(attributes)
+			if err != nil {
+				slog.Debug("failed to get parent resource type, using only group tuples", slog.String("error", err.Error()))
+				groupTuples := buildGroupContextualTuples(attributes)
+				if len(groupTuples) > 0 {
+					checkRequest.ContextualTuples = &openfgav1.ContextualTupleKeys{
+						TupleKeys: groupTuples,
+					}
+				}
+			} else {
+				contextualTuples := buildAllContextualTuples(attributes, parentResourceType, targetResource)
+				if len(contextualTuples) > 0 {
+					checkRequest.ContextualTuples = &openfgav1.ContextualTupleKeys{
+						TupleKeys: contextualTuples,
+					}
+				}
 			}
 		}
 
@@ -183,9 +230,17 @@ func (o *CoreControlPlaneAuthorizer) buildCheckRequest(ctx context.Context, attr
 		},
 	}
 
-	// Build all contextual tuples (root binding + groups) using shared utility
-	rootResourceType := protectedResource.Spec.ServiceRef.Name + "/" + protectedResource.Spec.Kind
-	contextualTuples := buildAllContextualTuples(attributes, rootResourceType, resource)
+	var contextualTuples []*openfgav1.TupleKey
+
+	// Add root binding contextual tuple for ResourceKind PolicyBindings
+	// This links the specific resource instance to the root resource
+	rootResourceType := fmt.Sprintf("%s/%s", protectedResource.Spec.ServiceRef.Name, protectedResource.Spec.Kind)
+	rootBindingTuple := buildRootBindingContextualTuple(rootResourceType, resource)
+	contextualTuples = append(contextualTuples, rootBindingTuple)
+
+	// Add group contextual tuples for system groups functionality
+	groupTuples := buildGroupContextualTuples(attributes)
+	contextualTuples = append(contextualTuples, groupTuples...)
 
 	// Only add parent contextual tuple if parent resource is registered in ProtectedResource
 	parentResource, err := o.buildParentResource(attributes)

@@ -14,6 +14,11 @@ func buildGroupContextualTuples(attributes authorizer.Attributes) []*openfgav1.T
 
 	userUID := attributes.GetUser().GetUID()
 	for _, group := range attributes.GetUser().GetGroups() {
+		// Only add system and datum groups to contextual tuples
+		if !strings.HasPrefix(group, "system:") {
+			continue
+		}
+
 		// Escape colons in group names to match the format used in policy reconciler
 		escapedGroup := strings.ReplaceAll(group, ":", "_")
 		tuple := &openfgav1.TupleKey{
