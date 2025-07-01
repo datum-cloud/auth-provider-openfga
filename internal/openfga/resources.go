@@ -223,3 +223,19 @@ func getResourceGraphNode(
 
 	return node, nil
 }
+
+// LogResourceHierarchy logs the resource hierarchy for debugging purposes
+func LogResourceHierarchy(node *resourceGraphNode, indent string) {
+	if node == nil {
+		return
+	}
+
+	fmt.Printf("%sResource: %s\n", indent, node.ResourceType)
+	fmt.Printf("%s  Direct Permissions: %v\n", indent, node.DirectPermissions)
+	fmt.Printf("%s  Parent Resources: %v\n", indent, node.ParentResources)
+	fmt.Printf("%s  Children (%d):\n", indent, len(node.ChildResources))
+
+	for _, child := range node.ChildResources {
+		LogResourceHierarchy(child, indent+"  ")
+	}
+}

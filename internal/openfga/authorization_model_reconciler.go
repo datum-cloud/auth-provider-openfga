@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"hash/fnv"
-	"maps"
 	"strings"
 
 	openfgav1 "github.com/openfga/api/proto/openfga/v1"
@@ -126,12 +125,17 @@ func (r *AuthorizationModelReconciler) createExpectedAuthorizationModel(protecte
 		return getMinimalAuthorizationModel(), nil
 	}
 
-	permissions := getAllPermissions(protectedResources)
-
+	// Build the resource hierarchy
 	resourceGraph, err := getResourceGraph(protectedResources)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get resource graph: %v", err)
 	}
+
+	// Calculate hierarchical permissions for each resource type
+	hierarchicalPermissions := calculateHierarchicalPermissions(resourceGraph)
+
+	// Get all permissions for IAM types (roles, role bindings, root)
+	allPermissions := getAllPermissions(protectedResources)
 
 	// Collect all resource types from the resource graph
 	resourceTypes := getAllResourceTypes(resourceGraph)
@@ -139,16 +143,13 @@ func (r *AuthorizationModelReconciler) createExpectedAuthorizationModel(protecte
 	typeDefinitions := []*openfgav1.TypeDefinition{
 		getUserTypeDefinition(),
 		getUserGroupTypeDefinition(),
-		getRoleTypeDefinition(permissions),
-		getRoleBindingTypeDefinition(permissions),
-		getRootTypeDefinition(permissions, resourceTypes),
+		getRoleTypeDefinition(allPermissions),
+		getRoleBindingTypeDefinition(allPermissions),
+		getRootTypeDefinition(allPermissions, resourceTypes),
 	}
 
-	// TODO: We may be able to optimize which permissions are assigned to each
-	//       resource. All permissions are attached to all resources just to make
-	//       it easy and not have to add validation for making sure a permission
-	//       is available on a resource.
-	for _, typeDefinition := range getResourceTypeDefinitions(permissions, resourceGraph) {
+	// Use optimized version that assigns hierarchical permissions
+	for _, typeDefinition := range getResourceTypeDefinitionsWithHierarchicalPermissions(hierarchicalPermissions, resourceGraph) {
 		typeDefinitions = append(typeDefinitions, typeDefinition)
 	}
 
@@ -165,15 +166,6 @@ func getResourceParentRelatedTypes(parents []string) (relations []*openfgav1.Rel
 		})
 	}
 	return
-}
-
-func getResourceTypeDefinitions(permissions []string, node *resourceGraphNode) map[string]*openfgav1.TypeDefinition {
-	types := map[string]*openfgav1.TypeDefinition{}
-	types[node.ResourceType] = getResourceTypeDefinition(permissions, node)
-	for _, child := range node.ChildResources {
-		maps.Copy(types, getResourceTypeDefinitions(permissions, child))
-	}
-	return types
 }
 
 func getResourceTypeDefinition(permissions []string, resourceNode *resourceGraphNode) *openfgav1.TypeDefinition {
@@ -609,4 +601,95 @@ func hashPermission(permission string) string {
 
 func HashPermission(permission string) string {
 	return hashPermission(permission)
+}
+
+// calculateHierarchicalPermissions calculates which permissions each resource type should have
+// based on its position in the hierarchy. Each resource gets its own permissions plus
+// all permissions from its descendants (children, grandchildren, etc.)
+func calculateHierarchicalPermissions(rootNode *resourceGraphNode) map[string][]string {
+	hierarchicalPermissions := make(map[string][]string)
+
+	// Traverse the entire graph and calculate permissions for each node
+	calculatePermissionsForNode(rootNode, hierarchicalPermissions)
+
+	return hierarchicalPermissions
+}
+
+// calculatePermissionsForNode recursively calculates permissions for a node and all its descendants
+func calculatePermissionsForNode(node *resourceGraphNode, permissionsMap map[string][]string) []string {
+	if node == nil {
+		return []string{}
+	}
+
+	// Skip the root IAM node as it's handled separately
+	if node.ResourceType == "iam.miloapis.com/Root" {
+		// Process children but don't assign permissions to the IAM root
+		for _, child := range node.ChildResources {
+			calculatePermissionsForNode(child, permissionsMap)
+		}
+		return []string{}
+	}
+
+	// If we've already calculated permissions for this node, return them
+	if permissions, exists := permissionsMap[node.ResourceType]; exists {
+		return permissions
+	}
+
+	// Start with this node's direct permissions
+	nodePermissions := make([]string, len(node.DirectPermissions))
+	copy(nodePermissions, node.DirectPermissions)
+
+	// Add permissions from all child resources
+	for _, child := range node.ChildResources {
+		childPermissions := calculatePermissionsForNode(child, permissionsMap)
+		nodePermissions = append(nodePermissions, childPermissions...)
+	}
+
+	// Remove duplicates
+	nodePermissions = removeDuplicatePermissions(nodePermissions)
+
+	// Store the calculated permissions
+	permissionsMap[node.ResourceType] = nodePermissions
+
+	return nodePermissions
+}
+
+// removeDuplicatePermissions removes duplicate permission strings from a slice
+func removeDuplicatePermissions(permissions []string) []string {
+	seen := make(map[string]bool)
+	result := []string{}
+
+	for _, permission := range permissions {
+		if !seen[permission] {
+			seen[permission] = true
+			result = append(result, permission)
+		}
+	}
+
+	return result
+}
+
+// getResourceTypeDefinitionsWithHierarchicalPermissions creates type definitions with
+// permissions assigned based on hierarchical relationships
+func getResourceTypeDefinitionsWithHierarchicalPermissions(hierarchicalPermissions map[string][]string, node *resourceGraphNode) map[string]*openfgav1.TypeDefinition {
+	types := map[string]*openfgav1.TypeDefinition{}
+
+	// Process the current node
+	if node.ResourceType != "iam.miloapis.com/Root" {
+		permissions := hierarchicalPermissions[node.ResourceType]
+		if permissions == nil {
+			permissions = []string{} // Default to empty if not found
+		}
+		types[node.ResourceType] = getResourceTypeDefinition(permissions, node)
+	}
+
+	// Process all child nodes
+	for _, child := range node.ChildResources {
+		childTypes := getResourceTypeDefinitionsWithHierarchicalPermissions(hierarchicalPermissions, child)
+		for k, v := range childTypes {
+			types[k] = v
+		}
+	}
+
+	return types
 }
