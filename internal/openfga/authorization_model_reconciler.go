@@ -5,11 +5,15 @@ import (
 	"encoding/hex"
 	"fmt"
 	"hash/fnv"
+	"sort"
 	"strings"
 
+	"github.com/google/go-cmp/cmp"
 	openfgav1 "github.com/openfga/api/proto/openfga/v1"
 	iamdatumapiscomv1alpha1 "go.miloapis.com/milo/pkg/apis/iam/v1alpha1"
+	"google.golang.org/protobuf/testing/protocmp"
 	"google.golang.org/protobuf/types/known/wrapperspb"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 type AuthorizationModelReconciler struct {
@@ -17,7 +21,40 @@ type AuthorizationModelReconciler struct {
 	OpenFGA openfgav1.OpenFGAServiceClient
 }
 
+// getAuthorizationModelComparisonOptions returns the standardized cmp.Option slice for comparing authorization models
+// with options to ignore ordering differences and the OpenFGA-assigned id field
+func getAuthorizationModelComparisonOptions() []cmp.Option {
+	return []cmp.Option{
+		// Use protocmp.Transform for proper protobuf message comparison
+		protocmp.Transform(),
+		// Ignore the id field since it's assigned by OpenFGA and not semantically meaningful
+		protocmp.IgnoreFields(&openfgav1.AuthorizationModel{}, "id"),
+		// Sort repeated fields that can have different orderings without changing semantics
+		protocmp.SortRepeated(func(a, b *openfgav1.TypeDefinition) bool {
+			return a.Type < b.Type
+		}),
+		protocmp.SortRepeated(func(a, b *openfgav1.RelationReference) bool {
+			return a.Type < b.Type
+		}),
+	}
+}
+
+// authorizationModelsEqual compares two authorization models using go-cmp with protocmp
+// and options to ignore ordering differences that don't affect semantics
+func authorizationModelsEqual(current, merged *openfgav1.AuthorizationModel) bool {
+	if current == nil && merged == nil {
+		return true
+	}
+	if current == nil || merged == nil {
+		return false
+	}
+
+	return cmp.Equal(current, merged, getAuthorizationModelComparisonOptions()...)
+}
+
 func (r *AuthorizationModelReconciler) ReconcileAuthorizationModel(ctx context.Context, protectedResources []iamdatumapiscomv1alpha1.ProtectedResource) error {
+	log := logf.FromContext(ctx).WithValues("component", "AuthorizationModelReconciler")
+
 	currentAuthorizationModel, err := r.getCurrentAuthorizationModel(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get current authorization model: %w", err)
@@ -75,6 +112,21 @@ func (r *AuthorizationModelReconciler) ReconcileAuthorizationModel(ctx context.C
 			mergedAuthorizationModel.TypeDefinitions = append(mergedAuthorizationModel.TypeDefinitions, typeDefinition)
 			existingTypes[typeDefinition.Type] = true
 		}
+	}
+
+	// Compare using go-cmp with protocmp for proper protobuf comparison
+	if authorizationModelsEqual(currentAuthorizationModel, mergedAuthorizationModel) {
+		log.Info("Authorization model is already up to date, skipping write operation")
+		return nil
+	}
+
+	log.Info("Authorization model has changed, updating OpenFGA store",
+		"currentTypeCount", len(currentAuthorizationModel.TypeDefinitions),
+		"mergedTypeCount", len(mergedAuthorizationModel.TypeDefinitions))
+
+	// Add debugging diff output to understand what's different
+	if diff := cmp.Diff(currentAuthorizationModel, mergedAuthorizationModel, getAuthorizationModelComparisonOptions()...); diff != "" {
+		log.Info("Authorization model diff detected", "diff", diff)
 	}
 
 	_, err = r.OpenFGA.WriteAuthorizationModel(ctx, &openfgav1.WriteAuthorizationModelRequest{
@@ -140,17 +192,32 @@ func (r *AuthorizationModelReconciler) createExpectedAuthorizationModel(protecte
 	// Collect all resource types from the resource graph
 	resourceTypes := getAllResourceTypes(resourceGraph)
 
+	// Create base IAM type definitions in deterministic order
 	typeDefinitions := []*openfgav1.TypeDefinition{
 		getUserTypeDefinition(),
 		getUserGroupTypeDefinition(),
 		getRoleTypeDefinition(allPermissions),
 		getRoleBindingTypeDefinition(allPermissions),
-		getRootTypeDefinition(allPermissions, resourceTypes),
 	}
 
-	// Use optimized version that assigns hierarchical permissions
-	for _, typeDefinition := range getResourceTypeDefinitionsWithHierarchicalPermissions(hierarchicalPermissions, resourceGraph) {
-		typeDefinitions = append(typeDefinitions, typeDefinition)
+	// Only add Root type if we have resources
+	if len(resourceTypes) > 0 {
+		typeDefinitions = append(typeDefinitions, getRootTypeDefinition(allPermissions, resourceTypes))
+	}
+
+	// Get resource type definitions and add them in sorted order
+	resourceTypeDefinitions := getResourceTypeDefinitionsWithHierarchicalPermissions(hierarchicalPermissions, resourceGraph)
+
+	// Sort resource type definition keys for deterministic ordering
+	var sortedResourceTypes []string
+	for resourceType := range resourceTypeDefinitions {
+		sortedResourceTypes = append(sortedResourceTypes, resourceType)
+	}
+	sort.Strings(sortedResourceTypes)
+
+	// Add resource type definitions in sorted order
+	for _, resourceType := range sortedResourceTypes {
+		typeDefinitions = append(typeDefinitions, resourceTypeDefinitions[resourceType])
 	}
 
 	return &openfgav1.AuthorizationModel{
@@ -294,6 +361,9 @@ func getAllPermissions(protectedResources []iamdatumapiscomv1alpha1.ProtectedRes
 			permissions = append(permissions, fmt.Sprintf("%s/%s.%s", pr.Spec.ServiceRef.Name, pr.Spec.Plural, permission))
 		}
 	}
+
+	// Sort permissions for deterministic ordering
+	sort.Strings(permissions)
 	return permissions
 }
 
@@ -314,7 +384,24 @@ func getAllResourceTypes(node *resourceGraphNode) []string {
 		resourceTypes = append(resourceTypes, getAllResourceTypes(child)...)
 	}
 
-	return resourceTypes
+	// Sort for deterministic ordering and remove duplicates
+	sort.Strings(resourceTypes)
+	return removeDuplicateStrings(resourceTypes)
+}
+
+// removeDuplicateStrings removes duplicate strings from a sorted slice
+func removeDuplicateStrings(sorted []string) []string {
+	if len(sorted) == 0 {
+		return sorted
+	}
+
+	result := []string{sorted[0]}
+	for i := 1; i < len(sorted); i++ {
+		if sorted[i] != sorted[i-1] {
+			result = append(result, sorted[i])
+		}
+	}
+	return result
 }
 
 func getMinimalAuthorizationModel() *openfgav1.AuthorizationModel {
@@ -385,6 +472,11 @@ func getUserGroupTypeDefinition() *openfgav1.TypeDefinition {
 }
 
 func getRoleTypeDefinition(permissions []string) *openfgav1.TypeDefinition {
+	// Sort permissions for deterministic ordering
+	sortedPermissions := make([]string, len(permissions))
+	copy(sortedPermissions, permissions)
+	sort.Strings(sortedPermissions)
+
 	// Create a new type definition for the base role type that will be used to
 	// create custom roles. These roles will always be related to a "user" type
 	// through a role binding.
@@ -417,7 +509,7 @@ func getRoleTypeDefinition(permissions []string) *openfgav1.TypeDefinition {
 		},
 	}
 
-	for _, permission := range permissions {
+	for _, permission := range sortedPermissions {
 		hashedPermission := hashPermission(permission)
 
 		role.Metadata.Relations[hashedPermission] = &openfgav1.RelationMetadata{
@@ -439,6 +531,11 @@ func getRoleTypeDefinition(permissions []string) *openfgav1.TypeDefinition {
 }
 
 func getRoleBindingTypeDefinition(permissions []string) *openfgav1.TypeDefinition {
+	// Sort permissions for deterministic ordering
+	sortedPermissions := make([]string, len(permissions))
+	copy(sortedPermissions, permissions)
+	sort.Strings(sortedPermissions)
+
 	// Create a new type definition for the base role type that will be used to
 	// create custom roles. These roles will always be related to a "user" type
 	// through a role binding.
@@ -491,7 +588,7 @@ func getRoleBindingTypeDefinition(permissions []string) *openfgav1.TypeDefinitio
 		},
 	}
 
-	for _, permission := range permissions {
+	for _, permission := range sortedPermissions {
 		hashedPermission := hashPermission(permission)
 
 		roleBinding.Relations[hashedPermission] = &openfgav1.Userset{
@@ -527,9 +624,18 @@ func getRoleBindingTypeDefinition(permissions []string) *openfgav1.TypeDefinitio
 }
 
 func getRootTypeDefinition(permissions []string, resourceTypes []string) *openfgav1.TypeDefinition {
+	// Sort inputs for deterministic ordering
+	sortedPermissions := make([]string, len(permissions))
+	copy(sortedPermissions, permissions)
+	sort.Strings(sortedPermissions)
+
+	sortedResourceTypes := make([]string, len(resourceTypes))
+	copy(sortedResourceTypes, resourceTypes)
+	sort.Strings(sortedResourceTypes)
+
 	// Build the list of relation references for all resource types
-	relationReferences := make([]*openfgav1.RelationReference, 0, len(resourceTypes))
-	for _, resourceType := range resourceTypes {
+	relationReferences := make([]*openfgav1.RelationReference, 0, len(sortedResourceTypes))
+	for _, resourceType := range sortedResourceTypes {
 		relationReferences = append(relationReferences, &openfgav1.RelationReference{
 			Type: resourceType,
 		})
@@ -572,7 +678,7 @@ func getRootTypeDefinition(permissions []string, resourceTypes []string) *openfg
 	}
 
 	// Add all permissions to the Root type so ResourceKind bindings can grant any permission
-	for _, permission := range permissions {
+	for _, permission := range sortedPermissions {
 		hashedPermission := hashPermission(permission)
 		root.Relations[hashedPermission] = &openfgav1.Userset{
 			Userset: &openfgav1.Userset_TupleToUserset{
