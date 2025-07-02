@@ -26,7 +26,7 @@ type PolicyReconciler struct {
 // exist for the provided IAM policy.
 func (r *PolicyReconciler) ReconcilePolicy(ctx context.Context, binding iamdatumapiscomv1alpha1.PolicyBinding) error {
 	// Use PolicyBinding UID for the intermediate binding object
-	policyBindingObjectIdentifier := "iam.miloapis.com/RoleBinding:" + string(binding.UID)
+	policyBindingObjectIdentifier := TypeRoleBinding + ":" + string(binding.UID)
 
 	// Fetch the Role to get its UID
 	roleToFetch := &iamdatumapiscomv1alpha1.Role{}
@@ -69,14 +69,14 @@ func (r *PolicyReconciler) ReconcilePolicy(ctx context.Context, binding iamdatum
 		// etc) to the role binding.
 		&openfgav1.TupleKey{
 			User:     policyBindingObjectIdentifier, // Use PolicyBinding UID based object
-			Relation: "iam.miloapis.com/RoleBinding",
+			Relation: RelationRoleBinding,
 			Object:   targetObject,
 		},
 		// Associates the role binding to the role that should be bound
 		// to the resource.
 		&openfgav1.TupleKey{
-			User:     "iam.miloapis.com/InternalRole:" + string(roleUID),
-			Relation: "iam.miloapis.com/InternalRole",
+			User:     TypeInternalRole + ":" + string(roleUID),
+			Relation: RelationInternalRole,
 			Object:   policyBindingObjectIdentifier, // Use PolicyBinding UID based object
 		},
 	)
@@ -89,7 +89,7 @@ func (r *PolicyReconciler) ReconcilePolicy(ctx context.Context, binding iamdatum
 
 		tuples = append(tuples, &openfgav1.TupleKey{
 			User:     tupleUser,
-			Relation: "iam.miloapis.com/InternalUser",
+			Relation: RelationInternalUser,
 			Object:   policyBindingObjectIdentifier, // Use PolicyBinding UID based object
 		})
 	}
@@ -132,8 +132,8 @@ func (r *PolicyReconciler) getTargetObjectFromResourceSelector(selector iamdatum
 	}
 
 	if selector.ResourceKind != nil {
-		// For all instances of a resource kind: iam.miloapis.com/Root:apiGroup/Kind
-		return fmt.Sprintf("iam.miloapis.com/Root:%s/%s", selector.ResourceKind.APIGroup, selector.ResourceKind.Kind), nil
+		// For all instances of a resource kind: TypeRoot:apiGroup/Kind
+		return fmt.Sprintf("%s:%s/%s", TypeRoot, selector.ResourceKind.APIGroup, selector.ResourceKind.Kind), nil
 	}
 
 	return "", fmt.Errorf("resourceSelector must specify either resourceRef or resourceKind")
@@ -188,7 +188,7 @@ func diffTuples(existing, current []*openfgav1.TupleKey) (added, removed []*open
 
 func (r *PolicyReconciler) getExistingPolicyTuples(ctx context.Context, policy iamdatumapiscomv1alpha1.PolicyBinding, roleUID types.UID) ([]*openfgav1.TupleKey, error) {
 	// Use PolicyBinding UID for the intermediate binding object
-	policyBindingObjectIdentifier := "iam.miloapis.com/RoleBinding:" + string(policy.UID)
+	policyBindingObjectIdentifier := TypeRoleBinding + ":" + string(policy.UID)
 
 	var allExistingTuples []*openfgav1.TupleKey
 
@@ -201,7 +201,7 @@ func (r *PolicyReconciler) getExistingPolicyTuples(ctx context.Context, policy i
 	// 1. Get tuples where the binding object is the User (linking binding to target resource)
 	tuplesLinkingBindingToResource, err := getTupleKeys(ctx, r.StoreID, r.Client, &openfgav1.ReadRequestTupleKey{
 		User:     policyBindingObjectIdentifier,
-		Relation: "iam.miloapis.com/RoleBinding",
+		Relation: RelationRoleBinding,
 		Object:   targetObject,
 	})
 	if err != nil {
@@ -216,8 +216,8 @@ func (r *PolicyReconciler) getExistingPolicyTuples(ctx context.Context, policy i
 
 	// Specifically fetch the role linkage tuple
 	roleLinkageTuple, err := getTupleKeys(ctx, r.StoreID, r.Client, &openfgav1.ReadRequestTupleKey{
-		User:     "iam.miloapis.com/InternalRole:" + string(roleUID),
-		Relation: "iam.miloapis.com/InternalRole",
+		User:     TypeInternalRole + ":" + string(roleUID),
+		Relation: RelationInternalRole,
 		Object:   policyBindingObjectIdentifier,
 	})
 	if err != nil {
@@ -234,7 +234,7 @@ func (r *PolicyReconciler) getExistingPolicyTuples(ctx context.Context, policy i
 
 		subjectLinkageTuple, err := getTupleKeys(ctx, r.StoreID, r.Client, &openfgav1.ReadRequestTupleKey{
 			User:     tupleUser,
-			Relation: "iam.miloapis.com/InternalUser",
+			Relation: RelationInternalUser,
 			Object:   policyBindingObjectIdentifier,
 		})
 		if err != nil {
@@ -329,19 +329,19 @@ func getTupleUser(subject iamdatumapiscomv1alpha1.Subject) (string, error) {
 		if subject.UID == "" {
 			return "", fmt.Errorf("user subject must have a UID")
 		}
-		return "iam.miloapis.com/InternalUser:" + subject.Name, nil
+		return TypeInternalUser + ":" + subject.Name, nil
 	case "Group":
 		// System groups (names starting with "system:") don't require UID and use the group name directly
 		if strings.HasPrefix(subject.Name, "system:") {
 			// Replace colons with underscores to avoid OpenFGA tuple parsing issues
 			escapedName := strings.ReplaceAll(subject.Name, ":", "_")
-			return "iam.miloapis.com/InternalUserGroup:" + escapedName + "#assignee", nil
+			return TypeInternalUserGroup + ":" + escapedName + "#assignee", nil
 		}
 		// Regular groups require UID
 		if subject.UID == "" {
 			return "", fmt.Errorf("group subject must have a UID")
 		}
-		return "iam.miloapis.com/InternalUserGroup:" + subject.UID + "#assignee", nil
+		return TypeInternalUserGroup + ":" + subject.UID + "#assignee", nil
 	default:
 		return "", fmt.Errorf("unsupported subject kind: %s", subject.Kind)
 	}

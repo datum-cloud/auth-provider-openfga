@@ -90,8 +90,8 @@ func (r *UserGroupReconciler) RemoveMemberFromGroup(ctx context.Context, groupMe
 
 // GetOpenFGAGroupAndMember returns the OpenFGA group object and member user strings for a given JoinToGroupRequest
 func (r *UserGroupReconciler) getOpenFGAGroupAndMember(joinToGroupRequest GroupMembershipRequest) (openFGAGroupObject string, openFGAUserObject string) {
-	openFGAGroupObject = fmt.Sprintf("iam.miloapis.com/InternalUserGroup:%s", joinToGroupRequest.GroupUID)
-	openFGAUserObject = fmt.Sprintf("iam.miloapis.com/InternalUser:%s", joinToGroupRequest.MemberUID)
+	openFGAGroupObject = fmt.Sprintf("%s:%s", TypeInternalUserGroup, joinToGroupRequest.GroupUID)
+	openFGAUserObject = fmt.Sprintf("%s:%s", TypeInternalUser, joinToGroupRequest.MemberUID)
 	return
 }
 

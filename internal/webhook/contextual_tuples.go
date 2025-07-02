@@ -10,7 +10,7 @@ import (
 // buildGroupContextualTuples creates contextual tuples for user's group memberships
 // This is shared between core and project authorizers
 func buildGroupContextualTuples(attributes authorizer.Attributes) []*openfgav1.TupleKey {
-	var tuples []*openfgav1.TupleKey
+	tuples := make([]*openfgav1.TupleKey, 0, len(attributes.GetUser().GetGroups()))
 
 	userUID := attributes.GetUser().GetUID()
 	for _, group := range attributes.GetUser().GetGroups() {

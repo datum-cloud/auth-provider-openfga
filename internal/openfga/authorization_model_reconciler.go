@@ -80,11 +80,11 @@ func (r *AuthorizationModelReconciler) ReconcileAuthorizationModel(ctx context.C
 
 	// IAM system managed types - these will be replaced with new definitions
 	iamSystemTypes := map[string]bool{
-		"iam.miloapis.com/InternalUser":      true,
-		"iam.miloapis.com/InternalUserGroup": true,
-		"iam.miloapis.com/Role":              true,
-		"iam.miloapis.com/RoleBinding":       true,
-		"iam.miloapis.com/Root":              true,
+		TypeInternalUser:      true,
+		TypeInternalUserGroup: true,
+		TypeRole:              true,
+		TypeRoleBinding:       true,
+		TypeRoot:              true,
 	}
 
 	// Go through the existing type definitions and add any that were provided
@@ -209,7 +209,7 @@ func (r *AuthorizationModelReconciler) createExpectedAuthorizationModel(protecte
 	resourceTypeDefinitions := getResourceTypeDefinitionsWithHierarchicalPermissions(hierarchicalPermissions, resourceGraph)
 
 	// Sort resource type definition keys for deterministic ordering
-	var sortedResourceTypes []string
+	sortedResourceTypes := make([]string, 0, len(resourceTypeDefinitions))
 	for resourceType := range resourceTypeDefinitions {
 		sortedResourceTypes = append(sortedResourceTypes, resourceType)
 	}
@@ -244,33 +244,33 @@ func getResourceTypeDefinition(permissions []string, resourceNode *resourceGraph
 				// grant a subject access directly to the Resource. Permissions
 				// bound to the resource will be inherited by any child
 				// resources.
-				"iam.miloapis.com/RoleBinding": {
+				RelationRoleBinding: {
 					DirectlyRelatedUserTypes: []*openfgav1.RelationReference{
 						{
-							Type: "iam.miloapis.com/RoleBinding",
+							Type: TypeRoleBinding,
 						},
 					},
 				},
 				// RootBinding relation allows specific resource instances to be linked
 				// to their corresponding root objects for ResourceKind policy bindings
-				"iam.miloapis.com/RootBinding": {
+				RelationRootBinding: {
 					DirectlyRelatedUserTypes: []*openfgav1.RelationReference{
 						{
-							Type: "iam.miloapis.com/Root",
+							Type: TypeRoot,
 						},
 					},
 				},
 			},
 			SourceInfo: &openfgav1.SourceInfo{
-				File: "dynamically_managed_iam_datumapis_com.fga",
+				File: SourceFile,
 			},
 			Module: strings.Split(resourceNode.ResourceType, "/")[0],
 		},
 		Relations: map[string]*openfgav1.Userset{
-			"iam.miloapis.com/RoleBinding": {
+			RelationRoleBinding: {
 				Userset: &openfgav1.Userset_This{},
 			},
-			"iam.miloapis.com/RootBinding": {
+			RelationRootBinding: {
 				Userset: &openfgav1.Userset_This{},
 			},
 		},
@@ -279,10 +279,10 @@ func getResourceTypeDefinition(permissions []string, resourceNode *resourceGraph
 	// Only create a parent reference if the resource has parent relationships and
 	// we're not working on the root resource.
 	if len(resourceNode.ParentResources) > 0 {
-		typeDefinition.Metadata.Relations["parent"] = &openfgav1.RelationMetadata{
+		typeDefinition.Metadata.Relations[RelationParent] = &openfgav1.RelationMetadata{
 			DirectlyRelatedUserTypes: getResourceParentRelatedTypes(resourceNode.ParentResources),
 		}
-		typeDefinition.Relations["parent"] = &openfgav1.Userset{
+		typeDefinition.Relations[RelationParent] = &openfgav1.Userset{
 			Userset: &openfgav1.Userset_This{},
 		}
 	}
@@ -299,7 +299,7 @@ func getResourceTypeDefinition(permissions []string, resourceNode *resourceGraph
 							Userset: &openfgav1.Userset_TupleToUserset{
 								TupleToUserset: &openfgav1.TupleToUserset{
 									Tupleset: &openfgav1.ObjectRelation{
-										Relation: "iam.miloapis.com/RoleBinding",
+										Relation: RelationRoleBinding,
 									},
 									ComputedUserset: &openfgav1.ObjectRelation{
 										Relation: hashedPermission,
@@ -312,7 +312,7 @@ func getResourceTypeDefinition(permissions []string, resourceNode *resourceGraph
 							Userset: &openfgav1.Userset_TupleToUserset{
 								TupleToUserset: &openfgav1.TupleToUserset{
 									Tupleset: &openfgav1.ObjectRelation{
-										Relation: "iam.miloapis.com/RootBinding",
+										Relation: RelationRootBinding,
 									},
 									ComputedUserset: &openfgav1.ObjectRelation{
 										Relation: hashedPermission,
@@ -331,7 +331,7 @@ func getResourceTypeDefinition(permissions []string, resourceNode *resourceGraph
 					Userset: &openfgav1.Userset_TupleToUserset{
 						TupleToUserset: &openfgav1.TupleToUserset{
 							Tupleset: &openfgav1.ObjectRelation{
-								Relation: "parent",
+								Relation: RelationParent,
 							},
 							ComputedUserset: &openfgav1.ObjectRelation{
 								Relation: hashedPermission,
@@ -375,7 +375,7 @@ func getAllResourceTypes(node *resourceGraphNode) []string {
 	var resourceTypes []string
 
 	// Add current node's resource type if it's not the root
-	if node.ResourceType != "iam.miloapis.com/Root" {
+	if node.ResourceType != TypeRoot {
 		resourceTypes = append(resourceTypes, node.ResourceType)
 	}
 
@@ -421,13 +421,13 @@ func getMinimalAuthorizationModel() *openfgav1.AuthorizationModel {
 
 func getUserTypeDefinition() *openfgav1.TypeDefinition {
 	return &openfgav1.TypeDefinition{
-		Type: "iam.miloapis.com/InternalUser",
+		Type: TypeInternalUser,
 		Metadata: &openfgav1.Metadata{
 			Relations: map[string]*openfgav1.RelationMetadata{},
 			SourceInfo: &openfgav1.SourceInfo{
-				File: "dynamically_managed_iam_datumapis_com.fga",
+				File: SourceFile,
 			},
-			Module: "iam.miloapis.com",
+			Module: Module,
 		},
 		Relations: map[string]*openfgav1.Userset{},
 	}
@@ -435,35 +435,35 @@ func getUserTypeDefinition() *openfgav1.TypeDefinition {
 
 func getUserGroupTypeDefinition() *openfgav1.TypeDefinition {
 	return &openfgav1.TypeDefinition{
-		Type: "iam.miloapis.com/InternalUserGroup",
+		Type: TypeInternalUserGroup,
 		Metadata: &openfgav1.Metadata{
 			Relations: map[string]*openfgav1.RelationMetadata{
-				"member": {
+				RelationMember: {
 					DirectlyRelatedUserTypes: []*openfgav1.RelationReference{
 						{
-							Type: "iam.miloapis.com/InternalUser",
+							Type: TypeInternalUser,
 						},
 					},
 				},
-				"assignee": {
+				RelationAssignee: {
 					DirectlyRelatedUserTypes: nil,
 				},
 			},
 			SourceInfo: &openfgav1.SourceInfo{
-				File: "dynamically_managed_iam_datumapis_com.fga",
+				File: SourceFile,
 			},
-			Module: "iam.miloapis.com",
+			Module: Module,
 		},
 		Relations: map[string]*openfgav1.Userset{
-			"member": {
+			RelationMember: {
 				Userset: &openfgav1.Userset_This{
 					This: &openfgav1.DirectUserset{},
 				},
 			},
-			"assignee": {
+			RelationAssignee: {
 				Userset: &openfgav1.Userset_ComputedUserset{
 					ComputedUserset: &openfgav1.ObjectRelation{
-						Relation: "member",
+						Relation: RelationMember,
 					},
 				},
 			},
@@ -484,24 +484,24 @@ func getRoleTypeDefinition(permissions []string) *openfgav1.TypeDefinition {
 		// The InternalRole type will represent the application of an Role in the
 		// OpenFGA backend. The standard Role type is only used to gate access to a
 		// role resource.
-		Type: "iam.miloapis.com/InternalRole",
+		Type: TypeInternalRole,
 		Metadata: &openfgav1.Metadata{
 			Relations: map[string]*openfgav1.RelationMetadata{
-				"assignee": {
+				RelationAssignee: {
 					DirectlyRelatedUserTypes: []*openfgav1.RelationReference{
 						{
-							Type: "iam.miloapis.com/InternalUser",
+							Type: TypeInternalUser,
 						},
 					},
 				},
 			},
 			SourceInfo: &openfgav1.SourceInfo{
-				File: "dynamically_managed_iam_datumapis_com.fga",
+				File: SourceFile,
 			},
-			Module: "iam.miloapis.com",
+			Module: Module,
 		},
 		Relations: map[string]*openfgav1.Userset{
-			"assignee": {
+			RelationAssignee: {
 				Userset: &openfgav1.Userset_This{
 					This: &openfgav1.DirectUserset{},
 				},
@@ -515,7 +515,7 @@ func getRoleTypeDefinition(permissions []string) *openfgav1.TypeDefinition {
 		role.Metadata.Relations[hashedPermission] = &openfgav1.RelationMetadata{
 			DirectlyRelatedUserTypes: []*openfgav1.RelationReference{
 				{
-					Type:               "iam.miloapis.com/InternalUser",
+					Type:               TypeInternalUser,
 					RelationOrWildcard: &openfgav1.RelationReference_Wildcard{},
 				},
 			},
@@ -540,47 +540,47 @@ func getRoleBindingTypeDefinition(permissions []string) *openfgav1.TypeDefinitio
 	// create custom roles. These roles will always be related to a "user" type
 	// through a role binding.
 	roleBinding := &openfgav1.TypeDefinition{
-		Type: "iam.miloapis.com/RoleBinding",
+		Type: TypeRoleBinding,
 		Metadata: &openfgav1.Metadata{
 			Relations: map[string]*openfgav1.RelationMetadata{
-				"iam.miloapis.com/InternalRole": {
+				RelationInternalRole: {
 					DirectlyRelatedUserTypes: []*openfgav1.RelationReference{
 						{
-							Type: "iam.miloapis.com/InternalRole",
+							Type: TypeInternalRole,
 						},
 					},
 				},
-				"iam.miloapis.com/InternalUser": {
+				RelationInternalUser: {
 					DirectlyRelatedUserTypes: []*openfgav1.RelationReference{
 						{
-							Type: "iam.miloapis.com/InternalUser",
+							Type: TypeInternalUser,
 						},
 						{
-							Type:               "iam.miloapis.com/InternalUser",
+							Type:               TypeInternalUser,
 							RelationOrWildcard: &openfgav1.RelationReference_Wildcard{},
 						},
 						// Ensure only InternalUser is allowed here if all subjects are mapped to it for this relation
 						{
-							Type: "iam.miloapis.com/InternalUserGroup",
+							Type: TypeInternalUserGroup,
 							RelationOrWildcard: &openfgav1.RelationReference_Relation{
-								Relation: "assignee",
+								Relation: RelationAssignee,
 							},
 						},
 					},
 				},
 			},
 			SourceInfo: &openfgav1.SourceInfo{
-				File: "dynamically_managed_iam_datumapis_com.fga",
+				File: SourceFile,
 			},
-			Module: "iam.miloapis.com",
+			Module: Module,
 		},
 		Relations: map[string]*openfgav1.Userset{
-			"iam.miloapis.com/InternalRole": {
+			RelationInternalRole: {
 				Userset: &openfgav1.Userset_This{
 					This: &openfgav1.DirectUserset{},
 				},
 			},
-			"iam.miloapis.com/InternalUser": {
+			RelationInternalUser: {
 				Userset: &openfgav1.Userset_This{
 					This: &openfgav1.DirectUserset{},
 				},
@@ -598,7 +598,7 @@ func getRoleBindingTypeDefinition(permissions []string) *openfgav1.TypeDefinitio
 						{
 							Userset: &openfgav1.Userset_ComputedUserset{
 								ComputedUserset: &openfgav1.ObjectRelation{
-									Relation: "iam.miloapis.com/InternalUser",
+									Relation: RelationInternalUser,
 								},
 							},
 						},
@@ -609,7 +609,7 @@ func getRoleBindingTypeDefinition(permissions []string) *openfgav1.TypeDefinitio
 										Relation: hashedPermission,
 									},
 									Tupleset: &openfgav1.ObjectRelation{
-										Relation: "iam.miloapis.com/InternalRole",
+										Relation: RelationInternalRole,
 									},
 								},
 							},
@@ -648,30 +648,30 @@ func getRootTypeDefinition(permissions []string, resourceTypes []string) *openfg
 	}
 
 	root := &openfgav1.TypeDefinition{
-		Type: "iam.miloapis.com/Root",
+		Type: TypeRoot,
 		Metadata: &openfgav1.Metadata{
 			Relations: map[string]*openfgav1.RelationMetadata{
-				"iam.miloapis.com/RoleBinding": {
+				RelationRoleBinding: {
 					DirectlyRelatedUserTypes: []*openfgav1.RelationReference{
 						{
-							Type: "iam.miloapis.com/RoleBinding",
+							Type: TypeRoleBinding,
 						},
 					},
 				},
-				"iam.miloapis.com/RootBinding": {
+				RelationRootBinding: {
 					DirectlyRelatedUserTypes: relationReferences,
 				},
 			},
 			SourceInfo: &openfgav1.SourceInfo{
-				File: "dynamically_managed_iam_datumapis_com.fga",
+				File: SourceFile,
 			},
-			Module: "iam.miloapis.com",
+			Module: Module,
 		},
 		Relations: map[string]*openfgav1.Userset{
-			"iam.miloapis.com/RoleBinding": {
+			RelationRoleBinding: {
 				Userset: &openfgav1.Userset_This{},
 			},
-			"iam.miloapis.com/RootBinding": {
+			RelationRootBinding: {
 				Userset: &openfgav1.Userset_This{},
 			},
 		},
@@ -684,7 +684,7 @@ func getRootTypeDefinition(permissions []string, resourceTypes []string) *openfg
 			Userset: &openfgav1.Userset_TupleToUserset{
 				TupleToUserset: &openfgav1.TupleToUserset{
 					Tupleset: &openfgav1.ObjectRelation{
-						Relation: "iam.miloapis.com/RoleBinding",
+						Relation: RelationRoleBinding,
 					},
 					ComputedUserset: &openfgav1.ObjectRelation{
 						Relation: hashedPermission,
@@ -728,7 +728,7 @@ func calculatePermissionsForNode(node *resourceGraphNode, permissionsMap map[str
 	}
 
 	// Skip the root IAM node as it's handled separately
-	if node.ResourceType == "iam.miloapis.com/Root" {
+	if node.ResourceType == TypeRoot {
 		// Process children but don't assign permissions to the IAM root
 		for _, child := range node.ChildResources {
 			calculatePermissionsForNode(child, permissionsMap)
@@ -781,7 +781,7 @@ func getResourceTypeDefinitionsWithHierarchicalPermissions(hierarchicalPermissio
 	types := map[string]*openfgav1.TypeDefinition{}
 
 	// Process the current node
-	if node.ResourceType != "iam.miloapis.com/Root" {
+	if node.ResourceType != TypeRoot {
 		permissions := hierarchicalPermissions[node.ResourceType]
 		if permissions == nil {
 			permissions = []string{} // Default to empty if not found
