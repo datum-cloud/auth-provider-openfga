@@ -26,6 +26,10 @@ type CoreControlPlaneAuthorizer struct {
 func (o *CoreControlPlaneAuthorizer) Authorize(ctx context.Context, attributes authorizer.Attributes) (authorizer.Decision, string, error) {
 	slog.InfoContext(ctx, "authorizing request", slog.Any("attributes", attributes))
 
+	if attributes.GetUser().GetUID() == "" {
+		return authorizer.DecisionDeny, "", fmt.Errorf("user UID is required by core control plane authorizer")
+	}
+
 	// Validate that the permission exists
 	permissionExists, err := o.validatePermissionExists(ctx, attributes)
 	if err != nil {
@@ -37,10 +41,6 @@ func (o *CoreControlPlaneAuthorizer) Authorize(ctx context.Context, attributes a
 		permissionString := o.buildPermissionString(attributes)
 		slog.WarnContext(ctx, "permission not found for attributes", slog.Any("attributes", attributes), slog.String("permission", permissionString))
 		return authorizer.DecisionDeny, "", fmt.Errorf("permission '%s' not registered", permissionString)
-	}
-
-	if attributes.GetUser().GetUID() == "" {
-		return authorizer.DecisionDeny, "", fmt.Errorf("user UID is required by core control plane authorizer")
 	}
 
 	checkReq, err := o.buildCheckRequest(ctx, attributes)
