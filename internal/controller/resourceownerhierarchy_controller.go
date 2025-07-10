@@ -186,7 +186,7 @@ func (r *ResourceOwnerHierarchyReconciler) synchronizeFGAHierarchy(ctx context.C
 
 func buildChildFGAIdentifierForResource(resource client.Object, gvk schema.GroupVersionKind, serviceNameForResource string) string {
 	childFGAType := fmt.Sprintf("%s/%s", serviceNameForResource, gvk.Kind)
-	childFGAID := string(resource.GetName())
+	childFGAID := resource.GetName()
 	return fmt.Sprintf("%s:%s", childFGAType, childFGAID)
 }
 
