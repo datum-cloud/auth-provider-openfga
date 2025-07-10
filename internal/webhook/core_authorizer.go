@@ -341,36 +341,3 @@ func (o *CoreControlPlaneAuthorizer) isParentResourceRegistered(protectedResourc
 
 	return false
 }
-
-// getProtectedResourceFromResourceString retrieves the ProtectedResource for a given resource string
-// Resource string format: "{APIGroup}/{Kind}:{Name}" (e.g., "iam.miloapis.com/User:user-123")
-func (o *CoreControlPlaneAuthorizer) getProtectedResourceFromResourceString(ctx context.Context, resourceString string) (*iamv1alpha1.ProtectedResource, error) {
-	// Extract the resource type from the resource string
-	parts := strings.Split(resourceString, ":")
-	if len(parts) != 2 {
-		return nil, fmt.Errorf("invalid resource string format: %s", resourceString)
-	}
-	resourceType := parts[0] // This is "{APIGroup}/{Kind}"
-
-	// Split the resource type into APIGroup and Kind
-	typeParts := strings.Split(resourceType, "/")
-	if len(typeParts) != 2 {
-		return nil, fmt.Errorf("invalid resource type format in resource string: %s", resourceType)
-	}
-	apiGroup := typeParts[0]
-	kind := typeParts[1]
-
-	// Find the ProtectedResource that matches this resource type
-	protectedResourceList := &iamv1alpha1.ProtectedResourceList{}
-	if err := o.K8sClient.List(ctx, protectedResourceList); err != nil {
-		return nil, fmt.Errorf("failed to list ProtectedResources: %w", err)
-	}
-
-	for _, pr := range protectedResourceList.Items {
-		if pr.Spec.ServiceRef.Name == apiGroup && pr.Spec.Kind == kind {
-			return &pr, nil
-		}
-	}
-
-	return nil, fmt.Errorf("no ProtectedResource found for resource type %s/%s", apiGroup, kind)
-}
