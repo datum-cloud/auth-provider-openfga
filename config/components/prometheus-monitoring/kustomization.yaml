@@ -1,14 +1,6 @@
 apiVersion: kustomize.config.k8s.io/v1alpha1
 kind: Component
 
-# Optional Prometheus monitoring component
-# Adds ServiceMonitor for metrics scraping when Prometheus is available
-
 resources:
-  - monitor.yaml
-# Optional TLS configuration patch for ServiceMonitor
-# Uncomment to enable cert-manager based TLS for metrics endpoint
-#patches:
-#  - path: monitor_tls_patch.yaml
-#    target:
-#      kind: ServiceMonitor
+  - authz-webhook-monitor.yaml
+  - controller-manager-monitor.yaml
