@@ -3,4 +3,4 @@ kind: Organization
 metadata:
   name: test-org-2
 spec:
-  type: Business
+  type: Standard
