@@ -1,0 +1,317 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: resourcekind-policy-bindings
+spec:
+  steps:
+    - try:
+        # Set up all necessary protected resources
+        - apply:
+            file: ../policy-bindings/protected-resources/iam-role.yaml
+        - wait:
+            apiVersion: iam.miloapis.com/v1alpha1
+            kind: ProtectedResource
+            name: iam-role
+            timeout: 5m
+            for:
+              condition:
+                name: Ready
+                value: "true"
+        - apply:
+            file: ../policy-bindings/protected-resources/iam-user.yaml
+        - wait:
+            apiVersion: iam.miloapis.com/v1alpha1
+            kind: ProtectedResource
+            name: iam-user
+            timeout: 5m
+            for:
+              condition:
+                name: Ready
+                value: "true"
+        - apply:
+            file: ../policy-bindings/protected-resources/resourcemanager-organization.yaml
+        - wait:
+            apiVersion: iam.miloapis.com/v1alpha1
+            kind: ProtectedResource
+            name: resourcemanager-organization
+            timeout: 5m
+            for:
+              condition:
+                name: Ready
+                value: "true"
+
+        # Create a role for organization management
+        - apply:
+            file: roles/resourcekind-organizationowner.yaml
+        - wait:
+            apiVersion: iam.miloapis.com/v1alpha1
+            kind: Role
+            name: resourcekind.miloapis.com-organizationowner
+            timeout: 5m
+            for:
+              condition:
+                name: Ready
+                value: "true"
+
+        # Create test user
+        - apply:
+            file: user.yaml
+            outputs:
+              - name: user
+                value: (@)
+
+        # Create multiple organizations to test system-wide access
+        - apply:
+            file: organization1.yaml
+            outputs:
+              - name: org1
+                value: (@)
+        - apply:
+            file: organization2.yaml
+            outputs:
+              - name: org2
+                value: (@)
+
+        # Create ResourceKind PolicyBinding that grants access to ALL organizations
+        - apply:
+            resource:
+              apiVersion: iam.miloapis.com/v1alpha1
+              kind: PolicyBinding
+              metadata:
+                name: system-wide-org-admin-binding
+              spec:
+                roleRef:
+                  name: resourcekind.miloapis.com-organizationowner
+                  namespace: ($namespace)
+                subjects:
+                  - kind: User
+                    name: "test-system-admin"
+                    uid: ($user.metadata.uid)
+                resourceSelector:
+                  resourceKind:
+                    apiGroup: "resourcemanager.miloapis.com"
+                    kind: Organization
+
+        # Wait for PolicyBinding to be ready
+        - wait:
+            apiVersion: iam.miloapis.com/v1alpha1
+            kind: PolicyBinding
+            name: system-wide-org-admin-binding
+            timeout: 5m
+            for:
+              condition:
+                name: Ready
+                value: 'true'
+
+        # Test access to first organization
+        - apply:
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: resourcekind-webhook-test-org1
+              spec:
+                restartPolicy: Never
+                containers:
+                - name: curl
+                  image: curlimages/curl:latest
+                  command: ["/bin/sh", "-c"]
+                  args:
+                    - |
+                      response=$(curl -ksS https://auth-provider-openfga-authz-webhook.auth-provider-openfga-system.svc.cluster.local:8090/core/v1alpha/webhook \
+                        -H "Content-Type: application/json" \
+                        -d @- << EOF
+                      {
+                        "apiVersion": "authorization.k8s.io/v1",
+                        "kind": "SubjectAccessReview",
+                        "spec": {
+                          "user": "test-system-admin",
+                          "uid": "test-system-admin",
+                          "groups": ["system:authenticated"],
+                          "resourceAttributes": {
+                            "group": "resourcemanager.miloapis.com",
+                            "resource": "organizations",
+                            "version": "v1alpha1",
+                            "verb": "get",
+                            "name": "test-org-1"
+                          }
+                        }
+                      }
+                      EOF
+                      )
+                      echo "Webhook response for org1: $response"
+                      # Check if we got a valid SubjectAccessReview response
+                      if ! echo "$response" | grep -q '"kind":"SubjectAccessReview"'; then
+                        echo "Webhook test failed - invalid response format"
+                        exit 1
+                      fi
+                      # Check if the request was allowed
+                      if echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*true'; then
+                        echo "Webhook test completed successfully - access allowed to org1"
+                        exit 0
+                      elif echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*false'; then
+                        echo "Webhook test failed - access denied by authorization webhook for org1"
+                        exit 1
+                      else
+                        echo "Webhook test failed - could not determine allowed status for org1"
+                        exit 1
+                      fi
+                  env:
+                    - name: USER_UID
+                      value: ($user.metadata.uid)
+
+        # Wait for first test to complete
+        - sleep:
+            duration: 30s
+        - assert:
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: resourcekind-webhook-test-org1
+              status:
+                phase: Succeeded
+
+        # Test access to second organization (should also be allowed due to ResourceKind)
+        - apply:
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: resourcekind-webhook-test-org2
+              spec:
+                restartPolicy: Never
+                containers:
+                - name: curl
+                  image: curlimages/curl:latest
+                  command: ["/bin/sh", "-c"]
+                  args:
+                    - |
+                      response=$(curl -ksS https://auth-provider-openfga-authz-webhook.auth-provider-openfga-system.svc.cluster.local:8090/core/v1alpha/webhook \
+                        -H "Content-Type: application/json" \
+                        -d @- << EOF
+                      {
+                        "apiVersion": "authorization.k8s.io/v1",
+                        "kind": "SubjectAccessReview",
+                        "spec": {
+                          "user": "test-system-admin",
+                          "uid": "test-system-admin",
+                          "groups": ["system:authenticated"],
+                          "resourceAttributes": {
+                            "group": "resourcemanager.miloapis.com",
+                            "resource": "organizations",
+                            "version": "v1alpha1",
+                            "verb": "get",
+                            "name": "test-org-2"
+                          }
+                        }
+                      }
+                      EOF
+                      )
+                      echo "Webhook response for org2: $response"
+                      # Check if we got a valid SubjectAccessReview response
+                      if ! echo "$response" | grep -q '"kind":"SubjectAccessReview"'; then
+                        echo "Webhook test failed - invalid response format"
+                        exit 1
+                      fi
+                      # Check if the request was allowed
+                      if echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*true'; then
+                        echo "Webhook test completed successfully - access allowed to org2"
+                        exit 0
+                      elif echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*false'; then
+                        echo "Webhook test failed - access denied by authorization webhook for org2"
+                        exit 1
+                      else
+                        echo "Webhook test failed - could not determine allowed status for org2"
+                        exit 1
+                      fi
+                  env:
+                    - name: USER_UID
+                      value: ($user.metadata.uid)
+
+        # Wait for second test to complete
+        - sleep:
+            duration: 30s
+        - assert:
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: resourcekind-webhook-test-org2
+              status:
+                phase: Succeeded
+
+        # Test that a user WITHOUT the ResourceKind binding cannot access organizations
+        - apply:
+            file: unauthorized-user.yaml
+            outputs:
+              - name: unauthorizedUser
+                value: (@)
+
+        - apply:
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: resourcekind-webhook-test-unauthorized
+              spec:
+                restartPolicy: Never
+                containers:
+                - name: curl
+                  image: curlimages/curl:latest
+                  command: ["/bin/sh", "-c"]
+                  args:
+                    - |
+                      response=$(curl -ksS https://auth-provider-openfga-authz-webhook.auth-provider-openfga-system.svc.cluster.local:8090/core/v1alpha/webhook \
+                        -H "Content-Type: application/json" \
+                        -d @- << EOF
+                      {
+                        "apiVersion": "authorization.k8s.io/v1",
+                        "kind": "SubjectAccessReview",
+                        "spec": {
+                          "user": "unauthorized-user",
+                          "uid": "unauthorized-user",
+                          "groups": ["system:authenticated"],
+                          "resourceAttributes": {
+                            "group": "resourcemanager.miloapis.com",
+                            "resource": "organizations",
+                            "version": "v1alpha1",
+                            "verb": "get",
+                            "name": "test-org-1"
+                          }
+                        }
+                      }
+                      EOF
+                      )
+                      echo "Webhook response for unauthorized user: $response"
+                      # Check if we got a valid SubjectAccessReview response
+                      if ! echo "$response" | grep -q '"kind":"SubjectAccessReview"'; then
+                        echo "Webhook test failed - invalid response format"
+                        exit 1
+                      fi
+                      # Check if the request was denied (which is expected)
+                      if echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*false'; then
+                        echo "Webhook test completed successfully - access denied to unauthorized user as expected"
+                        exit 0
+                      elif echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*true'; then
+                        echo "Webhook test failed - access was unexpectedly allowed for unauthorized user"
+                        exit 1
+                      else
+                        echo "Webhook test failed - could not determine allowed status for unauthorized user"
+                        exit 1
+                      fi
+                  env:
+                    - name: UNAUTH_USER_UID
+                      value: ($unauthorizedUser.metadata.uid)
+
+        # Wait for unauthorized test to complete
+        - sleep:
+            duration: 30s
+        - assert:
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: resourcekind-webhook-test-unauthorized
+              status:
+                phase: Succeeded

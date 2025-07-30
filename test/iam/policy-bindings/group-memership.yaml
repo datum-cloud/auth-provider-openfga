@@ -1,0 +1,11 @@
+apiVersion: iam.miloapis.com/v1alpha1
+kind: GroupMembership
+metadata:
+  name: example-groupmembership
+  namespace: ($namespace)
+spec:
+  userRef:
+    name: group-user-admin
+  groupRef:
+    name: sample-admin-group
+    namespace: ($namespace)

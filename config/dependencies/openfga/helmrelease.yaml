@@ -1,0 +1,46 @@
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: openfga
+  namespace: openfga-system
+spec:
+  interval: 1m
+  chart:
+    spec:
+      chart: openfga
+      version: 0.2.30
+      sourceRef:
+        kind: HelmRepository
+        name: openfga
+        namespace: openfga-system
+  values:
+    # Configure OpenFGA to use in-memory storage for development
+    datastore:
+      engine: memory
+
+    # Basic service configuration
+    service:
+      type: ClusterIP
+      port: 8080
+
+    # Resource limits for development/testing
+    resources:
+      limits:
+        cpu: 500m
+        memory: 512Mi
+      requests:
+        cpu: 100m
+        memory: 128Mi
+
+    # Basic replica configuration
+    replicaCount: 1
+
+    livenessProbe:
+      enabled: true
+      initialDelaySeconds: 30
+      periodSeconds: 10
+
+    readinessProbe:
+      enabled: true
+      initialDelaySeconds: 5
+      periodSeconds: 5

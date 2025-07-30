@@ -1,0 +1,57 @@
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: cert-manager
+  namespace: cert-manager
+spec:
+  interval: 1m
+  chart:
+    spec:
+      chart: cert-manager
+      version: v1.16.2
+      sourceRef:
+        kind: HelmRepository
+        name: jetstack
+        namespace: cert-manager
+  install:
+    crds: Create
+  upgrade:
+    crds: CreateReplace
+  values:
+    # Install CRDs as part of the release
+    crds:
+      enabled: true
+
+    # Global configuration
+    global:
+      leaderElection:
+        namespace: cert-manager
+
+    # Resource limits for the main controller
+    resources:
+      requests:
+        cpu: 10m
+        memory: 32Mi
+      limits:
+        cpu: 100m
+        memory: 128Mi
+
+    # Webhook configuration
+    webhook:
+      resources:
+        requests:
+          cpu: 5m
+          memory: 16Mi
+        limits:
+          cpu: 50m
+          memory: 64Mi
+
+    # CA Injector configuration
+    cainjector:
+      resources:
+        requests:
+          cpu: 5m
+          memory: 16Mi
+        limits:
+          cpu: 50m
+          memory: 64Mi

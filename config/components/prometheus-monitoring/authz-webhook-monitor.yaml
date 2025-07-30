@@ -1,0 +1,19 @@
+# Prometheus Monitor Service (Metrics)
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  labels:
+    app.kubernetes.io/name: authz-webhook
+    app.kubernetes.io/part-of: auth-provider-openfga
+  name: authz-webhook
+spec:
+  endpoints:
+    - path: /metrics
+      port: metrics
+      # TODO: Enable HTTPS metrics by default
+      scheme: http
+      bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: authz-webhook
+      app.kubernetes.io/part-of: auth-provider-openfga

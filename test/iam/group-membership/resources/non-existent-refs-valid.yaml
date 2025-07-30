@@ -1,0 +1,16 @@
+apiVersion: iam.miloapis.com/v1alpha1
+kind: GroupMembership
+metadata:
+  name: non-existent-refs-membership
+  namespace: ($namespace)
+status:
+  conditions:
+    - type: UserRefValid
+      status: "True"
+      reason: ValidationSuccessful
+    - type: GroupRefValid
+      status: "True"
+      reason: ValidationSuccessful
+    - type: Ready
+      status: "True"
+      reason: Reconciled 

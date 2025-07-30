@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: controller-manager-metrics
+  labels:
+    app.kubernetes.io/name: controller-manager
+    app.kubernetes.io/part-of: auth-provider-openfga
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  ports:
+    - name: https
+      port: 8080
+      protocol: TCP
+      targetPort: 8080
+  selector:
+    app.kubernetes.io/name: controller-manager
+    app.kubernetes.io/part-of: auth-provider-openfga

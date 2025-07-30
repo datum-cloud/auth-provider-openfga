@@ -1,0 +1,70 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  # This test is used to test the creation and deletion of a group membership
+  name: group-membership-creation-and-deletion
+spec:
+  steps:
+  # Test the creation and deletion of a group membership
+  - try:
+    - create:
+        file: resources/protected-resource.yaml
+    - create: # Create group
+        file: resources/group.yaml
+    - create: # Create user
+        file: resources/user.yaml
+    - apply: # Create group membership
+        file: resources/group-membership.yaml
+    - wait: # Wait for group membership to be ready
+        apiVersion: iam.miloapis.com/v1alpha1
+        kind: GroupMembership
+        name: test-user-membership
+        timeout: 5m
+        for:
+          condition:
+            name: Ready
+            value: 'true'
+    - assert: # Assert that the group membership is created
+        file: resources/group-membership.yaml
+    - delete: # Delete group membership
+        file: resources/group-membership.yaml
+    - wait: # Wait for group membership to be deleted
+        apiVersion: iam.miloapis.com/v1alpha1
+        kind: GroupMembership
+        name: test-user-membership
+        timeout: 5m
+        for:
+          deletion: {}
+    - error: # Assert that the group membership is deleted
+        file: resources/group-membership.yaml
+
+  - try:
+    # Test the creation of a group membership with non-existent user and non-existent group
+    - apply: # Create group membership with non-existent user and non-existent group
+        file: resources/non-existent-group-membership.yaml
+    - wait: # Wait for group membership to be ready
+        apiVersion: iam.miloapis.com/v1alpha1
+        kind: GroupMembership
+        name: non-existent-refs-membership
+        timeout: 5m
+        for:
+          condition:
+            name: Ready
+            value: 'false'
+    - assert: # Assert that the group membership is not reconciled, it should be invalid because the user and group are not created
+        file: resources/non-existent-refs-invalid.yaml
+    - apply: # Create user
+        file: resources/non-existent-user.yaml
+    - apply: # Create group
+        file: resources/non-existent-group.yaml
+    - wait: # Wait for group membership to be ready, it should be ready now as the user and group are created and have watches
+        apiVersion: iam.miloapis.com/v1alpha1
+        kind: GroupMembership
+        name: non-existent-refs-membership
+        timeout: 5m
+        for:
+          condition:
+            name: Ready
+            value: 'true'
+    - assert: # Assert that the group membership is created
+        file: resources/non-existent-refs-valid.yaml

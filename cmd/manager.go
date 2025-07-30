@@ -8,7 +8,7 @@ import (
 
 	openfgav1 "github.com/openfga/api/proto/openfga/v1"
 	"github.com/spf13/cobra"
-	"go.datum.net/iam/openfga/internal/controller"
+	"go.miloapis.com/auth-provider-openfga/internal/controller"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
@@ -25,28 +25,34 @@ func createManagerCommand() *cobra.Command {
 	var probeAddr string
 	var openfgaAPIURL string
 	var openfgaStoreID string
-	var openfgaAPIToken string
 	var openfgaScheme string
-	var openfgaGRPCMaxRetries int
-	var openfgaGRPCBackoff time.Duration
-	var openfgaGRPCBackoffMaxDelay time.Duration
+
+	// Leader election configuration options
+	var leaderElectionID string
+	var leaderElectionNamespace string
+	var leaderElectionResourceLock string
+	var leaseDuration time.Duration
+	var renewDeadline time.Duration
+	var retryPeriod time.Duration
 
 	cmd := &cobra.Command{
 		Use:   "manager",
 		Short: "Start the controller manager",
 		Long:  "Start the Kubernetes controller manager that reconciles IAM resources with OpenFGA.",
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(_ *cobra.Command, _ []string) error {
 			return runManager(
 				metricsAddr,
 				enableLeaderElection,
 				probeAddr,
 				openfgaAPIURL,
 				openfgaStoreID,
-				openfgaAPIToken,
 				openfgaScheme,
-				openfgaGRPCMaxRetries,
-				openfgaGRPCBackoff,
-				openfgaGRPCBackoffMaxDelay,
+				leaderElectionID,
+				leaderElectionNamespace,
+				leaderElectionResourceLock,
+				leaseDuration,
+				renewDeadline,
+				retryPeriod,
 			)
 		},
 	}
@@ -56,17 +62,27 @@ func createManagerCommand() *cobra.Command {
 	cmd.Flags().BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager. "+
 			"Ensuring that only one instance of the controller manager runs.")
-	cmd.Flags().StringVar(&openfgaAPIURL, "openfga-api-url", "", "OpenFGA API URL (e.g. localhost:8080 or api.us1.fga.dev)")
+
+	// Leader election configuration flags
+	cmd.Flags().StringVar(&leaderElectionID, "leader-election-id", "4b85f171.miloapis.com", "The name of the resource that leader election will use for holding the leader lock.")
+	cmd.Flags().StringVar(&leaderElectionNamespace, "leader-election-namespace", "", "Namespace to use for leader election. If empty, the controller will discover the namespace it is running in.")
+	cmd.Flags().StringVar(&leaderElectionResourceLock, "leader-election-resource-lock", "leases", "The type of resource object that is used for locking during leader election. Supported options are 'leases', 'endpointsleases' and 'configmapsleases'.")
+	cmd.Flags().DurationVar(&leaseDuration, "leader-election-lease-duration", 15*time.Second, "The duration that non-leader candidates will wait after observing a leadership renewal until attempting to acquire leadership of a led but unrenewed leader slot.")
+	cmd.Flags().DurationVar(&renewDeadline, "leader-election-renew-deadline", 10*time.Second, "The interval between attempts by the acting master to renew a leadership slot before it stops leading.")
+	cmd.Flags().DurationVar(&retryPeriod, "leader-election-retry-period", 2*time.Second, "The duration the clients should wait between attempting acquisition and renewal of a leadership.")
+
+	cmd.Flags().StringVar(&openfgaAPIURL, "openfga-api-url", "",
+		"OpenFGA API URL (e.g. localhost:8080 or api.us1.fga.dev)")
 	cmd.Flags().StringVar(&openfgaStoreID, "openfga-store-id", "", "OpenFGA Store ID")
-	cmd.Flags().StringVar(&openfgaAPIToken, "openfga-api-token", "", "OpenFGA API Token (optional)")
 	cmd.Flags().StringVar(&openfgaScheme, "openfga-scheme", "http", "OpenFGA Scheme (http or https)")
-	cmd.Flags().IntVar(&openfgaGRPCMaxRetries, "openfga-grpc-max-retries", 5, "Maximum number of retries for gRPC calls to OpenFGA")
-	cmd.Flags().DurationVar(&openfgaGRPCBackoff, "openfga-grpc-backoff", 1*time.Second, "Initial backoff duration for gRPC retries")
-	cmd.Flags().DurationVar(&openfgaGRPCBackoffMaxDelay, "openfga-grpc-backoff-max-delay", 10*time.Second, "Maximum backoff duration for gRPC retries")
 
 	// Mark required flags
-	cmd.MarkFlagRequired("openfga-api-url")
-	cmd.MarkFlagRequired("openfga-store-id")
+	if err := cmd.MarkFlagRequired("openfga-api-url"); err != nil {
+		panic(fmt.Sprintf("failed to mark openfga-api-url as required: %v", err))
+	}
+	if err := cmd.MarkFlagRequired("openfga-store-id"); err != nil {
+		panic(fmt.Sprintf("failed to mark openfga-store-id as required: %v", err))
+	}
 
 	return cmd
 }
@@ -77,11 +93,13 @@ func runManager(
 	probeAddr string,
 	openfgaAPIURL string,
 	openfgaStoreID string,
-	openfgaAPIToken string,
 	openfgaScheme string,
-	openfgaGRPCMaxRetries int,
-	openfgaGRPCBackoff time.Duration,
-	openfgaGRPCBackoffMaxDelay time.Duration,
+	leaderElectionID string,
+	leaderElectionNamespace string,
+	leaderElectionResourceLock string,
+	leaseDuration time.Duration,
+	renewDeadline time.Duration,
+	retryPeriod time.Duration,
 ) error {
 	opts := zap.Options{
 		Development: true,
@@ -110,16 +128,25 @@ func runManager(
 	if err != nil {
 		return fmt.Errorf("unable to create gRPC connection to OpenFGA: %w", err)
 	}
-	defer conn.Close()
+	defer func() {
+		if closeErr := conn.Close(); closeErr != nil {
+			ctrl.Log.Error(closeErr, "failed to close gRPC connection")
+		}
+	}()
 
 	fgaClient := openfgav1.NewOpenFGAServiceClient(conn)
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Scheme:                 scheme,
-		Metrics:                metricsserver.Options{BindAddress: metricsAddr},
-		HealthProbeBindAddress: probeAddr,
-		LeaderElection:         enableLeaderElection,
-		LeaderElectionID:       "4b85f171.datumapis.com",
+		Scheme:                     scheme,
+		Metrics:                    metricsserver.Options{BindAddress: metricsAddr},
+		HealthProbeBindAddress:     probeAddr,
+		LeaderElection:             enableLeaderElection,
+		LeaderElectionID:           leaderElectionID,
+		LeaderElectionNamespace:    leaderElectionNamespace,
+		LeaderElectionResourceLock: leaderElectionResourceLock,
+		LeaseDuration:              &leaseDuration,
+		RenewDeadline:              &renewDeadline,
+		RetryPeriod:                &retryPeriod,
 	})
 	if err != nil {
 		return fmt.Errorf("unable to start manager: %w", err)
@@ -164,6 +191,16 @@ func runManager(
 		FGAStoreID: openfgaStoreID,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to create controller AuthorizationModel: %w", err)
+	}
+
+	if err = (&controller.GroupMembershipReconciler{
+		Client:        mgr.GetClient(),
+		Scheme:        mgr.GetScheme(),
+		FgaClient:     fgaClient,
+		StoreID:       openfgaStoreID,
+		EventRecorder: mgr.GetEventRecorderFor("groupmembership-controller"),
+	}).SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("unable to create controller GroupMembership: %w", err)
 	}
 
 	//+kubebuilder:scaffold:builder

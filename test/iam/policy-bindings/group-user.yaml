@@ -1,0 +1,6 @@
+apiVersion: iam.miloapis.com/v1alpha1
+kind: User
+metadata:
+  name: group-user-admin
+spec:
+  email: group-user-admin@datum.net
