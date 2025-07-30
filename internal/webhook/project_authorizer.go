@@ -73,31 +73,27 @@ func (o *ProjectControlPlaneAuthorizer) Authorize(
 		return authorizer.DecisionDeny, "", fmt.Errorf("failed to resolve project identifier '%s': %w", projectIdentifier, err)
 	}
 
-	projectUID := string(project.UID)
-	if projectUID == "" {
-		slog.ErrorContext(ctx, "project UID is empty after fetching", slog.String("identifier", projectIdentifier), slog.String("name", project.Name))
-		return authorizer.DecisionDeny, "", fmt.Errorf("resolved project '%s' has an empty UID", project.Name)
+	projectName := project.Name
+	if projectName == "" {
+		slog.ErrorContext(ctx, "project name is empty after fetching", slog.String("identifier", projectIdentifier), slog.String("name", project.Name))
+		return authorizer.DecisionDeny, "", fmt.Errorf("resolved project '%s' has an empty name", project.Name)
 	}
 
 	// Get user UID - this should be provided as an extra field from the authentication system
-	var userUID string
-	if userUIDs, set := attributes.GetUser().GetExtra()["authentication.miloapis.com/user-uid"]; !set {
-		return authorizer.DecisionDeny, "", fmt.Errorf("extra 'authentication.miloapis.com/user-uid' is required by project control plane authorizer")
-	} else if len(userUIDs) > 1 {
-		return authorizer.DecisionDeny, "", fmt.Errorf("extra 'authentication.miloapis.com/user-uid' only supports one value, but multiple were provided: %v", userUIDs)
-	} else {
-		userUID = userUIDs[0]
+	userUID := attributes.GetUser().GetUID()
+	if userUID == "" {
+		return authorizer.DecisionDeny, "", fmt.Errorf("user UID is required by project control plane authorizer")
 	}
 
 	user := fmt.Sprintf("iam.miloapis.com/InternalUser:%s", userUID)
-	resource := o.buildResource(attributes, projectUID)
+	resource := o.buildResource(attributes, projectName)
 	relation := o.buildRelation(attributes)
 
 	slog.DebugContext(ctx, "checking OpenFGA authorization for project scope",
 		slog.String("user", user),
 		slog.String("resource", resource),
 		slog.String("relation", relation),
-		slog.String("project_uid", projectUID),
+		slog.String("project_uid", projectName),
 	)
 
 	checkReq := &openfgav1.CheckRequest{
@@ -184,9 +180,9 @@ func (o *ProjectControlPlaneAuthorizer) buildPermissionString(attributes authori
 	return fmt.Sprintf("%s/%s.%s", serviceName, resource, verb)
 }
 
-func (o *ProjectControlPlaneAuthorizer) buildResource(_ authorizer.Attributes, projectUID string) string {
+func (o *ProjectControlPlaneAuthorizer) buildResource(_ authorizer.Attributes, projectName string) string {
 	// Build the resource identifier for OpenFGA using the correct format
-	return fmt.Sprintf("resourcemanager.miloapis.com/Project:%s", projectUID)
+	return fmt.Sprintf("resourcemanager.miloapis.com/Project:%s", projectName)
 }
 
 func (o *ProjectControlPlaneAuthorizer) buildRelation(attributes authorizer.Attributes) string {

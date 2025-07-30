@@ -11,6 +11,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -82,7 +83,7 @@ func (f *UserGroupFinalizer) Finalize(ctx context.Context, obj client.Object) (f
 	// Remove the group membership tuple from the OpenFGA store
 	groupMembershipRequest := openfga.GroupMembershipRequest{
 		GroupUID:  group.UID,
-		MemberUID: user.UID,
+		MemberUID: types.UID(user.Name),
 	}
 	err = f.UserGroupReconciler.RemoveMemberFromGroup(ctx, groupMembershipRequest)
 	if err != nil {

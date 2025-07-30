@@ -1,0 +1,92 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: controller-manager
+  labels:
+    control-plane: controller-manager
+    app.kubernetes.io/name: auth-provider-openfga
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  selector:
+    matchLabels:
+      control-plane: controller-manager
+      app.kubernetes.io/name: auth-provider-openfga
+  replicas: 1
+  template:
+    metadata:
+      annotations:
+        kubectl.kubernetes.io/default-container: manager
+      labels:
+        control-plane: controller-manager
+        app.kubernetes.io/name: auth-provider-openfga
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: manager
+        image: auth-provider-openfga:latest
+        imagePullPolicy: Always
+        args:
+          - manager
+          - --leader-elect
+          - --health-probe-bind-address=:8081
+          - --metrics-bind-address=:8080
+          - --openfga-api-url=$(OPENFGA_API_URL)
+          - --openfga-store-id=$(OPENFGA_STORE_ID)
+          - --leader-election-namespace=$(LEADER_ELECTION_NAMESPACE)
+          - --leader-election-id=$(LEADER_ELECTION_ID)
+          - --leader-election-lease-duration=$(LEADER_ELECTION_LEASE_DURATION)
+          - --leader-election-renew-deadline=$(LEADER_ELECTION_RENEW_DEADLINE)
+          - --leader-election-retry-period=$(LEADER_ELECTION_RETRY_PERIOD)
+        env:
+        - name: OPENFGA_API_URL
+          value: openfga.openfga-system.svc.cluster.local:8081
+        - name: OPENFGA_STORE_ID
+          value: 01JVTBDT6NJ541P1JBT22GX4PR
+        - name: LEADER_ELECTION_NAMESPACE
+          value: ""
+        - name: LEADER_ELECTION_ID
+          value: 4b85f171.miloapis.com
+        - name: LEADER_ELECTION_LEASE_DURATION
+          value: 15s
+        - name: LEADER_ELECTION_RENEW_DEADLINE
+          value: 10s
+        - name: LEADER_ELECTION_RETRY_PERIOD
+          value: 2s
+        ports:
+          - containerPort: 8080
+            name: metrics
+            protocol: TCP
+          - containerPort: 8081
+            name: heath-probe
+            protocol: TCP
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - "ALL"
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8081
+          initialDelaySeconds: 15
+          periodSeconds: 20
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 8081
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        resources:
+          limits:
+            cpu: 500m
+            memory: 128Mi
+          requests:
+            cpu: 10m
+            memory: 64Mi
+        volumeMounts: []
+      volumes: []
+      serviceAccountName: controller-manager
+      terminationGracePeriodSeconds: 10

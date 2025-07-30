@@ -186,7 +186,7 @@ func (r *ResourceOwnerHierarchyReconciler) synchronizeFGAHierarchy(ctx context.C
 
 func buildChildFGAIdentifierForResource(resource client.Object, gvk schema.GroupVersionKind, serviceNameForResource string) string {
 	childFGAType := fmt.Sprintf("%s/%s", serviceNameForResource, gvk.Kind)
-	childFGAID := string(resource.GetUID())
+	childFGAID := resource.GetName()
 	return fmt.Sprintf("%s:%s", childFGAType, childFGAID)
 }
 
@@ -229,9 +229,8 @@ func (r *ResourceOwnerHierarchyReconciler) determineDesiredParentTuplesForResour
 			logger.V(1).Info("OwnerReference matched a valid parent GVK", "ownerGVK", ownerGVK.String())
 			parentServiceName := ownerGVK.Group
 			parentFGAType := fmt.Sprintf("%s/%s", parentServiceName, ownerGVK.Kind)
-			parentFGAID := string(ownerRef.UID)
 
-			userStr := fmt.Sprintf("%s:%s", parentFGAType, parentFGAID)
+			userStr := fmt.Sprintf("%s:%s", parentFGAType, ownerRef.Name)
 			tuple := &openfgav1.TupleKey{
 				User:     userStr,
 				Relation: relationName,

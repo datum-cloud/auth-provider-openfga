@@ -20,12 +20,18 @@ func (r *RoleReconciler) getAllPermissions(ctx context.Context, role *iamdatumap
 	if visited == nil {
 		visited = make(map[string]struct{})
 	}
-	if _, ok := visited[role.Name]; ok {
+
+	roleIdentifier := role.Namespace + "/" + role.Name // Ensure uniqueness for visited roles across namespaces
+	if _, ok := visited[roleIdentifier]; ok {
 		return nil, nil // Prevent cycles
 	}
-	visited[role.Name] = struct{}{}
+	visited[roleIdentifier] = struct{}{}
 
-	permissions := append([]string{}, role.Spec.IncludedPermissions...)
+	// Use a set to ensure permissions are unique
+	permissionSet := make(map[string]struct{})
+	for _, p := range role.Spec.IncludedPermissions {
+		permissionSet[p] = struct{}{}
+	}
 
 	for _, inheritedRoleRef := range role.Spec.InheritedRoles {
 
@@ -50,7 +56,16 @@ func (r *RoleReconciler) getAllPermissions(ctx context.Context, role *iamdatumap
 			return nil, err
 		}
 
-		permissions = append(permissions, inheritedPerms...)
+		// Add inherited permissions to the set to ensure uniqueness
+		for _, p := range inheritedPerms {
+			permissionSet[p] = struct{}{}
+		}
+	}
+
+	// Convert set back to slice
+	permissions := make([]string, 0, len(permissionSet))
+	for p := range permissionSet {
+		permissions = append(permissions, p)
 	}
 
 	return permissions, nil
