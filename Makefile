@@ -43,7 +43,7 @@ help: ## Display this help.
 
 .PHONY: manifests
 manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
-	"$(CONTROLLER_GEN)" rbac:roleName=manager-role crd webhook paths="./..." output:crd:artifacts:config=config/crd/bases
+	"$(CONTROLLER_GEN)" rbac:roleName=manager-role crd webhook paths="./..." output:crd:artifacts:config=config/crd/bases output:rbac:artifacts:config=config/base/rbac
 
 .PHONY: generate
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
@@ -91,7 +91,7 @@ test-e2e: manifests generate fmt vet docker-build chainsaw ## Run the e2e tests.
 	@kubectl wait --for=condition=Available deployment cert-manager-webhook -n cert-manager --timeout=300s
 	@kubectl wait --for=condition=Available deployment cert-manager-cainjector -n cert-manager --timeout=300s
 	@echo "Waiting for CA certificate to be ready..."
-	@kubectl wait --for=condition=Ready certificate auth-provider-openfga-test-ca -n default --timeout=300s
+	@kubectl wait --for=condition=Ready certificate auth-provider-openfga-test-ca -n cert-manager --timeout=300s
 	@echo "Waiting for ClusterIssuers to be ready..."
 	@kubectl wait --for=condition=Ready clusterissuer test-selfsigned-issuer --timeout=300s
 	@kubectl wait --for=condition=Ready clusterissuer auth-provider-openfga-test-ca-issuer --timeout=300s
@@ -102,7 +102,7 @@ test-e2e: manifests generate fmt vet docker-build chainsaw ## Run the e2e tests.
 	@echo "Waiting for OpenFGA to be ready..."
 	@kubectl wait --for=condition=Available deployment openfga -n openfga-system --timeout=300s
 	@echo "All components are ready. Running chainsaw tests..."
-	"$(CHAINSAW)" test test/
+	"$(CHAINSAW)" test test/ --parallel 10
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter
@@ -199,26 +199,8 @@ kind-create: ## Create a new kind cluster with FluxCD installed.
 	@if $(KIND) get clusters | grep -q "^$(CLUSTER_NAME)$$"; then \
 		echo "Kind cluster '$(CLUSTER_NAME)' already exists"; \
 	else \
-		echo "Creating kind cluster configuration..."; \
-		echo 'kind: Cluster' > /tmp/kind-config.yaml; \
-		echo 'apiVersion: kind.x-k8s.io/v1alpha4' >> /tmp/kind-config.yaml; \
-		echo 'nodes:' >> /tmp/kind-config.yaml; \
-		echo '- role: control-plane' >> /tmp/kind-config.yaml; \
-		echo '  kubeadmConfigPatches:' >> /tmp/kind-config.yaml; \
-		echo '  - |' >> /tmp/kind-config.yaml; \
-		echo '    kind: InitConfiguration' >> /tmp/kind-config.yaml; \
-		echo '    nodeRegistration:' >> /tmp/kind-config.yaml; \
-		echo '      kubeletExtraArgs:' >> /tmp/kind-config.yaml; \
-		echo '        node-labels: "ingress-ready=true"' >> /tmp/kind-config.yaml; \
-		echo '  extraPortMappings:' >> /tmp/kind-config.yaml; \
-		echo '  - containerPort: 80' >> /tmp/kind-config.yaml; \
-		echo '    hostPort: 80' >> /tmp/kind-config.yaml; \
-		echo '    protocol: TCP' >> /tmp/kind-config.yaml; \
-		echo '  - containerPort: 443' >> /tmp/kind-config.yaml; \
-		echo '    hostPort: 443' >> /tmp/kind-config.yaml; \
-		echo '    protocol: TCP' >> /tmp/kind-config.yaml; \
-		$(KIND) create cluster --name $(CLUSTER_NAME) --config /tmp/kind-config.yaml || exit 1; \
-		rm -f /tmp/kind-config.yaml; \
+		echo "Creating kind cluster using config/kind/cluster-config.yaml..."; \
+		$(KIND) create cluster --name $(CLUSTER_NAME) --config config/kind/cluster-config.yaml || exit 1; \
 		echo "Kind cluster '$(CLUSTER_NAME)' created successfully"; \
 	fi
 	@echo "Waiting for cluster to be ready..."

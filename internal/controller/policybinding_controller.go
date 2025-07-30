@@ -125,28 +125,27 @@ func (r *PolicyBindingReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, nil
 	}
 
-	// Validate the target reference in the policy binding is valid and exists in the cluster.
-	isValid, err := r.reconcileTargetRefValidation(ctx, policyBinding, currentGeneration)
+	// Validate the resource selector in the policy binding is valid
+	isValid, err := r.reconcileResourceSelectorValidation(ctx, policyBinding, currentGeneration)
 	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to validate target reference: %w", err)
+		return ctrl.Result{}, fmt.Errorf("failed to validate resource selector: %w", err)
 	}
 
 	if !isValid {
-		// TargetRef validation failed cleanly (e.g., target not found, UID mismatch, type not registered). The
-		// reconcileTargetRefValidation function has set TargetValid=False and updated status. Set Ready condition to False
-		// and stop reconciliation.
+		// Resource selector validation failed cleanly. The reconcileResourceSelectorValidation function has set
+		// TargetValid=False and updated status. Set Ready condition to False and stop reconciliation.
 		meta.SetStatusCondition(&policyBinding.Status.Conditions, metav1.Condition{
 			Type:               "Ready",
 			Status:             metav1.ConditionFalse,
-			Reason:             "TargetRefValidationFailed",
-			Message:            "TargetRef validation failed. See TargetValid condition for details.",
+			Reason:             "ResourceSelectorValidationFailed",
+			Message:            "ResourceSelector validation failed. See TargetValid condition for details.",
 			LastTransitionTime: metav1.Now(),
 		})
 		// Attempt to update status with the Ready=False condition.
 		if err := r.updatePolicyBindingStatus(ctx, policyBinding, currentGeneration); err != nil {
-			return ctrl.Result{}, fmt.Errorf("failed to update PolicyBinding status after TargetRef validation failure: %w", err)
+			return ctrl.Result{}, fmt.Errorf("failed to update PolicyBinding status after ResourceSelector validation failure: %w", err)
 		}
-		// TargetRef validation failed. Stop reconciliation. Rely on the policy binding being re-reconciled when the target
+		// Resource selector validation failed. Stop reconciliation. Rely on the policy binding being re-reconciled when the target
 		// resource is created.
 		return ctrl.Result{}, nil
 	}
@@ -175,7 +174,7 @@ func (r *PolicyBindingReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, nil
 	}
 
-	// At this juncture, both TargetRef and all Subjects have been successfully validated. Their respective conditions
+	// At this juncture, both ResourceSelector and all Subjects have been successfully validated. Their respective conditions
 	// (TargetValid=True, SubjectValid=True) have been set in memory by their validation functions. We need to persist
 	// these positive statuses before proceeding to the OpenFGA reconciliation, which is an external call.
 	if err := r.updatePolicyBindingStatus(ctx, policyBinding, currentGeneration); err != nil {
@@ -206,43 +205,40 @@ func (r *PolicyBindingReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	return ctrl.Result{}, nil
 }
 
-// reconcileTargetRefValidation performs a multi-step validation of the TargetRef specified in the PolicyBinding. It's a
-// critical part of ensuring the PolicyBinding refers to a valid and existing target resource.
-//
-// The validation proceeds as follows:
-//  1. Service Registration Check: It verifies that the APIGroup and Kind of the
-//     TargetRef are declared by a 'Service' custom resource. This acts as a registry for permissible target types.
-//  2. Resource Existence and GVK Resolution: It uses the RESTMapper to resolve the
-//     full GroupVersionKind (GVK) for the TargetRef and then attempts to fetch the
-//     actual resource instance from the Kubernetes API. This confirms the resource exists.
-//  3. UID Match: If the resource is found, its UID is compared against the UID
-//     provided in the `TargetRef.UID` field of the PolicyBinding spec. This ensures
-//     the PolicyBinding is tied to a specific instance of the resource, preventing
-//     issues if the resource is deleted and recreated with the same name but a new UID.
-//
-// If any of these validation steps fail, an appropriate status condition (ConditionTypeTargetValid=False) is set on the
-// PolicyBinding, and the function returns `isValid=false`. If an API error occurs that suggests a requeue (e.g.,
-// network issue), an error is returned to trigger that.
-func (r *PolicyBindingReconciler) reconcileTargetRefValidation(ctx context.Context, policyBinding *iamdatumapiscomv1alpha1.PolicyBinding, currentGeneration int64) (isValid bool, err error) {
-	log := logf.FromContext(ctx)
-
+// reconcileResourceSelectorValidation performs validation based on whether ResourceRef or ResourceKind is specified.
+// For ResourceRef, it validates the specific resource instance exists and matches the UID.
+// For ResourceKind, it validates that the resource type is registered in ProtectedResources.
+func (r *PolicyBindingReconciler) reconcileResourceSelectorValidation(ctx context.Context, policyBinding *iamdatumapiscomv1alpha1.PolicyBinding, currentGeneration int64) (isValid bool, err error) {
 	// Fetch all ProtectedResource CRs. These define the resource types managed by IAM.
 	var protectedResourceList iamdatumapiscomv1alpha1.ProtectedResourceList
 	if err := r.List(ctx, &protectedResourceList); err != nil {
 		return false, fmt.Errorf("failed to list ProtectedResources: %w", err)
 	}
 
+	if policyBinding.Spec.ResourceSelector.ResourceRef != nil {
+		return r.validateResourceRef(ctx, policyBinding, protectedResourceList.Items, currentGeneration)
+	} else if policyBinding.Spec.ResourceSelector.ResourceKind != nil {
+		return r.validateResourceKind(ctx, policyBinding, protectedResourceList.Items, currentGeneration)
+	} else {
+		return false, fmt.Errorf("ResourceSelector is empty")
+	}
+}
+
+// validateResourceRef validates a specific resource instance referenced by ResourceRef
+func (r *PolicyBindingReconciler) validateResourceRef(ctx context.Context, policyBinding *iamdatumapiscomv1alpha1.PolicyBinding, protectedResources []iamdatumapiscomv1alpha1.ProtectedResource, currentGeneration int64) (isValid bool, err error) {
+	log := logf.FromContext(ctx)
+
+	resourceRef := policyBinding.Spec.ResourceSelector.ResourceRef
+
 	// Validate if the target type specified in the PolicyBinding is registered by any ProtectedResource.
-	isKnownType, typeValidationReason := r.validatePolicyBindingTargetRefType(policyBinding.Spec, protectedResourceList.Items)
+	isKnownType, typeValidationReason := r.validateResourceType(resourceRef.APIGroup, resourceRef.Kind, protectedResources)
 	if !isKnownType {
 		meta.SetStatusCondition(&policyBinding.Status.Conditions, metav1.Condition{
 			Type:   ConditionTypeTargetValid,
 			Status: metav1.ConditionFalse,
 			Reason: ReasonValidationFailed,
 			Message: fmt.Sprintf(
-				"Target resource type '%s/%s' is not registered or ambiguously defined: %s",
-				policyBinding.Spec.TargetRef.APIGroup,
-				policyBinding.Spec.TargetRef.Kind,
+				"Target resource type is not registered or ambiguously defined: %s",
 				typeValidationReason,
 			),
 			ObservedGeneration: currentGeneration,
@@ -255,9 +251,7 @@ func (r *PolicyBindingReconciler) reconcileTargetRefValidation(ctx context.Conte
 	}
 
 	// Get the actual target resource instance.
-	targetSpec := policyBinding.Spec.TargetRef
-
-	fetchedTarget, err := r.getUnstructuredResourceAndMapping(ctx, targetSpec.APIGroup, targetSpec.Kind, targetSpec.Name, targetSpec.Namespace)
+	fetchedTarget, err := r.getUnstructuredResourceAndMapping(ctx, resourceRef.APIGroup, resourceRef.Kind, resourceRef.Name, resourceRef.Namespace)
 
 	if err != nil {
 		var errMsg string
@@ -265,16 +259,16 @@ func (r *PolicyBindingReconciler) reconcileTargetRefValidation(ctx context.Conte
 		stopReconciliation := true
 
 		if meta.IsNoMatchError(err) {
-			errMsg = fmt.Sprintf("Target Kind '%s' in group '%s' not recognized by the API server.", targetSpec.Kind, targetSpec.APIGroup)
+			errMsg = fmt.Sprintf("Target Kind '%s' in group '%s' not recognized by the API server.", resourceRef.Kind, resourceRef.APIGroup)
 			reason = "TargetKindNotRecognized"
 		} else if apierrors.IsNotFound(err) {
-			errMsg = fmt.Sprintf("Target resource %s/%s (namespace: '%s') not found.", targetSpec.Kind, targetSpec.Name, targetSpec.Namespace)
+			errMsg = fmt.Sprintf("Target resource %s/%s (namespace: '%s') not found.", resourceRef.Kind, resourceRef.Name, resourceRef.Namespace)
 			reason = "TargetNotFound"
 		} else if missingNsErr, ok := err.(*MissingNamespaceError); ok {
 			errMsg = missingNsErr.Error()
 			reason = "TargetNamespaceMissing"
 		} else {
-			return false, fmt.Errorf("failed to validate target %s/%s: %w", targetSpec.Kind, targetSpec.Name, err)
+			return false, fmt.Errorf("failed to validate target %s/%s: %w", resourceRef.Kind, resourceRef.Name, err)
 		}
 
 		log.Info(errMsg, "policyBindingName", policyBinding.Name)
@@ -291,22 +285,15 @@ func (r *PolicyBindingReconciler) reconcileTargetRefValidation(ctx context.Conte
 		}
 		if !stopReconciliation {
 			// Requeue if the error was deemed transient or requires a retry.
-			return false, fmt.Errorf("failed to validate target %s/%s: %w", targetSpec.Kind, targetSpec.Name, err)
+			return false, fmt.Errorf("failed to validate target %s/%s: %w", resourceRef.Kind, resourceRef.Name, err)
 		}
 		// For non-requeueable validation errors (e.g., NotFound, KindNotRecognized), stop reconciliation.
 		return false, nil
 	}
 
-	// At this point, the target resource was successfully fetched. The `mapping` variable contains its RESTMapping, which
-	// indicates if it's namespaced. `targetSpec.Namespace` is the namespace provided in the PolicyBinding. The
-	// `getUnstructuredResourceAndMapping` helper already validated that if the kind is namespaced, `targetSpec.Namespace`
-	// was not empty. For constructing clear messages below, `lookupNamespace` reflects the namespace used for the lookup.
-	lookupNamespace := targetSpec.Namespace
-
-	// Third, compare the UID of the fetched target resource with the UID specified in the PolicyBinding. This ensures the
-	// PolicyBinding is pinned to a specific instance of the resource.
-	if fetchedTarget.GetUID() != types.UID(targetSpec.UID) {
-		msg := fmt.Sprintf("Target resource %s/%s (namespace: '%s') found, but UID does not match. Expected: %s, Got: %s.", targetSpec.Kind, targetSpec.Name, lookupNamespace, targetSpec.UID, fetchedTarget.GetUID())
+	// Compare the UID of the fetched target resource with the UID specified in the PolicyBinding.
+	if fetchedTarget.GetUID() != types.UID(resourceRef.UID) {
+		msg := fmt.Sprintf("Target resource %s/%s (namespace: '%s') found, but UID does not match. Expected: %s, Got: %s.", resourceRef.Kind, resourceRef.Name, resourceRef.Namespace, resourceRef.UID, fetchedTarget.GetUID())
 		log.Info(msg, "policyBindingName", policyBinding.Name)
 		meta.SetStatusCondition(&policyBinding.Status.Conditions, metav1.Condition{
 			Type:               ConditionTypeTargetValid,
@@ -322,17 +309,55 @@ func (r *PolicyBindingReconciler) reconcileTargetRefValidation(ctx context.Conte
 		return false, nil
 	}
 
-	// All TargetRef validations (type registration, instance existence, UID match) passed.
+	// All ResourceRef validations (type registration, instance existence, UID match) passed.
 	meta.SetStatusCondition(&policyBinding.Status.Conditions, metav1.Condition{
 		Type:               ConditionTypeTargetValid,
 		Status:             metav1.ConditionTrue,
 		Reason:             ReasonValidationSuccessful,
-		Message:            "TargetRef validated successfully.",
+		Message:            "ResourceRef validated successfully.",
 		ObservedGeneration: currentGeneration,
 	})
 
-	// The status update to persist ConditionTypeTargetValid=True will be handled by the main Reconcile loop or subsequent
-	// helper functions before critical actions like OpenFGA reconciliation.
+	return true, nil
+}
+
+// validateResourceKind validates a resource kind for system-wide access
+func (r *PolicyBindingReconciler) validateResourceKind(ctx context.Context, policyBinding *iamdatumapiscomv1alpha1.PolicyBinding, protectedResources []iamdatumapiscomv1alpha1.ProtectedResource, currentGeneration int64) (isValid bool, err error) {
+	log := logf.FromContext(ctx)
+
+	resourceKind := policyBinding.Spec.ResourceSelector.ResourceKind
+
+	// Validate if the resource kind is registered by any ProtectedResource.
+	isKnownType, typeValidationReason := r.validateResourceType(resourceKind.APIGroup, resourceKind.Kind, protectedResources)
+	if !isKnownType {
+		meta.SetStatusCondition(&policyBinding.Status.Conditions, metav1.Condition{
+			Type:   ConditionTypeTargetValid,
+			Status: metav1.ConditionFalse,
+			Reason: ReasonValidationFailed,
+			Message: fmt.Sprintf(
+				"Resource kind is not registered or ambiguously defined: %s",
+				typeValidationReason,
+			),
+			ObservedGeneration: currentGeneration,
+		})
+
+		if err := r.updatePolicyBindingStatus(ctx, policyBinding, currentGeneration); err != nil {
+			return false, fmt.Errorf("failed to update PolicyBinding status after kind validation failure: %w", err)
+		}
+		return false, nil // No requeue, type definition needs to be fixed.
+	}
+
+	// For ResourceKind, we don't need to validate specific instances, just that the type is known
+	log.Info("ResourceKind validated successfully", "apiGroup", resourceKind.APIGroup, "kind", resourceKind.Kind)
+
+	meta.SetStatusCondition(&policyBinding.Status.Conditions, metav1.Condition{
+		Type:               ConditionTypeTargetValid,
+		Status:             metav1.ConditionTrue,
+		Reason:             ReasonValidationSuccessful,
+		Message:            "ResourceKind validated successfully.",
+		ObservedGeneration: currentGeneration,
+	})
+
 	return true, nil
 }
 
@@ -513,36 +538,31 @@ func (r *PolicyBindingReconciler) getUnstructuredResourceAndMapping(
 	return resource, nil
 }
 
-// validatePolicyBindingTargetRefType checks if the target resource type (APIGroup/Kind) from the PolicyBindingSpec is
-// declared by any of the provided IAM Services. This is the part of TargetRef validation that ensures the type is known
-// to the IAM system.
-func (r *PolicyBindingReconciler) validatePolicyBindingTargetRefType(
-	bindingSpec iamdatumapiscomv1alpha1.PolicyBindingSpec,
+// validateResourceType checks if the resource type (APIGroup/Kind) is declared by any of the provided ProtectedResources.
+func (r *PolicyBindingReconciler) validateResourceType(
+	apiGroup string,
+	kind string,
 	protectedResources []iamdatumapiscomv1alpha1.ProtectedResource,
 ) (isValid bool, reason string) {
-	targetAPIGroup := bindingSpec.TargetRef.APIGroup
-	targetKind := bindingSpec.TargetRef.Kind
-
-	if targetAPIGroup == "" || targetKind == "" {
-		return false, "TargetRef APIGroup or Kind is empty."
+	if apiGroup == "" || kind == "" {
+		return false, "APIGroup or Kind is empty."
 	}
 
 	foundMatchingProtectedResource := false
 	for _, pr := range protectedResources {
-		// A ProtectedResource defines a specific kind within a service (ServiceRef.Name acts as APIGroup)
-		if pr.Spec.ServiceRef.Name == targetAPIGroup && pr.Spec.Kind == targetKind {
-			// TODO: consider if singular/plural names from ProtectedResource should be used for anything here. For now, just
-			// matching APIGroup (ServiceRef.Name) and Kind is enough to know the type is registered.
+		// A ProtectedResource defines a specific kind within a service. The
+		// ServiceRef.Name is the APIGroup of the ProtectedResource.
+		if pr.Spec.ServiceRef.Name == apiGroup && pr.Spec.Kind == kind {
 			foundMatchingProtectedResource = true
 			break
 		}
 	}
 
 	if !foundMatchingProtectedResource {
-		return false, fmt.Sprintf("No ProtectedResource found defining type '%s/%s'.", targetAPIGroup, targetKind)
+		return false, fmt.Sprintf("No ProtectedResource found defining type '%s/%s'.", apiGroup, kind)
 	}
 
-	return true, "Target resource type is registered."
+	return true, "Resource type is registered."
 }
 
 // validatePolicyBindingSubjects iterates through all subjects (users or groups) defined in a PolicyBinding's spec. For
@@ -556,6 +576,12 @@ func (r *PolicyBindingReconciler) validatePolicyBindingSubjects(ctx context.Cont
 
 	for i := range policyBinding.Spec.Subjects {
 		subject := policyBinding.Spec.Subjects[i]
+
+		// System groups (names starting with "system:") don't require UID or existence validation
+		if subject.Kind == "Group" && strings.HasPrefix(subject.Name, "system:") {
+			// System groups are always considered valid
+			continue
+		}
 
 		// The controller requires that users explicitly provide the UID for each subject in the PolicyBinding spec. This
 		// ensures unambiguous identification.
@@ -648,10 +674,26 @@ func (r *PolicyBindingReconciler) enqueuePolicyBindingsForProtectedResourceChang
 
 	requests := make([]reconcile.Request, 0)
 	for _, pb := range policyBindings.Items {
-		// A PolicyBinding should be re-evaluated if its TargetRef APIGroup and Kind match the ServiceRef.Name and Kind of
+		var shouldEnqueue bool
+		var targetAPIGroup, targetKind string
+
+		// Extract APIGroup and Kind based on ResourceSelector type
+		if pb.Spec.ResourceSelector.ResourceRef != nil {
+			targetAPIGroup = pb.Spec.ResourceSelector.ResourceRef.APIGroup
+			targetKind = pb.Spec.ResourceSelector.ResourceRef.Kind
+		} else if pb.Spec.ResourceSelector.ResourceKind != nil {
+			targetAPIGroup = pb.Spec.ResourceSelector.ResourceKind.APIGroup
+			targetKind = pb.Spec.ResourceSelector.ResourceKind.Kind
+		}
+
+		// A PolicyBinding should be re-evaluated if its target APIGroup and Kind match the ServiceRef.Name and Kind of
 		// the changed ProtectedResource.
-		if pb.Spec.TargetRef.APIGroup == protectedResource.Spec.ServiceRef.Name &&
-			pb.Spec.TargetRef.Kind == protectedResource.Spec.Kind {
+		if targetAPIGroup == protectedResource.Spec.ServiceRef.Name &&
+			targetKind == protectedResource.Spec.Kind {
+			shouldEnqueue = true
+		}
+
+		if shouldEnqueue {
 			requests = append(requests, reconcile.Request{
 				NamespacedName: types.NamespacedName{
 					Name:      pb.Name,

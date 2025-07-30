@@ -3,9 +3,9 @@ kind: Service
 metadata:
   name: controller-manager-metrics
   labels:
-    control-plane: controller-manager
-    app.kubernetes.io/name: auth-provider-openfga
-    app.kubernetes.io/component: metrics
+    app.kubernetes.io/name: controller-manager
+    app.kubernetes.io/part-of: auth-provider-openfga
+    app.kubernetes.io/managed-by: kustomize
 spec:
   ports:
     - name: https
@@ -13,5 +13,5 @@ spec:
       protocol: TCP
       targetPort: 8080
   selector:
-    control-plane: controller-manager
-    app.kubernetes.io/name: auth-provider-openfga
+    app.kubernetes.io/name: controller-manager
+    app.kubernetes.io/part-of: auth-provider-openfga

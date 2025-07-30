@@ -73,7 +73,7 @@ func (r *RoleReconciler) getAllPermissions(ctx context.Context, role *iamdatumap
 
 func (r *RoleReconciler) ReconcileRole(ctx context.Context, role *iamdatumapiscomv1alpha1.Role) error {
 	// Use Role UID for the object identifier
-	roleObjectIdentifier := "iam.miloapis.com/InternalRole:" + string(role.UID)
+	roleObjectIdentifier := TypeInternalRole + ":" + string(role.UID)
 
 	existingTupleKeys, err := getTupleKeys(ctx, r.StoreID, r.OpenFGA, &openfgav1.ReadRequestTupleKey{
 		Object: roleObjectIdentifier,
@@ -92,7 +92,7 @@ func (r *RoleReconciler) ReconcileRole(ctx context.Context, role *iamdatumapisco
 		expectedTuples = append(
 			expectedTuples,
 			&openfgav1.TupleKey{
-				User:     "iam.miloapis.com/InternalUser:*",
+				User:     TypeInternalUser + ":*",
 				Relation: hashPermission(permission),
 				Object:   roleObjectIdentifier,
 			},
@@ -132,7 +132,7 @@ func (r *RoleReconciler) ReconcileRole(ctx context.Context, role *iamdatumapisco
 
 func (r *RoleReconciler) DeleteRole(ctx context.Context, role iamdatumapiscomv1alpha1.Role) error {
 	// Use Role UID for the object identifier
-	roleObjectIdentifier := "iam.miloapis.com/InternalRole:" + string(role.UID)
+	roleObjectIdentifier := TypeInternalRole + ":" + string(role.UID)
 
 	existingTupleKeys, err := getTupleKeys(ctx, r.StoreID, r.OpenFGA, &openfgav1.ReadRequestTupleKey{
 		Object: roleObjectIdentifier,

@@ -3,22 +3,24 @@ kind: Deployment
 metadata:
   name: controller-manager
   labels:
-    control-plane: controller-manager
-    app.kubernetes.io/name: auth-provider-openfga
+    app.kubernetes.io/name: controller-manager
+    app.kubernetes.io/part-of: auth-provider-openfga
     app.kubernetes.io/managed-by: kustomize
 spec:
   selector:
     matchLabels:
-      control-plane: controller-manager
-      app.kubernetes.io/name: auth-provider-openfga
+      app.kubernetes.io/name: controller-manager
+      app.kubernetes.io/part-of: auth-provider-openfga
+      app.kubernetes.io/managed-by: kustomize
   replicas: 1
   template:
     metadata:
       annotations:
         kubectl.kubernetes.io/default-container: manager
       labels:
-        control-plane: controller-manager
-        app.kubernetes.io/name: auth-provider-openfga
+        app.kubernetes.io/name: controller-manager
+        app.kubernetes.io/part-of: auth-provider-openfga
+        app.kubernetes.io/managed-by: kustomize
     spec:
       securityContext:
         runAsNonRoot: true
@@ -27,7 +29,7 @@ spec:
       containers:
       - name: manager
         image: auth-provider-openfga:latest
-        imagePullPolicy: Always
+        imagePullPolicy: IfNotPresent
         args:
           - manager
           - --leader-elect

@@ -5,12 +5,15 @@ import (
 	"encoding/hex"
 	"fmt"
 	"hash/fnv"
-	"maps"
+	"sort"
 	"strings"
 
+	"github.com/google/go-cmp/cmp"
 	openfgav1 "github.com/openfga/api/proto/openfga/v1"
 	iamdatumapiscomv1alpha1 "go.miloapis.com/milo/pkg/apis/iam/v1alpha1"
+	"google.golang.org/protobuf/testing/protocmp"
 	"google.golang.org/protobuf/types/known/wrapperspb"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 type AuthorizationModelReconciler struct {
@@ -18,7 +21,40 @@ type AuthorizationModelReconciler struct {
 	OpenFGA openfgav1.OpenFGAServiceClient
 }
 
+// getAuthorizationModelComparisonOptions returns the standardized cmp.Option slice for comparing authorization models
+// with options to ignore ordering differences and the OpenFGA-assigned id field
+func getAuthorizationModelComparisonOptions() []cmp.Option {
+	return []cmp.Option{
+		// Use protocmp.Transform for proper protobuf message comparison
+		protocmp.Transform(),
+		// Ignore the id field since it's assigned by OpenFGA and not semantically meaningful
+		protocmp.IgnoreFields(&openfgav1.AuthorizationModel{}, "id"),
+		// Sort repeated fields that can have different orderings without changing semantics
+		protocmp.SortRepeated(func(a, b *openfgav1.TypeDefinition) bool {
+			return a.Type < b.Type
+		}),
+		protocmp.SortRepeated(func(a, b *openfgav1.RelationReference) bool {
+			return a.Type < b.Type
+		}),
+	}
+}
+
+// authorizationModelsEqual compares two authorization models using go-cmp with protocmp
+// and options to ignore ordering differences that don't affect semantics
+func authorizationModelsEqual(current, merged *openfgav1.AuthorizationModel) bool {
+	if current == nil && merged == nil {
+		return true
+	}
+	if current == nil || merged == nil {
+		return false
+	}
+
+	return cmp.Equal(current, merged, getAuthorizationModelComparisonOptions()...)
+}
+
 func (r *AuthorizationModelReconciler) ReconcileAuthorizationModel(ctx context.Context, protectedResources []iamdatumapiscomv1alpha1.ProtectedResource) error {
+	log := logf.FromContext(ctx).WithValues("component", "AuthorizationModelReconciler")
+
 	currentAuthorizationModel, err := r.getCurrentAuthorizationModel(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get current authorization model: %w", err)
@@ -39,9 +75,26 @@ func (r *AuthorizationModelReconciler) ReconcileAuthorizationModel(ctx context.C
 		Conditions: currentAuthorizationModel.Conditions,
 	}
 
+	// Create a map to track existing types and prevent duplicates
+	existingTypes := make(map[string]bool)
+
+	// IAM system managed types - these will be replaced with new definitions
+	iamSystemTypes := map[string]bool{
+		TypeInternalUser:      true,
+		TypeInternalUserGroup: true,
+		TypeRole:              true,
+		TypeRoleBinding:       true,
+		TypeRoot:              true,
+	}
+
 	// Go through the existing type definitions and add any that were provided
-	// through the OpenFGA schema language.
+	// through the OpenFGA schema language, excluding IAM system managed types.
 	for _, typeDefinition := range currentAuthorizationModel.TypeDefinitions {
+		// Skip IAM system managed types as they will be regenerated
+		if iamSystemTypes[typeDefinition.Type] {
+			continue
+		}
+
 		// The type definitions added by the IAM system will always be in the
 		// format `{service_name}/{resource_type}`. Since this format is only
 		// valid when building the resource model in JSON, we can safely
@@ -49,10 +102,32 @@ func (r *AuthorizationModelReconciler) ReconcileAuthorizationModel(ctx context.C
 		// schema language will never contain a "/" character.
 		if len(strings.Split(typeDefinition.Type, "/")) == 1 {
 			mergedAuthorizationModel.TypeDefinitions = append(mergedAuthorizationModel.TypeDefinitions, typeDefinition)
+			existingTypes[typeDefinition.Type] = true
 		}
 	}
 
-	mergedAuthorizationModel.TypeDefinitions = append(mergedAuthorizationModel.TypeDefinitions, newAuthorizationModel.TypeDefinitions...)
+	// Add new type definitions, but only if they don't already exist
+	for _, typeDefinition := range newAuthorizationModel.TypeDefinitions {
+		if !existingTypes[typeDefinition.Type] {
+			mergedAuthorizationModel.TypeDefinitions = append(mergedAuthorizationModel.TypeDefinitions, typeDefinition)
+			existingTypes[typeDefinition.Type] = true
+		}
+	}
+
+	// Compare using go-cmp with protocmp for proper protobuf comparison
+	if authorizationModelsEqual(currentAuthorizationModel, mergedAuthorizationModel) {
+		log.Info("Authorization model is already up to date, skipping write operation")
+		return nil
+	}
+
+	log.Info("Authorization model has changed, updating OpenFGA store",
+		"currentTypeCount", len(currentAuthorizationModel.TypeDefinitions),
+		"mergedTypeCount", len(mergedAuthorizationModel.TypeDefinitions))
+
+	// Add debugging diff output to understand what's different
+	if diff := cmp.Diff(currentAuthorizationModel, mergedAuthorizationModel, getAuthorizationModelComparisonOptions()...); diff != "" {
+		log.Info("Authorization model diff detected", "diff", diff)
+	}
 
 	_, err = r.OpenFGA.WriteAuthorizationModel(ctx, &openfgav1.WriteAuthorizationModelRequest{
 		StoreId:         r.StoreID,
@@ -97,26 +172,52 @@ func (r *AuthorizationModelReconciler) getCurrentAuthorizationModel(ctx context.
 }
 
 func (r *AuthorizationModelReconciler) createExpectedAuthorizationModel(protectedResources []iamdatumapiscomv1alpha1.ProtectedResource) (*openfgav1.AuthorizationModel, error) {
-	permissions := getAllPermissions(protectedResources)
+	// If no ProtectedResources exist, return a minimal authorization model
+	if len(protectedResources) == 0 {
+		return getMinimalAuthorizationModel(), nil
+	}
 
+	// Build the resource hierarchy
 	resourceGraph, err := getResourceGraph(protectedResources)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get resource graph: %v", err)
 	}
 
+	// Calculate hierarchical permissions for each resource type
+	hierarchicalPermissions := calculateHierarchicalPermissions(resourceGraph)
+
+	// Get all permissions for IAM types (roles, role bindings, root)
+	allPermissions := getAllPermissions(protectedResources)
+
+	// Collect all resource types from the resource graph
+	resourceTypes := getAllResourceTypes(resourceGraph)
+
+	// Create base IAM type definitions in deterministic order
 	typeDefinitions := []*openfgav1.TypeDefinition{
 		getUserTypeDefinition(),
 		getUserGroupTypeDefinition(),
-		getRoleTypeDefinition(permissions),
-		getRoleBindingTypeDefinition(permissions),
+		getRoleTypeDefinition(allPermissions),
+		getRoleBindingTypeDefinition(allPermissions),
 	}
 
-	// TODO: We may be able to optimize which permissions are assigned to each
-	//       resource. All permissions are attached to all resources just to make
-	//       it easy and not have to add validation for making sure a permission
-	//       is available on a resource.
-	for _, typeDefinition := range getResourceTypeDefinitions(permissions, resourceGraph) {
-		typeDefinitions = append(typeDefinitions, typeDefinition)
+	// Only add Root type if we have resources
+	if len(resourceTypes) > 0 {
+		typeDefinitions = append(typeDefinitions, getRootTypeDefinition(allPermissions, resourceTypes))
+	}
+
+	// Get resource type definitions and add them in sorted order
+	resourceTypeDefinitions := getResourceTypeDefinitionsWithHierarchicalPermissions(hierarchicalPermissions, resourceGraph)
+
+	// Sort resource type definition keys for deterministic ordering
+	sortedResourceTypes := make([]string, 0, len(resourceTypeDefinitions))
+	for resourceType := range resourceTypeDefinitions {
+		sortedResourceTypes = append(sortedResourceTypes, resourceType)
+	}
+	sort.Strings(sortedResourceTypes)
+
+	// Add resource type definitions in sorted order
+	for _, resourceType := range sortedResourceTypes {
+		typeDefinitions = append(typeDefinitions, resourceTypeDefinitions[resourceType])
 	}
 
 	return &openfgav1.AuthorizationModel{
@@ -134,15 +235,6 @@ func getResourceParentRelatedTypes(parents []string) (relations []*openfgav1.Rel
 	return
 }
 
-func getResourceTypeDefinitions(permissions []string, node *resourceGraphNode) map[string]*openfgav1.TypeDefinition {
-	types := map[string]*openfgav1.TypeDefinition{}
-	types[node.ResourceType] = getResourceTypeDefinition(permissions, node)
-	for _, child := range node.ChildResources {
-		maps.Copy(types, getResourceTypeDefinitions(permissions, child))
-	}
-	return types
-}
-
 func getResourceTypeDefinition(permissions []string, resourceNode *resourceGraphNode) *openfgav1.TypeDefinition {
 	typeDefinition := &openfgav1.TypeDefinition{
 		Type: resourceNode.ResourceType,
@@ -152,21 +244,33 @@ func getResourceTypeDefinition(permissions []string, resourceNode *resourceGraph
 				// grant a subject access directly to the Resource. Permissions
 				// bound to the resource will be inherited by any child
 				// resources.
-				"iam.miloapis.com/RoleBinding": {
+				RelationRoleBinding: {
 					DirectlyRelatedUserTypes: []*openfgav1.RelationReference{
 						{
-							Type: "iam.miloapis.com/RoleBinding",
+							Type: TypeRoleBinding,
+						},
+					},
+				},
+				// RootBinding relation allows specific resource instances to be linked
+				// to their corresponding root objects for ResourceKind policy bindings
+				RelationRootBinding: {
+					DirectlyRelatedUserTypes: []*openfgav1.RelationReference{
+						{
+							Type: TypeRoot,
 						},
 					},
 				},
 			},
 			SourceInfo: &openfgav1.SourceInfo{
-				File: "dynamically_managed_iam_datumapis_com.fga",
+				File: SourceFile,
 			},
 			Module: strings.Split(resourceNode.ResourceType, "/")[0],
 		},
 		Relations: map[string]*openfgav1.Userset{
-			"iam.miloapis.com/RoleBinding": {
+			RelationRoleBinding: {
+				Userset: &openfgav1.Userset_This{},
+			},
+			RelationRootBinding: {
 				Userset: &openfgav1.Userset_This{},
 			},
 		},
@@ -175,10 +279,10 @@ func getResourceTypeDefinition(permissions []string, resourceNode *resourceGraph
 	// Only create a parent reference if the resource has parent relationships and
 	// we're not working on the root resource.
 	if len(resourceNode.ParentResources) > 0 {
-		typeDefinition.Metadata.Relations["parent"] = &openfgav1.RelationMetadata{
+		typeDefinition.Metadata.Relations[RelationParent] = &openfgav1.RelationMetadata{
 			DirectlyRelatedUserTypes: getResourceParentRelatedTypes(resourceNode.ParentResources),
 		}
-		typeDefinition.Relations["parent"] = &openfgav1.Userset{
+		typeDefinition.Relations[RelationParent] = &openfgav1.Userset{
 			Userset: &openfgav1.Userset_This{},
 		}
 	}
@@ -190,11 +294,25 @@ func getResourceTypeDefinition(permissions []string, resourceNode *resourceGraph
 			Userset: &openfgav1.Userset_Union{
 				Union: &openfgav1.Usersets{
 					Child: []*openfgav1.Userset{
+						// Direct role binding to this specific resource
 						{
 							Userset: &openfgav1.Userset_TupleToUserset{
 								TupleToUserset: &openfgav1.TupleToUserset{
 									Tupleset: &openfgav1.ObjectRelation{
-										Relation: "iam.miloapis.com/RoleBinding",
+										Relation: RelationRoleBinding,
+									},
+									ComputedUserset: &openfgav1.ObjectRelation{
+										Relation: hashedPermission,
+									},
+								},
+							},
+						},
+						// Inherit permission from root binding (ResourceKind policy bindings)
+						{
+							Userset: &openfgav1.Userset_TupleToUserset{
+								TupleToUserset: &openfgav1.TupleToUserset{
+									Tupleset: &openfgav1.ObjectRelation{
+										Relation: RelationRootBinding,
 									},
 									ComputedUserset: &openfgav1.ObjectRelation{
 										Relation: hashedPermission,
@@ -213,7 +331,7 @@ func getResourceTypeDefinition(permissions []string, resourceNode *resourceGraph
 					Userset: &openfgav1.Userset_TupleToUserset{
 						TupleToUserset: &openfgav1.TupleToUserset{
 							Tupleset: &openfgav1.ObjectRelation{
-								Relation: "parent",
+								Relation: RelationParent,
 							},
 							ComputedUserset: &openfgav1.ObjectRelation{
 								Relation: hashedPermission,
@@ -243,18 +361,73 @@ func getAllPermissions(protectedResources []iamdatumapiscomv1alpha1.ProtectedRes
 			permissions = append(permissions, fmt.Sprintf("%s/%s.%s", pr.Spec.ServiceRef.Name, pr.Spec.Plural, permission))
 		}
 	}
+
+	// Sort permissions for deterministic ordering
+	sort.Strings(permissions)
 	return permissions
+}
+
+func getAllResourceTypes(node *resourceGraphNode) []string {
+	if node == nil {
+		return []string{}
+	}
+
+	var resourceTypes []string
+
+	// Add current node's resource type if it's not the root
+	if node.ResourceType != TypeRoot {
+		resourceTypes = append(resourceTypes, node.ResourceType)
+	}
+
+	// Recursively collect resource types from child nodes
+	for _, child := range node.ChildResources {
+		resourceTypes = append(resourceTypes, getAllResourceTypes(child)...)
+	}
+
+	// Sort for deterministic ordering and remove duplicates
+	sort.Strings(resourceTypes)
+	return removeDuplicateStrings(resourceTypes)
+}
+
+// removeDuplicateStrings removes duplicate strings from a sorted slice
+func removeDuplicateStrings(sorted []string) []string {
+	if len(sorted) == 0 {
+		return sorted
+	}
+
+	result := []string{sorted[0]}
+	for i := 1; i < len(sorted); i++ {
+		if sorted[i] != sorted[i-1] {
+			result = append(result, sorted[i])
+		}
+	}
+	return result
+}
+
+func getMinimalAuthorizationModel() *openfgav1.AuthorizationModel {
+	// Return a minimal authorization model with just the basic IAM types
+	// and no permissions when no ProtectedResources exist
+	return &openfgav1.AuthorizationModel{
+		SchemaVersion: "1.2",
+		TypeDefinitions: []*openfgav1.TypeDefinition{
+			getUserTypeDefinition(),
+			getUserGroupTypeDefinition(),
+			getRoleTypeDefinition([]string{}),        // Empty permissions
+			getRoleBindingTypeDefinition([]string{}), // Empty permissions
+			// Skip Root type entirely when no resources exist
+		},
+	}
 }
 
 func getUserTypeDefinition() *openfgav1.TypeDefinition {
 	return &openfgav1.TypeDefinition{
-		Type: "iam.miloapis.com/InternalUser",
+		Type: TypeInternalUser,
 		Metadata: &openfgav1.Metadata{
 			Relations: map[string]*openfgav1.RelationMetadata{},
 			SourceInfo: &openfgav1.SourceInfo{
-				File: "dynamically_managed_iam_datumapis_com.fga",
+				File: SourceFile,
 			},
-			Module: "iam.miloapis.com",
+			Module: Module,
 		},
 		Relations: map[string]*openfgav1.Userset{},
 	}
@@ -262,35 +435,35 @@ func getUserTypeDefinition() *openfgav1.TypeDefinition {
 
 func getUserGroupTypeDefinition() *openfgav1.TypeDefinition {
 	return &openfgav1.TypeDefinition{
-		Type: "iam.miloapis.com/InternalUserGroup",
+		Type: TypeInternalUserGroup,
 		Metadata: &openfgav1.Metadata{
 			Relations: map[string]*openfgav1.RelationMetadata{
-				"member": {
+				RelationMember: {
 					DirectlyRelatedUserTypes: []*openfgav1.RelationReference{
 						{
-							Type: "iam.miloapis.com/InternalUser",
+							Type: TypeInternalUser,
 						},
 					},
 				},
-				"assignee": {
+				RelationAssignee: {
 					DirectlyRelatedUserTypes: nil,
 				},
 			},
 			SourceInfo: &openfgav1.SourceInfo{
-				File: "dynamically_managed_iam_datumapis_com.fga",
+				File: SourceFile,
 			},
-			Module: "iam.miloapis.com",
+			Module: Module,
 		},
 		Relations: map[string]*openfgav1.Userset{
-			"member": {
+			RelationMember: {
 				Userset: &openfgav1.Userset_This{
 					This: &openfgav1.DirectUserset{},
 				},
 			},
-			"assignee": {
+			RelationAssignee: {
 				Userset: &openfgav1.Userset_ComputedUserset{
 					ComputedUserset: &openfgav1.ObjectRelation{
-						Relation: "member",
+						Relation: RelationMember,
 					},
 				},
 			},
@@ -299,6 +472,11 @@ func getUserGroupTypeDefinition() *openfgav1.TypeDefinition {
 }
 
 func getRoleTypeDefinition(permissions []string) *openfgav1.TypeDefinition {
+	// Sort permissions for deterministic ordering
+	sortedPermissions := make([]string, len(permissions))
+	copy(sortedPermissions, permissions)
+	sort.Strings(sortedPermissions)
+
 	// Create a new type definition for the base role type that will be used to
 	// create custom roles. These roles will always be related to a "user" type
 	// through a role binding.
@@ -306,24 +484,24 @@ func getRoleTypeDefinition(permissions []string) *openfgav1.TypeDefinition {
 		// The InternalRole type will represent the application of an Role in the
 		// OpenFGA backend. The standard Role type is only used to gate access to a
 		// role resource.
-		Type: "iam.miloapis.com/InternalRole",
+		Type: TypeInternalRole,
 		Metadata: &openfgav1.Metadata{
 			Relations: map[string]*openfgav1.RelationMetadata{
-				"assignee": {
+				RelationAssignee: {
 					DirectlyRelatedUserTypes: []*openfgav1.RelationReference{
 						{
-							Type: "iam.miloapis.com/InternalUser",
+							Type: TypeInternalUser,
 						},
 					},
 				},
 			},
 			SourceInfo: &openfgav1.SourceInfo{
-				File: "dynamically_managed_iam_datumapis_com.fga",
+				File: SourceFile,
 			},
-			Module: "iam.miloapis.com",
+			Module: Module,
 		},
 		Relations: map[string]*openfgav1.Userset{
-			"assignee": {
+			RelationAssignee: {
 				Userset: &openfgav1.Userset_This{
 					This: &openfgav1.DirectUserset{},
 				},
@@ -331,13 +509,13 @@ func getRoleTypeDefinition(permissions []string) *openfgav1.TypeDefinition {
 		},
 	}
 
-	for _, permission := range permissions {
+	for _, permission := range sortedPermissions {
 		hashedPermission := hashPermission(permission)
 
 		role.Metadata.Relations[hashedPermission] = &openfgav1.RelationMetadata{
 			DirectlyRelatedUserTypes: []*openfgav1.RelationReference{
 				{
-					Type:               "iam.miloapis.com/InternalUser",
+					Type:               TypeInternalUser,
 					RelationOrWildcard: &openfgav1.RelationReference_Wildcard{},
 				},
 			},
@@ -353,51 +531,56 @@ func getRoleTypeDefinition(permissions []string) *openfgav1.TypeDefinition {
 }
 
 func getRoleBindingTypeDefinition(permissions []string) *openfgav1.TypeDefinition {
+	// Sort permissions for deterministic ordering
+	sortedPermissions := make([]string, len(permissions))
+	copy(sortedPermissions, permissions)
+	sort.Strings(sortedPermissions)
+
 	// Create a new type definition for the base role type that will be used to
 	// create custom roles. These roles will always be related to a "user" type
 	// through a role binding.
 	roleBinding := &openfgav1.TypeDefinition{
-		Type: "iam.miloapis.com/RoleBinding",
+		Type: TypeRoleBinding,
 		Metadata: &openfgav1.Metadata{
 			Relations: map[string]*openfgav1.RelationMetadata{
-				"iam.miloapis.com/InternalRole": {
+				RelationInternalRole: {
 					DirectlyRelatedUserTypes: []*openfgav1.RelationReference{
 						{
-							Type: "iam.miloapis.com/InternalRole",
+							Type: TypeInternalRole,
 						},
 					},
 				},
-				"iam.miloapis.com/InternalUser": {
+				RelationInternalUser: {
 					DirectlyRelatedUserTypes: []*openfgav1.RelationReference{
 						{
-							Type: "iam.miloapis.com/InternalUser",
+							Type: TypeInternalUser,
 						},
 						{
-							Type:               "iam.miloapis.com/InternalUser",
+							Type:               TypeInternalUser,
 							RelationOrWildcard: &openfgav1.RelationReference_Wildcard{},
 						},
 						// Ensure only InternalUser is allowed here if all subjects are mapped to it for this relation
 						{
-							Type: "iam.miloapis.com/InternalUserGroup",
+							Type: TypeInternalUserGroup,
 							RelationOrWildcard: &openfgav1.RelationReference_Relation{
-								Relation: "assignee",
+								Relation: RelationAssignee,
 							},
 						},
 					},
 				},
 			},
 			SourceInfo: &openfgav1.SourceInfo{
-				File: "dynamically_managed_iam_datumapis_com.fga",
+				File: SourceFile,
 			},
-			Module: "iam.miloapis.com",
+			Module: Module,
 		},
 		Relations: map[string]*openfgav1.Userset{
-			"iam.miloapis.com/InternalRole": {
+			RelationInternalRole: {
 				Userset: &openfgav1.Userset_This{
 					This: &openfgav1.DirectUserset{},
 				},
 			},
-			"iam.miloapis.com/InternalUser": {
+			RelationInternalUser: {
 				Userset: &openfgav1.Userset_This{
 					This: &openfgav1.DirectUserset{},
 				},
@@ -405,7 +588,7 @@ func getRoleBindingTypeDefinition(permissions []string) *openfgav1.TypeDefinitio
 		},
 	}
 
-	for _, permission := range permissions {
+	for _, permission := range sortedPermissions {
 		hashedPermission := hashPermission(permission)
 
 		roleBinding.Relations[hashedPermission] = &openfgav1.Userset{
@@ -415,7 +598,7 @@ func getRoleBindingTypeDefinition(permissions []string) *openfgav1.TypeDefinitio
 						{
 							Userset: &openfgav1.Userset_ComputedUserset{
 								ComputedUserset: &openfgav1.ObjectRelation{
-									Relation: "iam.miloapis.com/InternalUser",
+									Relation: RelationInternalUser,
 								},
 							},
 						},
@@ -426,7 +609,7 @@ func getRoleBindingTypeDefinition(permissions []string) *openfgav1.TypeDefinitio
 										Relation: hashedPermission,
 									},
 									Tupleset: &openfgav1.ObjectRelation{
-										Relation: "iam.miloapis.com/InternalRole",
+										Relation: RelationInternalRole,
 									},
 								},
 							},
@@ -440,6 +623,80 @@ func getRoleBindingTypeDefinition(permissions []string) *openfgav1.TypeDefinitio
 	return roleBinding
 }
 
+func getRootTypeDefinition(permissions []string, resourceTypes []string) *openfgav1.TypeDefinition {
+	// Sort inputs for deterministic ordering
+	sortedPermissions := make([]string, len(permissions))
+	copy(sortedPermissions, permissions)
+	sort.Strings(sortedPermissions)
+
+	sortedResourceTypes := make([]string, len(resourceTypes))
+	copy(sortedResourceTypes, resourceTypes)
+	sort.Strings(sortedResourceTypes)
+
+	// Build the list of relation references for all resource types
+	relationReferences := make([]*openfgav1.RelationReference, 0, len(sortedResourceTypes))
+	for _, resourceType := range sortedResourceTypes {
+		relationReferences = append(relationReferences, &openfgav1.RelationReference{
+			Type: resourceType,
+		})
+	}
+
+	// This function should only be called when ProtectedResources exist,
+	// so we should always have at least one resource type
+	if len(relationReferences) == 0 {
+		panic("getRootTypeDefinition called with no resource types - this should not happen when ProtectedResources exist")
+	}
+
+	root := &openfgav1.TypeDefinition{
+		Type: TypeRoot,
+		Metadata: &openfgav1.Metadata{
+			Relations: map[string]*openfgav1.RelationMetadata{
+				RelationRoleBinding: {
+					DirectlyRelatedUserTypes: []*openfgav1.RelationReference{
+						{
+							Type: TypeRoleBinding,
+						},
+					},
+				},
+				RelationRootBinding: {
+					DirectlyRelatedUserTypes: relationReferences,
+				},
+			},
+			SourceInfo: &openfgav1.SourceInfo{
+				File: SourceFile,
+			},
+			Module: Module,
+		},
+		Relations: map[string]*openfgav1.Userset{
+			RelationRoleBinding: {
+				Userset: &openfgav1.Userset_This{},
+			},
+			RelationRootBinding: {
+				Userset: &openfgav1.Userset_This{},
+			},
+		},
+	}
+
+	// Add all permissions to the Root type so ResourceKind bindings can grant any permission
+	for _, permission := range sortedPermissions {
+		hashedPermission := hashPermission(permission)
+		root.Relations[hashedPermission] = &openfgav1.Userset{
+			Userset: &openfgav1.Userset_TupleToUserset{
+				TupleToUserset: &openfgav1.TupleToUserset{
+					Tupleset: &openfgav1.ObjectRelation{
+						Relation: RelationRoleBinding,
+					},
+					ComputedUserset: &openfgav1.ObjectRelation{
+						Relation: hashedPermission,
+					},
+				},
+			},
+		}
+	}
+
+	return root
+}
+
 func hashPermission(permission string) string {
 	hasher := fnv.New32a()
 	//revive:disable-next-line:unhandled-error a
@@ -450,4 +707,95 @@ func hashPermission(permission string) string {
 
 func HashPermission(permission string) string {
 	return hashPermission(permission)
+}
+
+// calculateHierarchicalPermissions calculates which permissions each resource type should have
+// based on its position in the hierarchy. Each resource gets its own permissions plus
+// all permissions from its descendants (children, grandchildren, etc.)
+func calculateHierarchicalPermissions(rootNode *resourceGraphNode) map[string][]string {
+	hierarchicalPermissions := make(map[string][]string)
+
+	// Traverse the entire graph and calculate permissions for each node
+	calculatePermissionsForNode(rootNode, hierarchicalPermissions)
+
+	return hierarchicalPermissions
+}
+
+// calculatePermissionsForNode recursively calculates permissions for a node and all its descendants
+func calculatePermissionsForNode(node *resourceGraphNode, permissionsMap map[string][]string) []string {
+	if node == nil {
+		return []string{}
+	}
+
+	// Skip the root IAM node as it's handled separately
+	if node.ResourceType == TypeRoot {
+		// Process children but don't assign permissions to the IAM root
+		for _, child := range node.ChildResources {
+			calculatePermissionsForNode(child, permissionsMap)
+		}
+		return []string{}
+	}
+
+	// If we've already calculated permissions for this node, return them
+	if permissions, exists := permissionsMap[node.ResourceType]; exists {
+		return permissions
+	}
+
+	// Start with this node's direct permissions
+	nodePermissions := make([]string, len(node.DirectPermissions))
+	copy(nodePermissions, node.DirectPermissions)
+
+	// Add permissions from all child resources
+	for _, child := range node.ChildResources {
+		childPermissions := calculatePermissionsForNode(child, permissionsMap)
+		nodePermissions = append(nodePermissions, childPermissions...)
+	}
+
+	// Remove duplicates
+	nodePermissions = removeDuplicatePermissions(nodePermissions)
+
+	// Store the calculated permissions
+	permissionsMap[node.ResourceType] = nodePermissions
+
+	return nodePermissions
+}
+
+// removeDuplicatePermissions removes duplicate permission strings from a slice
+func removeDuplicatePermissions(permissions []string) []string {
+	seen := make(map[string]bool)
+	result := []string{}
+
+	for _, permission := range permissions {
+		if !seen[permission] {
+			seen[permission] = true
+			result = append(result, permission)
+		}
+	}
+
+	return result
+}
+
+// getResourceTypeDefinitionsWithHierarchicalPermissions creates type definitions with
+// permissions assigned based on hierarchical relationships
+func getResourceTypeDefinitionsWithHierarchicalPermissions(hierarchicalPermissions map[string][]string, node *resourceGraphNode) map[string]*openfgav1.TypeDefinition {
+	types := map[string]*openfgav1.TypeDefinition{}
+
+	// Process the current node
+	if node.ResourceType != TypeRoot {
+		permissions := hierarchicalPermissions[node.ResourceType]
+		if permissions == nil {
+			permissions = []string{} // Default to empty if not found
+		}
+		types[node.ResourceType] = getResourceTypeDefinition(permissions, node)
+	}
+
+	// Process all child nodes
+	for _, child := range node.ChildResources {
+		childTypes := getResourceTypeDefinitionsWithHierarchicalPermissions(hierarchicalPermissions, child)
+		for k, v := range childTypes {
+			types[k] = v
+		}
+	}
+
+	return types
 }

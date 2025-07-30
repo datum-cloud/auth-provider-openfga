@@ -105,6 +105,17 @@ func (o *ProjectControlPlaneAuthorizer) Authorize(
 		},
 	}
 
+	// Build all contextual tuples (root binding + groups) using shared utility
+	rootResourceType := "resourcemanager.miloapis.com/Project"
+	contextualTuples := buildAllContextualTuples(attributes, rootResourceType, resource)
+
+	// Add contextual tuples to the check request if any exist
+	if len(contextualTuples) > 0 {
+		checkReq.ContextualTuples = &openfgav1.ContextualTupleKeys{
+			TupleKeys: contextualTuples,
+		}
+	}
+
 	resp, err := o.FGAClient.Check(ctx, checkReq)
 	if err != nil {
 		slog.ErrorContext(ctx, "failed to check authorization in OpenFGA", slog.String("error", err.Error()))

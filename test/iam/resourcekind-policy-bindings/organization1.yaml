@@ -1,6 +1,6 @@
 apiVersion: resourcemanager.miloapis.com/v1alpha1
 kind: Organization
 metadata:
-  name: datum
+  name: test-org-1
 spec:
   type: Standard

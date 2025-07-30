@@ -105,10 +105,18 @@ func TestCoreControlPlaneAuthorizer_Authorize_Integration(t *testing.T) {
 			fgaCheckFunc: func(t *testing.T, req *openfgav1.CheckRequest) (*openfgav1.CheckResponse, error) {
 				assert.Equal(t, "compute.miloapis.com/Workload:wkld-123", req.TupleKey.Object)
 				require.NotNil(t, req.ContextualTuples)
-				require.Len(t, req.ContextualTuples.TupleKeys, 1)
-				assert.Equal(t, "resourcemanager.miloapis.com/Project:proj-xyz", req.ContextualTuples.TupleKeys[0].User)
-				assert.Equal(t, "parent", req.ContextualTuples.TupleKeys[0].Relation)
-				assert.Equal(t, "compute.miloapis.com/Workload:wkld-123", req.ContextualTuples.TupleKeys[0].Object)
+				require.Len(t, req.ContextualTuples.TupleKeys, 2)
+
+				// Find parent tuple
+				parentTupleFound := false
+				for _, tuple := range req.ContextualTuples.TupleKeys {
+					if tuple.Relation == "parent" {
+						assert.Equal(t, "resourcemanager.miloapis.com/Project:proj-xyz", tuple.User)
+						assert.Equal(t, "compute.miloapis.com/Workload:wkld-123", tuple.Object)
+						parentTupleFound = true
+					}
+				}
+				assert.True(t, parentTupleFound, "parent contextual tuple not found")
 				return &openfgav1.CheckResponse{Allowed: true}, nil
 			},
 			expectedDecision:   authorizer.DecisionAllow,
@@ -145,7 +153,10 @@ func TestCoreControlPlaneAuthorizer_Authorize_Integration(t *testing.T) {
 			},
 			fgaCheckFunc: func(t *testing.T, req *openfgav1.CheckRequest) (*openfgav1.CheckResponse, error) {
 				assert.Equal(t, "resourcemanager.miloapis.com/Project:proj-xyz", req.TupleKey.Object)
-				assert.Nil(t, req.ContextualTuples)
+				require.NotNil(t, req.ContextualTuples)
+				require.Len(t, req.ContextualTuples.TupleKeys, 1)
+				assert.Equal(t, "iam.miloapis.com/Root:resourcemanager.miloapis.com/Project", req.ContextualTuples.TupleKeys[0].User)
+				assert.Equal(t, "iam.miloapis.com/RootBinding", req.ContextualTuples.TupleKeys[0].Relation)
 				return &openfgav1.CheckResponse{Allowed: false}, nil
 			},
 			expectedDecision:   authorizer.DecisionDeny,
@@ -202,7 +213,10 @@ func TestCoreControlPlaneAuthorizer_Authorize_Integration(t *testing.T) {
 			},
 			fgaCheckFunc: func(t *testing.T, req *openfgav1.CheckRequest) (*openfgav1.CheckResponse, error) {
 				assert.Equal(t, "compute.miloapis.com/Workload:wkld-123", req.TupleKey.Object)
-				assert.Nil(t, req.ContextualTuples)
+				require.NotNil(t, req.ContextualTuples)
+				require.Len(t, req.ContextualTuples.TupleKeys, 1)
+				assert.Equal(t, "iam.miloapis.com/Root:compute.miloapis.com/Workload", req.ContextualTuples.TupleKeys[0].User)
+				assert.Equal(t, "iam.miloapis.com/RootBinding", req.ContextualTuples.TupleKeys[0].Relation)
 				return &openfgav1.CheckResponse{Allowed: true}, nil
 			},
 			expectedDecision:   authorizer.DecisionAllow,

@@ -1,0 +1,10 @@
+apiVersion: iam.miloapis.com/v1alpha1
+kind: Role
+metadata:
+  name: root-fallback.miloapis.com-projectadmin
+spec:
+  launchStage: Beta
+  includedPermissions:
+    - resourcemanager.miloapis.com/projects.list
+    - resourcemanager.miloapis.com/projects.get
+    - resourcemanager.miloapis.com/projects.create

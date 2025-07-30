@@ -1,12 +1,13 @@
 apiVersion: chainsaw.kyverno.io/v1alpha1
 kind: Test
 metadata:
-  name: policy-bindings
+  name: resourcekind-policy-bindings
 spec:
   steps:
     - try:
+        # Set up all necessary protected resources
         - apply:
-            file: protected-resources/iam-role.yaml
+            file: ../policy-bindings/protected-resources/iam-role.yaml
         - wait:
             apiVersion: iam.miloapis.com/v1alpha1
             kind: ProtectedResource
@@ -17,7 +18,7 @@ spec:
                 name: Ready
                 value: "true"
         - apply:
-            file: protected-resources/iam-user.yaml
+            file: ../policy-bindings/protected-resources/iam-user.yaml
         - wait:
             apiVersion: iam.miloapis.com/v1alpha1
             kind: ProtectedResource
@@ -28,18 +29,7 @@ spec:
                 name: Ready
                 value: "true"
         - apply:
-            file: protected-resources/iam-group.yaml
-        - wait:
-            apiVersion: iam.miloapis.com/v1alpha1
-            kind: ProtectedResource
-            name: iam-group
-            timeout: 5m
-            for:
-              condition:
-                name: Ready
-                value: "true"
-        - apply:
-            file: protected-resources/resourcemanager-organization.yaml
+            file: ../policy-bindings/protected-resources/resourcemanager-organization.yaml
         - wait:
             apiVersion: iam.miloapis.com/v1alpha1
             kind: ProtectedResource
@@ -49,144 +39,77 @@ spec:
               condition:
                 name: Ready
                 value: "true"
+
+        # Create a role for organization management
         - apply:
-            file: protected-resources/resourcemanager-project.yaml
-        - wait:
-            apiVersion: iam.miloapis.com/v1alpha1
-            kind: ProtectedResource
-            name: resourcemanager-project
-            timeout: 5m
-            for:
-              condition:
-                name: Ready
-                value: "true"
-        - apply:
-            file: protected-resources/compute-workloads.yaml
-        - wait:
-            apiVersion: iam.miloapis.com/v1alpha1
-            kind: ProtectedResource
-            name: compute-workloads
-            timeout: 5m
-            for:
-              condition:
-                name: Ready
-                value: "true"
-        - apply:
-            file: roles/iam-user-creator.yaml
+            file: roles/resourcekind-organizationowner.yaml
         - wait:
             apiVersion: iam.miloapis.com/v1alpha1
             kind: Role
-            name: iam.miloapis.com-user-creator
+            name: resourcekind.miloapis.com-organizationowner
             timeout: 5m
             for:
               condition:
                 name: Ready
                 value: "true"
+
+        # Create test user
         - apply:
-            file: roles/compute-workload-admin.yaml
-        - wait:
-            apiVersion: iam.miloapis.com/v1alpha1
-            kind: Role
-            name: compute.miloapis.com-workload-admin
-            timeout: 5m
-            for:
-              condition:
-                name: Ready
-                value: "true"
-        - apply:
-            file: roles/resourcemanager-organizationowner.yaml
-        - wait:
-            apiVersion: iam.miloapis.com/v1alpha1
-            kind: Role
-            name: resourcemanager.miloapis.com-organizationowner
-            timeout: 5m
-            for:
-              condition:
-                name: Ready
-                value: "true"
-        - apply:
-            file: roles/resourcemanager-projectowner.yaml
-        - wait:
-            apiVersion: iam.miloapis.com/v1alpha1
-            kind: Role
-            name: resourcemanager.miloapis.com-projectowner
-            timeout: 5m
-            for:
-              condition:
-                name: Ready
-                value: "true"
-        - create:
             file: user.yaml
             outputs:
               - name: user
                 value: (@)
-        - create:
-            file: organization.yaml
+
+        # Create multiple organizations to test system-wide access
+        - apply:
+            file: organization1.yaml
             outputs:
-              - name: org
+              - name: org1
                 value: (@)
+        - apply:
+            file: organization2.yaml
+            outputs:
+              - name: org2
+                value: (@)
+
+        # Create ResourceKind PolicyBinding that grants access to ALL organizations
         - apply:
             resource:
               apiVersion: iam.miloapis.com/v1alpha1
               kind: PolicyBinding
               metadata:
-                name: sample-org-admin-binding
+                name: system-wide-org-admin-binding
               spec:
                 roleRef:
-                  name: resourcemanager.miloapis.com-organizationowner
+                  name: resourcekind.miloapis.com-organizationowner
                   namespace: ($namespace)
                 subjects:
                   - kind: User
-                    name: "kubernetes-admin"
+                    name: "test-system-admin"
                     uid: ($user.metadata.uid)
                 resourceSelector:
-                  resourceRef:
+                  resourceKind:
                     apiGroup: "resourcemanager.miloapis.com"
                     kind: Organization
-                    name: "datum"
-                    uid: ($org.metadata.uid)
-        - create:
-            file: group.yaml
-            outputs:
-              - name: grp
-                value: (@)
-        - apply:
-            resource:
-              apiVersion: iam.miloapis.com/v1alpha1
-              kind: PolicyBinding
-              metadata:
-                name: sample-group-admin-binding
-              spec:
-                roleRef:
-                  name: resourcemanager.miloapis.com-organizationowner
-                  namespace: ($namespace)
-                subjects:
-                  - kind: Group
-                    name: "sample-admin-group"
-                    uid: ($grp.metadata.uid)
-                    namespace: ($namespace)
-                resourceSelector:
-                  resourceRef:
-                    apiGroup: "resourcemanager.miloapis.com"
-                    kind: Organization
-                    name: "datum"
-                    uid: ($org.metadata.uid)
 
+        # Wait for PolicyBinding to be ready
         - wait:
             apiVersion: iam.miloapis.com/v1alpha1
             kind: PolicyBinding
-            name: sample-org-admin-binding
+            name: system-wide-org-admin-binding
             timeout: 5m
             for:
               condition:
                 name: Ready
                 value: 'true'
+
+        # Test access to first organization
         - apply:
             resource:
               apiVersion: v1
               kind: Pod
               metadata:
-                name: webhook-test
+                name: resourcekind-webhook-test-org1
               spec:
                 restartPolicy: Never
                 containers:
@@ -202,24 +125,21 @@ spec:
                         "apiVersion": "authorization.k8s.io/v1",
                         "kind": "SubjectAccessReview",
                         "spec": {
-                          "user": "kubernetes-admin",
-                          "uid": "kubernetes-admin",
-                          "extra": {
-                            "resourcemanager.miloapis.com/organization-id": ["datum"]
-                          },
+                          "user": "test-system-admin",
+                          "uid": "test-system-admin",
                           "groups": ["system:authenticated"],
                           "resourceAttributes": {
                             "group": "resourcemanager.miloapis.com",
                             "resource": "organizations",
                             "version": "v1alpha1",
                             "verb": "get",
-                            "name": "datum"
+                            "name": "test-org-1"
                           }
                         }
                       }
                       EOF
                       )
-                      echo "Webhook response: $response"
+                      echo "Webhook response for org1: $response"
                       # Check if we got a valid SubjectAccessReview response
                       if ! echo "$response" | grep -q '"kind":"SubjectAccessReview"'; then
                         echo "Webhook test failed - invalid response format"
@@ -227,15 +147,20 @@ spec:
                       fi
                       # Check if the request was allowed
                       if echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*true'; then
-                        echo "Webhook test completed successfully - access allowed"
+                        echo "Webhook test completed successfully - access allowed to org1"
                         exit 0
                       elif echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*false'; then
-                        echo "Webhook test failed - access denied by authorization webhook"
+                        echo "Webhook test failed - access denied by authorization webhook for org1"
                         exit 1
                       else
-                        echo "Webhook test failed - could not determine allowed status"
+                        echo "Webhook test failed - could not determine allowed status for org1"
                         exit 1
                       fi
+                  env:
+                    - name: USER_UID
+                      value: ($user.metadata.uid)
+
+        # Wait for first test to complete
         - sleep:
             duration: 30s
         - assert:
@@ -243,34 +168,92 @@ spec:
               apiVersion: v1
               kind: Pod
               metadata:
-                name: webhook-test
+                name: resourcekind-webhook-test-org1
               status:
                 phase: Succeeded
 
+        # Test access to second organization (should also be allowed due to ResourceKind)
         - apply:
-            file: group-user.yaml
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: resourcekind-webhook-test-org2
+              spec:
+                restartPolicy: Never
+                containers:
+                - name: curl
+                  image: curlimages/curl:latest
+                  command: ["/bin/sh", "-c"]
+                  args:
+                    - |
+                      response=$(curl -ksS https://auth-provider-openfga-authz-webhook.auth-provider-openfga-system.svc.cluster.local:8090/core/v1alpha/webhook \
+                        -H "Content-Type: application/json" \
+                        -d @- << EOF
+                      {
+                        "apiVersion": "authorization.k8s.io/v1",
+                        "kind": "SubjectAccessReview",
+                        "spec": {
+                          "user": "test-system-admin",
+                          "uid": "test-system-admin",
+                          "groups": ["system:authenticated"],
+                          "resourceAttributes": {
+                            "group": "resourcemanager.miloapis.com",
+                            "resource": "organizations",
+                            "version": "v1alpha1",
+                            "verb": "get",
+                            "name": "test-org-2"
+                          }
+                        }
+                      }
+                      EOF
+                      )
+                      echo "Webhook response for org2: $response"
+                      # Check if we got a valid SubjectAccessReview response
+                      if ! echo "$response" | grep -q '"kind":"SubjectAccessReview"'; then
+                        echo "Webhook test failed - invalid response format"
+                        exit 1
+                      fi
+                      # Check if the request was allowed
+                      if echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*true'; then
+                        echo "Webhook test completed successfully - access allowed to org2"
+                        exit 0
+                      elif echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*false'; then
+                        echo "Webhook test failed - access denied by authorization webhook for org2"
+                        exit 1
+                      else
+                        echo "Webhook test failed - could not determine allowed status for org2"
+                        exit 1
+                      fi
+                  env:
+                    - name: USER_UID
+                      value: ($user.metadata.uid)
+
+        # Wait for second test to complete
+        - sleep:
+            duration: 30s
+        - assert:
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: resourcekind-webhook-test-org2
+              status:
+                phase: Succeeded
+
+        # Test that a user WITHOUT the ResourceKind binding cannot access organizations
+        - apply:
+            file: unauthorized-user.yaml
             outputs:
-              - name: grpUser
+              - name: unauthorizedUser
                 value: (@)
-        - apply:
-            file: group-memership.yaml
-
-        - wait:
-            apiVersion: iam.miloapis.com/v1alpha1
-            kind: GroupMembership
-            name: example-groupmembership
-            timeout: 5m
-            for:
-              condition:
-                name: Ready
-                value: 'true'
 
         - apply:
             resource:
               apiVersion: v1
               kind: Pod
               metadata:
-                name: group-user-webhook-test
+                name: resourcekind-webhook-test-unauthorized
               spec:
                 restartPolicy: Never
                 containers:
@@ -286,116 +269,42 @@ spec:
                         "apiVersion": "authorization.k8s.io/v1",
                         "kind": "SubjectAccessReview",
                         "spec": {
-                          "user": "group-user-admin",
-                          "uid": "group-user-admin",
-                          "extra": {
-                            "resourcemanager.miloapis.com/organization-id": ["datum"]
-                          },
+                          "user": "unauthorized-user",
+                          "uid": "unauthorized-user",
                           "groups": ["system:authenticated"],
                           "resourceAttributes": {
                             "group": "resourcemanager.miloapis.com",
                             "resource": "organizations",
                             "version": "v1alpha1",
                             "verb": "get",
-                            "name": "datum"
+                            "name": "test-org-1"
                           }
                         }
                       }
                       EOF
                       )
-                      echo "Webhook response: $response"
+                      echo "Webhook response for unauthorized user: $response"
                       # Check if we got a valid SubjectAccessReview response
                       if ! echo "$response" | grep -q '"kind":"SubjectAccessReview"'; then
                         echo "Webhook test failed - invalid response format"
                         exit 1
                       fi
-                      # Check if the request was allowed
-                      if echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*true'; then
-                        echo "Webhook test completed successfully - access allowed"
+                      # Check if the request was denied (which is expected)
+                      if echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*false'; then
+                        echo "Webhook test completed successfully - access denied to unauthorized user as expected"
                         exit 0
-                      elif echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*false'; then
-                        echo "Webhook test failed - access denied by authorization webhook"
+                      elif echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*true'; then
+                        echo "Webhook test failed - access was unexpectedly allowed for unauthorized user"
                         exit 1
                       else
-                        echo "Webhook test failed - could not determine allowed status"
+                        echo "Webhook test failed - could not determine allowed status for unauthorized user"
                         exit 1
                       fi
-        - sleep:
-            duration: 30s
-        - assert:
-            resource:
-              apiVersion: v1
-              kind: Pod
-              metadata:
-                name: group-user-webhook-test
-              status:
-                phase: Succeeded
+                  env:
+                    - name: UNAUTH_USER_UID
+                      value: ($unauthorizedUser.metadata.uid)
 
-        # Test that user lost the PolicyBinding of the group after the group membership is deleted.
-        - delete: # Delete group membership
-            file: group-memership.yaml
-        - wait: # Wait for group membership to be deleted
-            apiVersion: iam.miloapis.com/v1alpha1
-            kind: GroupMembership
-            name: example-groupmembership
-            timeout: 5m
-            for:
-              deletion: {}
-        - apply:
-            resource:
-              apiVersion: v1
-              kind: Pod
-              metadata:
-                name: group-user-webhook-test-deletion
-              spec:
-                restartPolicy: Never
-                containers:
-                - name: curl
-                  image: curlimages/curl:latest
-                  command: ["/bin/sh", "-c"]
-                  args:
-                    - |
-                      response=$(curl -ksS https://auth-provider-openfga-authz-webhook.auth-provider-openfga-system.svc.cluster.local:8090/core/v1alpha/webhook \
-                        -H "Content-Type: application/json" \
-                        -d @- << EOF
-                      {
-                        "apiVersion": "authorization.k8s.io/v1",
-                        "kind": "SubjectAccessReview",
-                        "spec": {
-                          "user": "group-user-admin",
-                          "uid": "group-user-admin",
-                          "extra": {
-                            "resourcemanager.miloapis.com/organization-id": ["datum"]
-                          },
-                          "groups": ["system:authenticated"],
-                          "resourceAttributes": {
-                            "group": "resourcemanager.miloapis.com",
-                            "resource": "organizations",
-                            "version": "v1alpha1",
-                            "verb": "get",
-                            "name": "datum"
-                          }
-                        }
-                      }
-                      EOF
-                      )
-                      echo "Webhook response: $response"
-                      # Check if we got a valid SubjectAccessReview response
-                      if ! echo "$response" | grep -q '"kind":"SubjectAccessReview"'; then
-                        echo "Webhook test failed - invalid response format"
-                        exit 1
-                      fi
-                      # Check if the request was allowed
-                      if echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*true'; then
-                        echo "Webhook test failed - access was allowed"
-                        exit 1
-                      elif echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*false'; then
-                        echo "Webhook test succeeded - access denied by authorization webhook"
-                        exit 0
-                      else
-                        echo "Webhook test failed - could not determine allowed status"
-                        exit 1
-                      fi
+        # Wait for unauthorized test to complete
         - sleep:
             duration: 30s
         - assert:
@@ -403,6 +312,6 @@ spec:
               apiVersion: v1
               kind: Pod
               metadata:
-                name: group-user-webhook-test-deletion
+                name: resourcekind-webhook-test-unauthorized
               status:
                 phase: Succeeded

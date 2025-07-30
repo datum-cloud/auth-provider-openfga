@@ -4,11 +4,13 @@ metadata:
   name: authz-webhook
   labels:
     app.kubernetes.io/name: authz-webhook
+    app.kubernetes.io/part-of: auth-provider-openfga
     app.kubernetes.io/managed-by: kustomize
 spec:
   selector:
     matchLabels:
       app.kubernetes.io/name: authz-webhook
+      app.kubernetes.io/part-of: auth-provider-openfga
   replicas: 1
   template:
     metadata:
@@ -16,6 +18,7 @@ spec:
         kubectl.kubernetes.io/default-container: manager
       labels:
         app.kubernetes.io/name: authz-webhook
+        app.kubernetes.io/part-of: auth-provider-openfga
     spec:
       securityContext:
         runAsNonRoot: true
@@ -24,7 +27,7 @@ spec:
       containers:
         - name: authz-webhook
           image: auth-provider-openfga:latest
-          imagePullPolicy: Always
+          imagePullPolicy: IfNotPresent
           args:
             - authz-webhook
             - --metrics-bind-address=:8080

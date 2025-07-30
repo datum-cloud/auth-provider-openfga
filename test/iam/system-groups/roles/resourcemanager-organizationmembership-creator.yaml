@@ -1,0 +1,9 @@
+apiVersion: iam.miloapis.com/v1alpha1
+kind: Role
+metadata:
+  name: resourcemanager-organizationmembership-creator
+spec:
+  launchStage: Beta
+  includedPermissions:
+    - resourcemanager.miloapis.com/organizationmemberships.create
+    - resourcemanager.miloapis.com/organizationmemberships.get
