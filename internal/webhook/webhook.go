@@ -6,6 +6,8 @@ import (
 	"net/http"
 
 	authorizationv1 "k8s.io/api/authorization/v1"
+	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apiserver/pkg/authentication/user"
 	"k8s.io/apiserver/pkg/authorization/authorizer"
 )
@@ -19,6 +21,8 @@ func NewAuthorizerWebhook(authzer authorizer.Authorizer) *Webhook {
 				return Denied("must specify oneof resource or non-resource attributes, not both")
 			}
 
+			slog.InfoContext(ctx, "authorizing request", slog.Any("request", r))
+
 			extra := map[string][]string{}
 			for key, val := range r.Spec.Extra {
 				extra[key] = []string(val)
@@ -31,6 +35,24 @@ func NewAuthorizerWebhook(authzer authorizer.Authorizer) *Webhook {
 					Groups: r.Spec.Groups,
 					Extra:  extra,
 				},
+			}
+
+			if r.Spec.ResourceAttributes != nil && r.Spec.ResourceAttributes.FieldSelector != nil {
+				fieldSelectorRequirements, err := fields.ParseSelector(r.Spec.ResourceAttributes.FieldSelector.RawSelector)
+				if err != nil {
+					slog.ErrorContext(ctx, "error parsing field selector", slog.String("error", err.Error()))
+					return Errored(err)
+				}
+				attrs.FieldSelectorRequirements = fieldSelectorRequirements.Requirements()
+			}
+
+			if r.Spec.ResourceAttributes != nil && r.Spec.ResourceAttributes.LabelSelector != nil {
+				labelSelectorRequirements, err := labels.ParseToRequirements(r.Spec.ResourceAttributes.LabelSelector.RawSelector)
+				if err != nil {
+					slog.ErrorContext(ctx, "error parsing label selector", slog.String("error", err.Error()))
+					return Errored(err)
+				}
+				attrs.LabelSelectorRequirements = labelSelectorRequirements
 			}
 
 			if resourceAttrs := r.Spec.ResourceAttributes; resourceAttrs != nil {

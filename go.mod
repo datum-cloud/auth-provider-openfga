@@ -12,7 +12,8 @@ require (
 	github.com/onsi/gomega v1.37.0
 	github.com/openfga/api/proto v0.0.0-20250127102726-f9709139a369
 	github.com/spf13/cobra v1.9.1
-	go.miloapis.com/milo v0.0.0-20250618192254-65cc43fc3e7f
+	github.com/stretchr/testify v1.10.0
+	go.miloapis.com/milo v0.0.0-20250624162758-130f47947086
 	google.golang.org/grpc v1.72.1
 	google.golang.org/protobuf v1.36.6
 	k8s.io/api v0.33.1
@@ -52,6 +53,7 @@ require (
 	github.com/modern-go/reflect2 v1.0.2 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
+	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	github.com/prometheus/client_golang v1.22.0 // indirect
 	github.com/prometheus/client_model v0.6.2 // indirect
 	github.com/prometheus/common v0.64.0 // indirect
