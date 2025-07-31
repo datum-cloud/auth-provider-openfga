@@ -9,7 +9,7 @@ godebug default=go1.23
 require (
 	github.com/google/go-cmp v0.7.0
 	github.com/onsi/ginkgo/v2 v2.23.4
-	github.com/onsi/gomega v1.37.0
+	github.com/onsi/gomega v1.38.0
 	github.com/openfga/api/proto v0.0.0-20250528161632-e53c69cc5531
 	github.com/spf13/cobra v1.9.1
 	github.com/stretchr/testify v1.10.0
