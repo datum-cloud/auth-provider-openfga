@@ -108,6 +108,7 @@ jobs:
       - name: Deploy application dependencies via Flux
         run: |
           echo "🔧 Deploying application dependencies (OpenFGA) via Flux..."
+          make kustomize
           kubectl apply --server-side --wait=true -f <(bin/kustomize build config/dependencies)
           echo "⏳ Waiting for dependency HelmReleases to be ready..."
           kubectl wait --for=condition=Ready helmrelease/openfga -n openfga-system --timeout=240s
