@@ -5,6 +5,9 @@ on:
     branches:
       - main
   pull_request:
+  release:
+    types:
+      - published
 
 env:
   REGISTRY: ghcr.io
@@ -90,43 +93,25 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install kind
+      - name: Prepare local alias tag
         run: |
-          # For consistency with Makefile, we could check if kind is already available
-          # but in CI it's clean every time, so we install it
-          curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
-          chmod +x ./kind
-          sudo mv ./kind /usr/local/bin/kind
+          TAG=$(echo '${{ needs.build.outputs.image }}' | head -n1)
+          docker pull "$TAG"
+          docker tag "$TAG" auth-provider-openfga:test
 
-      - name: Create kind cluster and install Flux
-        run: |
-          make kind-create
-
-      - name: Pull and load Docker image into kind
-        run: |
-          # Extract the image tag that was built in the previous job
-          IMAGE_TAG=$(echo "${{ needs.build.outputs.image }}" | head -n1)
-          echo "Pulling and loading image: $IMAGE_TAG"
-          docker pull $IMAGE_TAG
-          kind load docker-image $IMAGE_TAG --name auth-provider-openfga
-
-          # Tag the image with the expected name for the deployment
-          docker tag $IMAGE_TAG auth-provider-openfga:test
-          kind load docker-image auth-provider-openfga:test --name auth-provider-openfga
-
-      - name: Deploy platform infrastructure via Flux
-        run: |
-          echo "📦 Deploying platform infrastructure (cert-manager) via Flux..."
-          make kustomize
-          kubectl apply --server-side --wait=true -f <(bin/kustomize build config/platform)
-          echo "⏳ Waiting for platform HelmReleases to be ready..."
-          kubectl wait --for=condition=Ready helmrelease/cert-manager -n cert-manager --timeout=240s
-          kubectl wait --for=condition=Ready helmrelease/cert-manager-csi-driver -n cert-manager --timeout=240s
-          echo "✅ Platform infrastructure deployed successfully"
+      - name: Bootstrap KIND test cluster
+        uses: datum-cloud/test-infra/.github/actions/kind-bootstrap@v0.1
+        with:
+          cluster_name: auth-provider-openfga         # optional override
+          wait_timeout: "300s"                         # optional override
+          images: |
+            ${{ needs.build.outputs.image }}          
+            auth-provider-openfga:test               
 
       - name: Deploy application dependencies via Flux
         run: |
           echo "🔧 Deploying application dependencies (OpenFGA) via Flux..."
+          make kustomize
           kubectl apply --server-side --wait=true -f <(bin/kustomize build config/dependencies)
           echo "⏳ Waiting for dependency HelmReleases to be ready..."
           kubectl wait --for=condition=Ready helmrelease/openfga -n openfga-system --timeout=240s
