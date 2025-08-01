@@ -8,6 +8,15 @@ else
 GOBIN="$(shell go env GOBIN)"
 endif
 
+# ------------------------------------------------------------
+# variables reused from test-infra (override if you like)
+# ------------------------------------------------------------
+CLUSTER_NAME   ?= auth-provider-openfga
+WAIT_TIMEOUT   ?= 420s
+TEST_INFRA_DIR := $(shell mktemp -d)
+TEST_INFRA_TAG  ?= v0.1  
+TEST_INFRA_MAKE := $(TEST_INFRA_DIR)/test-infra/Makefile
+
 # CONTAINER_TOOL defines the container tool to be used for building images.
 # Be aware that the target commands are only tested with Docker which is
 # scaffolded by default. However, you might want to replace it to use other
@@ -61,12 +70,33 @@ vet: ## Run go vet against code.
 test: manifests generate fmt vet setup-envtest ## Run tests.
 	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
 
+# ------------------------------------------------------------
+# fetch test-infra once (shallow clone)
+# ------------------------------------------------------------
+.PHONY: fetch-test-infra
+fetch-test-infra:
+	@if [ ! -f "$(TEST_INFRA_MAKE)" ]; then \
+	  echo "📥 Fetching datum-cloud/test-infra@$(TEST_INFRA_TAG)…"; \
+	  git clone --depth 1 --branch $(TEST_INFRA_TAG) \
+	    https://github.com/datum-cloud/test-infra.git \
+	    "$(TEST_INFRA_DIR)/test-infra"; \
+	fi
+# ------------------------------------------------------------
+# bootstrap Kind + Flux + cert-manager (+ CSI) + Kyverno
+# ------------------------------------------------------------
+.PHONY: kind-bootstrap
+kind-bootstrap: fetch-test-infra
+	@$(MAKE) -C $(TEST_INFRA_DIR)/test-infra \
+	  cluster-up \
+	  CLUSTER_NAME=$(CLUSTER_NAME) \
+	  WAIT_TIMEOUT=$(WAIT_TIMEOUT)
+
 # TODO(user): To use a different vendor for e2e tests, modify the setup under 'tests/e2e'.
 # The default setup assumes Kind is pre-installed and builds/loads the Manager Docker image locally.
 # CertManager is installed by default; skip with:
 # - CERT_MANAGER_INSTALL_SKIP=true
 .PHONY: test-e2e
-test-e2e: manifests generate fmt vet docker-build chainsaw ## Run the e2e tests. Expected an isolated environment using Kind.
+test-e2e: kustomize manifests generate fmt vet docker-build chainsaw ## Run the e2e tests. Expected an isolated environment using Kind.
 	@command -v $(KIND) >/dev/null 2>&1 || { \
 		echo "Kind is not installed. Please install Kind manually."; \
 		exit 1; \
@@ -76,20 +106,12 @@ test-e2e: manifests generate fmt vet docker-build chainsaw ## Run the e2e tests.
 		exit 1; \
 	}
 	$(KIND) load docker-image ${IMG} --name $(CLUSTER_NAME)
-	"$(KUSTOMIZE)" build config/platform | $(KUBECTL) apply --server-side --wait=true -f -
-	@echo "⏳ Waiting for platform HelmReleases to be ready..."
-	@$(KUBECTL) wait --for=condition=Ready helmrelease/cert-manager -n cert-manager --timeout=240s
-	@$(KUBECTL) wait --for=condition=Ready helmrelease/cert-manager-csi-driver -n cert-manager --timeout=240s
 	@echo "🔧 Deploying application dependencies..."
 	"$(KUSTOMIZE)" build config/dependencies | $(KUBECTL) apply --server-side --wait=true -f -
 	@echo "⏳ Waiting for dependency HelmReleases to be ready..."
 	@$(KUBECTL) wait --for=condition=Ready helmrelease/openfga -n openfga-system --timeout=240s
 	@echo "🛠️ Deploying application components..."
 	"$(KUSTOMIZE)" build config/environments/testing | $(KUBECTL) apply --server-side --wait=true -f -
-	@echo "Waiting for cert-manager components to be ready..."
-	@kubectl wait --for=condition=Available deployment cert-manager -n cert-manager --timeout=300s
-	@kubectl wait --for=condition=Available deployment cert-manager-webhook -n cert-manager --timeout=300s
-	@kubectl wait --for=condition=Available deployment cert-manager-cainjector -n cert-manager --timeout=300s
 	@echo "Waiting for CA certificate to be ready..."
 	@kubectl wait --for=condition=Ready certificate auth-provider-openfga-test-ca -n cert-manager --timeout=300s
 	@echo "Waiting for ClusterIssuers to be ready..."
@@ -191,35 +213,10 @@ undeploy: kustomize ## Undeploy controller from the K8s cluster specified in ~/.
 
 ##@ Kind Cluster Management
 
-CLUSTER_NAME ?= auth-provider-openfga
-
 .PHONY: kind-create
-kind-create: ## Create a new kind cluster with FluxCD installed.
-	@echo "Creating kind cluster: $(CLUSTER_NAME)"
-	@if $(KIND) get clusters | grep -q "^$(CLUSTER_NAME)$$"; then \
-		echo "Kind cluster '$(CLUSTER_NAME)' already exists"; \
-	else \
-		echo "Creating kind cluster using config/kind/cluster-config.yaml..."; \
-		$(KIND) create cluster --name $(CLUSTER_NAME) --config config/kind/cluster-config.yaml || exit 1; \
-		echo "Kind cluster '$(CLUSTER_NAME)' created successfully"; \
-	fi
-	@echo "Waiting for cluster to be ready..."
-	@$(KUBECTL) wait --for=condition=Ready nodes --all --timeout=300s
-	@echo "Installing Flux..."
-	@test -f "$(FLUX)" || { \
-		echo "Installing Flux CLI..."; \
-		mkdir -p "$(LOCALBIN)"; \
-		FLUX_VERSION=$$(curl -s https://api.github.com/repos/fluxcd/flux2/releases/latest | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/'); \
-		OS=$$(uname -s | tr '[:upper:]' '[:lower:]'); \
-		ARCH=$$(uname -m); \
-		case $$ARCH in x86_64) ARCH="amd64";; arm64|aarch64) ARCH="arm64";; esac; \
-		curl -sL "https://github.com/fluxcd/flux2/releases/download/$${FLUX_VERSION}/flux_$${FLUX_VERSION#v}_$${OS}_$${ARCH}.tar.gz" | tar xz -C "$(LOCALBIN)" flux; \
-		chmod +x "$(FLUX)"; \
-	}
-	@"$(FLUX)" install
-	@$(KUBECTL) wait --for=condition=Ready pods --all -n flux-system --timeout=300s
+kind-create: kind-bootstrap ## Create a new kind cluster with FluxCD installed.
 	@echo "Kind cluster '$(CLUSTER_NAME)' is ready with FluxCD installed!"
-	@echo "Infrastructure (cert-manager, etc.) will be deployed via Flux when you run 'make dev-deploy'"
+	@echo "Infrastructure will be deployed via Flux when you run 'make dev-deploy'"
 
 .PHONY: kind-delete
 kind-delete: ## Delete the kind cluster.
@@ -288,15 +285,6 @@ dev-setup: dev-check-prereqs ## Setup complete development environment
 	@echo "  make dev-forward-metrics # Access metrics at localhost:8080"
 	@echo "  make help               # View all available commands"
 
-.PHONY: platform-deploy
-platform-deploy: kustomize ## Deploy platform-level cluster infrastructure
-	@echo "🏗️ Deploying platform infrastructure (cert-manager, etc.)..."
-	"$(KUSTOMIZE)" build config/platform | $(KUBECTL) apply --server-side --wait=true -f -
-	@echo "⏳ Waiting for platform services to be ready..."
-	@$(KUBECTL) wait --for=condition=Ready helmrelease/cert-manager -n cert-manager --timeout=240s
-	@$(KUBECTL) wait --for=condition=Ready helmrelease/cert-manager-csi-driver -n cert-manager --timeout=240s
-	@echo "✅ Platform infrastructure deployed successfully!"
-
 .PHONY: dependencies-deploy
 dependencies-deploy: kustomize ## Deploy application-specific dependencies
 	@echo "📦 Deploying application dependencies (OpenFGA, etc.)..."
@@ -306,7 +294,7 @@ dependencies-deploy: kustomize ## Deploy application-specific dependencies
 	@echo "✅ Application dependencies deployed successfully!"
 
 .PHONY: infrastructure-deploy
-infrastructure-deploy: platform-deploy dependencies-deploy ## Deploy all infrastructure (platform + dependencies)
+infrastructure-deploy: dependencies-deploy ## Deploy all infrastructure (dependencies)
 	@echo "✅ Complete infrastructure deployment finished!"
 
 .PHONY: dev-deploy
@@ -319,8 +307,8 @@ dev-deploy: manifests generate docker-build kind-load-image infrastructure-deplo
 	@echo "✅ Development environment deployed successfully!"
 
 .PHONY: dev-deploy-fast
-dev-deploy-fast: manifests generate docker-build kind-load-image dependencies-deploy ## Deploy app quickly (assumes platform exists)
-	@echo "🚀 Fast deployment (skipping platform setup)..."
+dev-deploy-fast: manifests generate docker-build kind-load-image dependencies-deploy ## Deploy app quickly 
+	@echo "🚀 Fast deployment..."
 	cd config/base/services/controller-manager && "$(KUSTOMIZE)" edit set image auth-provider-openfga=${IMG}
 	"$(KUSTOMIZE)" build config/environments/local-development | $(KUBECTL) apply --server-side --wait=true -f -
 	@echo "⏳ Waiting for application deployments to be ready..."
@@ -460,8 +448,6 @@ validate-local-dev: kustomize ## Validate local development configuration
 .PHONY: validate-configs
 validate-configs: validate-local-dev ## Validate all configurations
 	@echo "🔍 Validating core configurations..."
-	@echo "Platform configuration:"
-	@"$(KUSTOMIZE)" build config/platform > /dev/null && echo "✅ Platform config builds successfully"
 	@echo "Dependencies configuration:"
 	@"$(KUSTOMIZE)" build config/dependencies > /dev/null && echo "✅ Dependencies config builds successfully"
 	@echo "Base configuration:"

@@ -94,16 +94,16 @@ jobs:
         run: |
           TAG=$(echo '${{ needs.build.outputs.image }}' | head -n1)
           docker pull "$TAG"
-          docker tag "$TAG" auth-provider-openfga:test   # STEP that used to be inline
+          docker tag "$TAG" auth-provider-openfga:test
 
       - name: Bootstrap KIND test cluster
-        uses: datum-cloud/test-infra/.github/actions/kind-bootstrap@v0.0.1
+        uses: datum-cloud/test-infra/.github/actions/kind-bootstrap@v0.1
         with:
           cluster_name: auth-provider-openfga         # optional override
           wait_timeout: "300s"                         # optional override
           images: |
-            ${{ needs.build.outputs.image }}          # registry tag from build job
-            auth-provider-openfga:test                # second tag after re-tagging
+            ${{ needs.build.outputs.image }}          
+            auth-provider-openfga:test               
 
       - name: Deploy application dependencies via Flux
         run: |
