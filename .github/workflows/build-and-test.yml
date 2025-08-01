@@ -90,6 +90,12 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Prepare local alias tag
+        run: |
+          TAG=$(echo '${{ needs.build.outputs.image }}' | head -n1)
+          docker pull "$TAG"
+          docker tag "$TAG" auth-provider-openfga:test   # STEP that used to be inline
+
       - name: Bootstrap KIND test cluster
         uses: datum-cloud/test-infra/.github/actions/kind-bootstrap@v0.0.1
         with:
