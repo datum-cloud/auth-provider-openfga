@@ -1,5 +1,5 @@
 # Image URL to use all building/pushing image targets
-IMG ?= auth-provider-openfga:latest
+IMG ?= auth-provider-openfga:dev
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -300,7 +300,6 @@ infrastructure-deploy: dependencies-deploy ## Deploy all infrastructure (depende
 .PHONY: dev-deploy
 dev-deploy: manifests generate docker-build kind-load-image infrastructure-deploy ## Deploy to development environment
 	@echo "🚀 Deploying application to development environment..."
-	cd config/base/services/controller-manager && "$(KUSTOMIZE)" edit set image auth-provider-openfga=${IMG}
 	"$(KUSTOMIZE)" build config/environments/local-development | $(KUBECTL) apply --server-side --wait=true -f -
 	@echo "⏳ Waiting for application deployments to be ready..."
 	@$(KUBECTL) wait --for=condition=Available deployment --all -n auth-provider-openfga-system --timeout=180s
@@ -309,7 +308,6 @@ dev-deploy: manifests generate docker-build kind-load-image infrastructure-deplo
 .PHONY: dev-deploy-fast
 dev-deploy-fast: manifests generate docker-build kind-load-image dependencies-deploy ## Deploy app quickly 
 	@echo "🚀 Fast deployment..."
-	cd config/base/services/controller-manager && "$(KUSTOMIZE)" edit set image auth-provider-openfga=${IMG}
 	"$(KUSTOMIZE)" build config/environments/local-development | $(KUBECTL) apply --server-side --wait=true -f -
 	@echo "⏳ Waiting for application deployments to be ready..."
 	@$(KUBECTL) wait --for=condition=Available deployment --all -n auth-provider-openfga-system --timeout=180s
