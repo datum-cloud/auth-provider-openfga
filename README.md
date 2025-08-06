@@ -77,3 +77,12 @@ make test               # Run tests
 ├── cmd/                  # CLI entrypoints (manager, webhook)
 └── test/                 # E2E tests
 ```
+
+## Quick Contributing
+
+1. `make dev-setup` - Set up environment
+2. Make your changes
+3. `IMG=auth-provider-openfga:dev make test && make test-e2e` - Verify changes
+4. Submit PR
+
+For detailed guidelines, see [Contributing Guide](docs/contributing.md).

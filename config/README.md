@@ -6,9 +6,6 @@ This directory contains a layered configuration structure that separates concern
 
 ```
 config/
-├── platform/                      # Cluster-wide infrastructure
-│   ├── cert-manager/              # TLS certificate management for entire cluster
-│   └── kustomization.yaml         # Platform services composition
 ├── dependencies/                  # Application-specific infrastructure
 │   ├── openfga/                   # Authorization service (app-specific)
 │   └── kustomization.yaml         # App dependencies composition
@@ -21,31 +18,39 @@ config/
 │   ├── testing/                   # CI/E2E testing
 │   └── production-example/        # Production example (for reference)
 ├── components/                    # Optional Kustomize components
-│   ├── tls-certs/                 # TLS certificate configuration
-│   ├── prometheus-monitoring/     # Metrics and monitoring
-│   └── network-policies/          # Network security policies
-└── infrastructure/                # Convenience wrapper (platform + dependencies)
-    └── kustomization.yaml         # Combined infrastructure
+    ├── tls-certs/                 # TLS certificate configuration
+    ├── prometheus-monitoring/     # Metrics and monitoring
+    └── network-policies/          # Network security policies
+
 ```
 
 ## Deployment Layers
 
-### 1. Platform Layer (`platform/`)
+### 1. Platform Bootstrap — centralized **datum-cloud/test-infra**
 
-> [!NOTE]
-> This layer will eventually be replaced by a centralized platform layer that
-> enables sharing test infrastructure across all applications.
+**Purpose**   
+Spin-up a fully-featured testing cluster in minutes, identical for every repo.
 
-**Purpose**: Cluster-wide services that support multiple applications
-**Managed by**: Cluster administrators
-**Frequency**: Once per cluster, rarely updated
+| Component | Delivered by `test-infra` | Notes |
+|-----------|---------------------------|-------|
+| Kubernetes (Kind) | `make cluster-up` | Single-node Kind cluster on the CI runner |
+| Flux CD (v2) | built-in | Installs its own CRDs & controllers |
+| cert-manager v1 + CSI driver | Flux HelmReleases | CRDs + controllers, CSI DaemonSet |
+| Kyverno | Flux-managed | Admission, background, cleanup, reports controllers |
 
-Services include:
-- cert-manager (TLS certificate management)
-- Cluster monitoring (if added)
-- Ingress controllers (if added)
+**Managed by:** the *test-infra* maintainers – **zero** per-application YAML.  
+**Frequency:** created & destroyed per-job (ephemeral).
 
-**Deployment**: `make platform-deploy`
+#### How to use it in this repo
+
+```bash
+# bootstrap cluster, Flux, cert-manager (+ CSI), Kyverno
+make kind-bootstrap           # wrapper that pulls test-infra@v0.1 and runs `make cluster-up`
+```
+
+# (optional) load your own image(s)
+docker pull ghcr.io/…/my-app:<tag>
+kind load docker-image ghcr.io/…/my-app:<tag> --name $(CLUSTER_NAME)
 
 ### 2. Dependencies Layer (`dependencies/`)
 **Purpose**: External services required by this specific application
@@ -158,12 +163,13 @@ Provides network security isolation and access control.
 
 ### Quick Start (All-in-One)
 ```bash
-make dev-deploy          # Platform + Dependencies + Application
+make kind-create         # Bootstrap cluster and platform infrastructure
+make dev-deploy          # Dependencies + Application
 ```
 
 ### Layered Deployment
 ```bash
-make platform-deploy     # 1. Deploy cluster infrastructure
+make kind-create         # 1. Deploy cluster and platform infrastructure
 make dependencies-deploy # 2. Deploy app dependencies
 make dev-deploy-fast     # 3. Deploy application only
 ```
