@@ -20,7 +20,7 @@ authorization engine to answer complex business questions like:
 
 ### Key Capabilities
 
-1. **Business Resource Authorization** - Protects Milo's resources using
+1. **Resource Authorization** - Protects Milo's resources using
    relationship-based policies
 2. **Organizational Hierarchies** - Supports complex business structures with
    permission inheritance across organizations and projects
@@ -31,9 +31,9 @@ authorization engine to answer complex business questions like:
 
 ## How It Works
 
-1. **Business Resource Registration**: `ProtectedResource` CRDs define what
-   resources should be protected and what permissions are available (view, edit,
-   delete, manage)
+1. **Resource Registration**: `ProtectedResource` CRDs define what resources
+   should be protected and what permissions are available (view, edit, delete,
+   manage)
 2. **Authorization Model Sync**: The system automatically builds OpenFGA type
    definitions based on registered resources
 3. **Role Management**: `Role` CRDs define roles (Sales Rep, Account Manager)
@@ -45,22 +45,10 @@ authorization engine to answer complex business questions like:
 6. **Inheritance Support**: Resources inherit permissions through organizational
    hierarchies (Organization → Project → Customer)
 
-## 🚀 Quick Start
+Review the [Architecture](./docs/architecture.md) documentation for more
+information.
 
-### DevContainer (Recommended)
-```bash
-# Open in VSCode, accept "Reopen in Container" prompt, then:
-make dev-setup
-```
-
-### Local Development
-```bash
-git clone <repository>
-cd auth-provider-openfga
-make dev-setup    # Requires Docker + Go + Make
-```
-
-## 🛠️ Essential Commands
+## Essential Commands
 
 ```bash
 make dev-setup          # Complete environment setup
@@ -70,33 +58,27 @@ make dev-logs           # View application logs
 make test               # Run tests
 ```
 
-## 📚 Documentation
+## Documentation
 
-| Document | Purpose |
-|----------|---------|
-| **[Development Guide](docs/development.md)** | Complete setup, workflow, and troubleshooting |
-| **[Architecture Guide](docs/architecture.md)** | System design, components, and data flow |
-| **[API Reference](docs/api.md)** | Custom resources and webhook specifications |
-| **[Contributing Guide](docs/contributing.md)** | Code standards, PR process, and testing |
+- **[Architecture Guide](docs/architecture.md)** - System design, components,
+  and data flow
+- **[OpenFGA Integration](docs/openfga-integration.md)** - OpenFGA authorization
+  model and implementation details
 
-## 🏗️ Project Structure
+## Project Structure
 
 ```
 ├── config/               # Kubernetes manifests and Kustomize overlays
-│   ├── default/          # Base application configuration
-│   ├── bootstrap/        # Infrastructure (cert-manager, OpenFGA)
-│   ├── authz-webhook/    # Authorization webhook deployment
-│   └── local-dev/        # Development environment
+├── docs/                 # Detailed documentation
 ├── internal/             # Application logic
 │   ├── controller/       # Kubernetes controllers
 │   ├── webhook/          # Authorization webhook servers
 │   └── openfga/          # OpenFGA integration layer
 ├── cmd/                  # CLI entrypoints (manager, webhook)
-├── test/                 # E2E tests
-└── docs/                 # Detailed documentation
+└── test/                 # E2E tests
 ```
 
-## 🤝 Quick Contributing
+## Quick Contributing
 
 1. `make dev-setup` - Set up environment
 2. Make your changes
