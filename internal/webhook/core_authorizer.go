@@ -381,7 +381,7 @@ func (o *CoreControlPlaneAuthorizer) buildProjectCheckRequest(ctx context.Contex
 		StoreId: o.FGAStoreID,
 		TupleKey: &openfgav1.CheckRequestTupleKey{
 			User:     o.buildUser(attributes),
-			Relation: o.buildRelation(attributes),
+			Relation: o.buildProjectRelation(attributes),
 			Object:   projectResource,
 		},
 	}
@@ -410,4 +410,25 @@ func (o *CoreControlPlaneAuthorizer) extractProjectName(attributes authorizer.At
 	}
 
 	return parentName[0], nil
+}
+
+// buildProjectRelation builds the relation for project-scoped authorization
+// This applies the same service name mapping as the project webhook
+func (o *CoreControlPlaneAuthorizer) buildProjectRelation(attributes authorizer.Attributes) string {
+	// Get service name from API group
+	serviceName := attributes.GetAPIGroup()
+
+	// Apply service name mapping for core Kubernetes API group
+	// Empty APIGroup is used for the core/v1 Kubernetes API Group
+	if serviceName == "" {
+		serviceName = "core.miloapis.com"
+	}
+
+	// Build permission in the format expected by OpenFGA: service/resource.verb
+	verb := attributes.GetVerb()
+	resource := attributes.GetResource()
+	permission := fmt.Sprintf("%s/%s.%s", serviceName, resource, verb)
+
+	// Hash the permission to match the OpenFGA model
+	return openfga.HashPermission(permission)
 }
