@@ -77,6 +77,12 @@ func (o *CoreControlPlaneAuthorizer) validatePermissionExists(ctx context.Contex
 	}
 
 	apiGroup := attributes.GetAPIGroup()
+
+	// Apply service name mapping for core Kubernetes API when in project context
+	if o.isProjectParent(attributes) && apiGroup == "" {
+		apiGroup = "core.miloapis.com"
+	}
+
 	resource := attributes.GetResource()
 
 	for _, pr := range protectedResourceList.Items {
@@ -97,6 +103,12 @@ func (o *CoreControlPlaneAuthorizer) validatePermissionExists(ctx context.Contex
 // buildPermissionString constructs the permission string in the format: service/resource.verb
 func (o *CoreControlPlaneAuthorizer) buildPermissionString(attributes authorizer.Attributes) string {
 	apiGroup := attributes.GetAPIGroup()
+
+	// Apply service name mapping for core Kubernetes API when in project context
+	if o.isProjectParent(attributes) && apiGroup == "" {
+		apiGroup = "core.miloapis.com"
+	}
+
 	resource := attributes.GetResource()
 	verb := attributes.GetVerb()
 	return fmt.Sprintf("%s/%s.%s", apiGroup, resource, verb)
