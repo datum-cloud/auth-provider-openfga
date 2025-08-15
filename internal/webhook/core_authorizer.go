@@ -147,6 +147,11 @@ func (o *CoreControlPlaneAuthorizer) buildParentResourceType(attributes authoriz
 }
 
 func (o *CoreControlPlaneAuthorizer) buildCheckRequest(ctx context.Context, attributes authorizer.Attributes) (*openfgav1.CheckRequest, error) {
+	// Check if the parent context is a Project - if so, use project-based authorization
+	if o.isProjectParent(attributes) {
+		return o.buildProjectCheckRequest(ctx, attributes)
+	}
+
 	// First, get the ProtectedResource to understand the correct resource structure
 	protectedResource, err := o.getProtectedResource(ctx, attributes)
 	if err != nil {
@@ -340,4 +345,69 @@ func (o *CoreControlPlaneAuthorizer) isParentResourceRegistered(protectedResourc
 	}
 
 	return false
+}
+
+// isProjectParent checks if the parent context is a Project resource
+func (o *CoreControlPlaneAuthorizer) isProjectParent(attributes authorizer.Attributes) bool {
+	extra := attributes.GetUser().GetExtra()
+
+	parentAPIGroup, apiGroupOK := extra[iamv1alpha1.ParentAPIGroupExtraKey]
+	parentKind, kindOK := extra[iamv1alpha1.ParentKindExtraKey]
+
+	if !apiGroupOK || !kindOK {
+		return false
+	}
+
+	if len(parentAPIGroup) == 1 && len(parentKind) == 1 {
+		return parentAPIGroup[0] == "resourcemanager.miloapis.com" && parentKind[0] == "Project"
+	}
+
+	return false
+}
+
+// buildProjectCheckRequest handles authorization when the parent context is a Project
+func (o *CoreControlPlaneAuthorizer) buildProjectCheckRequest(ctx context.Context, attributes authorizer.Attributes) (*openfgav1.CheckRequest, error) {
+	// Extract project name from parent context
+	projectName, err := o.extractProjectName(attributes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to extract project name: %w", err)
+	}
+
+	// Build the project resource identifier
+	projectResource := fmt.Sprintf("resourcemanager.miloapis.com/Project:%s", projectName)
+
+	// Build the check request using project as the target resource
+	checkRequest := &openfgav1.CheckRequest{
+		StoreId: o.FGAStoreID,
+		TupleKey: &openfgav1.CheckRequestTupleKey{
+			User:     o.buildUser(attributes),
+			Relation: o.buildRelation(attributes),
+			Object:   projectResource,
+		},
+	}
+
+	// Build all contextual tuples (root binding + groups) for project scope
+	rootResourceType := "resourcemanager.miloapis.com/Project"
+	contextualTuples := buildAllContextualTuples(attributes, rootResourceType, projectResource)
+
+	// Add contextual tuples to the check request if any exist
+	if len(contextualTuples) > 0 {
+		checkRequest.ContextualTuples = &openfgav1.ContextualTupleKeys{
+			TupleKeys: contextualTuples,
+		}
+	}
+
+	return checkRequest, nil
+}
+
+// extractProjectName extracts the project name from the parent context
+func (o *CoreControlPlaneAuthorizer) extractProjectName(attributes authorizer.Attributes) (string, error) {
+	extra := attributes.GetUser().GetExtra()
+
+	parentName, nameOK := extra[iamv1alpha1.ParentNameExtraKey]
+	if !nameOK || len(parentName) != 1 {
+		return "", fmt.Errorf("parent project name not found in extra data")
+	}
+
+	return parentName[0], nil
 }

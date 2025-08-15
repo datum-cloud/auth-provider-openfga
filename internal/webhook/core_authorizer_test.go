@@ -103,27 +103,28 @@ func TestCoreControlPlaneAuthorizer_Authorize_Integration(t *testing.T) {
 				}
 			},
 			fgaCheckFunc: func(t *testing.T, req *openfgav1.CheckRequest) (*openfgav1.CheckResponse, error) {
-				assert.Equal(t, "compute.miloapis.com/Workload:wkld-123", req.TupleKey.Object)
+				// When project is parent, we authorize against the project itself
+				assert.Equal(t, "resourcemanager.miloapis.com/Project:proj-xyz", req.TupleKey.Object)
 				require.NotNil(t, req.ContextualTuples)
-				require.Len(t, req.ContextualTuples.TupleKeys, 2)
+				require.Len(t, req.ContextualTuples.TupleKeys, 1) // Only root binding tuple, no parent tuple needed
 
-				// Find parent tuple
-				parentTupleFound := false
+				// Check for root binding tuple
+				rootBindingFound := false
 				for _, tuple := range req.ContextualTuples.TupleKeys {
-					if tuple.Relation == "parent" {
-						assert.Equal(t, "resourcemanager.miloapis.com/Project:proj-xyz", tuple.User)
-						assert.Equal(t, "compute.miloapis.com/Workload:wkld-123", tuple.Object)
-						parentTupleFound = true
+					if tuple.Relation == "iam.miloapis.com/RootBinding" {
+						assert.Equal(t, "iam.miloapis.com/Root:resourcemanager.miloapis.com/Project", tuple.User)
+						assert.Equal(t, "resourcemanager.miloapis.com/Project:proj-xyz", tuple.Object)
+						rootBindingFound = true
 					}
 				}
-				assert.True(t, parentTupleFound, "parent contextual tuple not found")
+				assert.True(t, rootBindingFound, "root binding contextual tuple not found")
 				return &openfgav1.CheckResponse{Allowed: true}, nil
 			},
 			expectedDecision:   authorizer.DecisionAllow,
 			expectFgaCheckCall: true,
 		},
 		{
-			name: "denied collection create with parent context",
+			name: "denied collection create with project parent context",
 			attributes: &mockAttributes{
 				apiGroup: "compute.miloapis.com",
 				resource: "workloads",
