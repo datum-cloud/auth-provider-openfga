@@ -8,7 +8,6 @@ import (
 )
 
 // buildGroupContextualTuples creates contextual tuples for user's group memberships
-// This is shared between core and project authorizers
 func buildGroupContextualTuples(attributes authorizer.Attributes) []*openfgav1.TupleKey {
 	tuples := make([]*openfgav1.TupleKey, 0, len(attributes.GetUser().GetGroups()))
 
@@ -33,7 +32,6 @@ func buildGroupContextualTuples(attributes authorizer.Attributes) []*openfgav1.T
 }
 
 // buildRootBindingContextualTuple creates a root binding contextual tuple
-// This is shared between core and project authorizers
 func buildRootBindingContextualTuple(rootResourceType, targetResource string) *openfgav1.TupleKey {
 	return &openfgav1.TupleKey{
 		User:     "iam.miloapis.com/Root:" + rootResourceType,
@@ -43,7 +41,6 @@ func buildRootBindingContextualTuple(rootResourceType, targetResource string) *o
 }
 
 // buildAllContextualTuples creates all contextual tuples (root binding + groups)
-// This is shared between core and project authorizers
 func buildAllContextualTuples(attributes authorizer.Attributes, rootResourceType, targetResource string) []*openfgav1.TupleKey {
 	var contextualTuples []*openfgav1.TupleKey
 

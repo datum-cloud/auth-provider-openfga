@@ -104,14 +104,6 @@ func (wh *Webhook) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if projectID := r.PathValue("project"); projectID != "" {
-		projectName := "projects/" + projectID
-		if req.Spec.Extra == nil {
-			req.Spec.Extra = map[string]authorizationv1.ExtraValue{}
-		}
-		req.Spec.Extra[ProjectExtraKey] = []string{projectName}
-	}
-
 	reviewResponse = wh.Handle(ctx, req)
 	if reviewResponse.Status.EvaluationError != "" {
 		slog.ErrorContext(ctx, "evaluation error in webhook", slog.String("error", reviewResponse.Status.EvaluationError))
