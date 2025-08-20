@@ -89,7 +89,7 @@ make test               # Run tests
 │   └── local-dev/        # Development environment
 ├── internal/             # Application logic
 │   ├── controller/       # Kubernetes controllers
-│   ├── webhook/          # Authorization webhook servers
+│   ├── webhook/          # Authorization webhook server
 │   └── openfga/          # OpenFGA integration layer
 ├── cmd/                  # CLI entrypoints (manager, webhook)
 ├── test/                 # E2E tests

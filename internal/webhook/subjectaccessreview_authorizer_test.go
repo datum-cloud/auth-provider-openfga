@@ -3,6 +3,7 @@ package webhook_test
 import (
 	"context"
 	"errors"
+	"net/http"
 	"testing"
 
 	openfgav1 "github.com/openfga/api/proto/openfga/v1"
@@ -59,7 +60,7 @@ func (m *mockK8sClient) List(ctx context.Context, list client.ObjectList, opts .
 	return errors.New("List not implemented")
 }
 
-func TestCoreControlPlaneAuthorizer_Authorize_Integration(t *testing.T) {
+func TestSubjectAccessReviewAuthorizer_Authorize_Integration(t *testing.T) {
 	testCases := []struct {
 		name               string
 		attributes         authorizer.Attributes
@@ -265,7 +266,7 @@ func TestCoreControlPlaneAuthorizer_Authorize_Integration(t *testing.T) {
 				},
 			}
 
-			auth := &webhook.CoreControlPlaneAuthorizer{
+			auth := &webhook.SubjectAccessReviewAuthorizer{
 				FGAClient:  mockFGA,
 				K8sClient:  mockK8s,
 				FGAStoreID: "test_store",
@@ -282,5 +283,109 @@ func TestCoreControlPlaneAuthorizer_Authorize_Integration(t *testing.T) {
 			}
 			assert.Equal(t, tc.expectFgaCheckCall, fgaCheckCalled)
 		})
+	}
+}
+
+// Test our factory functions
+func TestSubjectAccessReviewWebhookFactory(t *testing.T) {
+	t.Run("NewSubjectAccessReviewWebhook creates webhook correctly", func(t *testing.T) {
+		config := webhook.Config{
+			FGAClient:  &mockFGAClient{},
+			FGAStoreID: "test-store",
+			K8sClient:  &mockK8sClient{},
+		}
+
+		w := webhook.NewSubjectAccessReviewWebhook(config)
+		assert.NotNil(t, w)
+	})
+
+	t.Run("RegisterSubjectAccessReviewWebhook registers correctly", func(t *testing.T) {
+		config := webhook.Config{
+			FGAClient:  &mockFGAClient{},
+			FGAStoreID: "test-store",
+			K8sClient:  &mockK8sClient{},
+		}
+
+		registered := false
+		registeredPath := ""
+		mockServer := &mockWebhookServer{
+			registerFunc: func(path string, handler http.Handler) {
+				registered = true
+				registeredPath = path
+			},
+		}
+
+		webhook.RegisterSubjectAccessReviewWebhook(mockServer, config)
+
+		assert.True(t, registered, "webhook should be registered")
+		assert.Equal(t, "/apis/authorization.k8s.io/v1/subjectaccessreviews", registeredPath)
+	})
+}
+
+func TestProjectScopedAuthorization(t *testing.T) {
+	t.Run("project-scoped request uses project authorization logic", func(t *testing.T) {
+		mockFGA := &mockFGAClient{
+			CheckFunc: func(ctx context.Context, req *openfgav1.CheckRequest, opts ...grpc.CallOption) (*openfgav1.CheckResponse, error) {
+				// Verify that project-scoped requests target the project resource
+				assert.Contains(t, req.TupleKey.Object, "resourcemanager.miloapis.com/Project:")
+				return &openfgav1.CheckResponse{Allowed: true}, nil
+			},
+		}
+
+		mockK8s := &mockK8sClient{
+			listFunc: func(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+				l := list.(*iamv1alpha1.ProtectedResourceList)
+				l.Items = []iamv1alpha1.ProtectedResource{
+					{
+						Spec: iamv1alpha1.ProtectedResourceSpec{
+							ServiceRef:  iamv1alpha1.ServiceReference{Name: "core.miloapis.com"},
+							Plural:      "pods",
+							Kind:        "Pod",
+							Permissions: []string{"get"},
+						},
+					},
+				}
+				return nil
+			},
+		}
+
+		auth := &webhook.SubjectAccessReviewAuthorizer{
+			FGAClient:  mockFGA,
+			K8sClient:  mockK8s,
+			FGAStoreID: "test_store",
+		}
+
+		// Create attributes with project parent extra keys
+		attributes := &mockAttributes{
+			apiGroup: "",
+			resource: "pods",
+			name:     "test-pod",
+			verb:     "get",
+			user: &user.DefaultInfo{
+				Name: "test-user",
+				UID:  "user-123",
+				Extra: map[string][]string{
+					iamv1alpha1.ParentAPIGroupExtraKey: {"resourcemanager.miloapis.com"},
+					iamv1alpha1.ParentKindExtraKey:     {"Project"},
+					iamv1alpha1.ParentNameExtraKey:     {"test-project"},
+				},
+			},
+		}
+
+		decision, _, err := auth.Authorize(context.Background(), attributes)
+
+		assert.NoError(t, err)
+		assert.Equal(t, authorizer.DecisionAllow, decision)
+	})
+}
+
+// mockWebhookServer implements the WebhookServer interface for testing
+type mockWebhookServer struct {
+	registerFunc func(path string, handler http.Handler)
+}
+
+func (m *mockWebhookServer) Register(path string, hook http.Handler) {
+	if m.registerFunc != nil {
+		m.registerFunc(path, hook)
 	}
 }
