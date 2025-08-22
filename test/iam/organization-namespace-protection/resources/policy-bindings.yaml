@@ -1,0 +1,18 @@
+---
+apiVersion: iam.miloapis.com/v1alpha1
+kind: PolicyBinding
+metadata:
+  name: acme-admin-binding
+  namespace: iam-system
+spec:
+  subjects:
+    - kind: User
+      name: acme-admin
+      namespace: iam-system
+  roleRef:
+    name: group-admin
+    namespace: iam-system
+  resourceRef:
+    apiGroup: resourcemanager.miloapis.com
+    kind: Organization
+    name: acme

@@ -1,0 +1,13 @@
+---
+apiVersion: iam.miloapis.com/v1alpha1
+kind: Role
+metadata:
+  name: group-admin
+  namespace: iam-system
+spec:
+  permissions:
+    - iam.miloapis.com/groups.list
+    - iam.miloapis.com/groups.get
+    - iam.miloapis.com/groups.create
+    - iam.miloapis.com/groups.update
+    - iam.miloapis.com/groups.delete

@@ -1,0 +1,35 @@
+---
+apiVersion: iam.miloapis.com/v1alpha1
+kind: ProtectedResource
+metadata:
+  name: iam-group
+spec:
+  serviceRef:
+    name: "iam.miloapis.com"
+  kind: Group
+  plural: groups
+  singular: group
+  permissions:
+    - list
+    - get
+    - create
+    - update
+    - delete
+---
+apiVersion: iam.miloapis.com/v1alpha1
+kind: ProtectedResource
+metadata:
+  name: resourcemanager-organization
+spec:
+  serviceRef:
+    name: "resourcemanager.miloapis.com"
+  kind: Organization
+  plural: organizations
+  singular: organization
+  permissions:
+    - list
+    - get
+    - create
+    - update
+    - delete
+    - use

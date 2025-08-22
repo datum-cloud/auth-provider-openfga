@@ -63,12 +63,72 @@ func RegisterSubjectAccessReviewWebhook(server WebhookServer, config Config) {
 	server.Register(SubjectAccessReviewWebhookPath, webhook)
 }
 
+// parentContext represents the parent resource context from user extra data
+type parentContext struct {
+	apiGroup string
+	kind     string
+	name     string
+}
+
 // authorizationContext holds the essential information needed for authorization
 type authorizationContext struct {
-	userUID        string
-	permission     string
-	isProjectScope bool
-	projectName    string
+	userUID       string
+	permission    string
+	parentContext *parentContext
+	namespace     string
+}
+
+// isProjectScope checks if the parent context is a Project resource
+func (ctx *authorizationContext) isProjectScope() bool {
+	return ctx.parentContext != nil &&
+		ctx.parentContext.apiGroup == "resourcemanager.miloapis.com" &&
+		ctx.parentContext.kind == "Project"
+}
+
+// isOrganizationScope checks if the parent context is an Organization resource
+func (ctx *authorizationContext) isOrganizationScope() bool {
+	return ctx.parentContext != nil &&
+		ctx.parentContext.apiGroup == "resourcemanager.miloapis.com" &&
+		ctx.parentContext.kind == "Organization"
+}
+
+// getProjectName returns the project name if in project scope
+func (ctx *authorizationContext) getProjectName() string {
+	if ctx.isProjectScope() {
+		return ctx.parentContext.name
+	}
+	return ""
+}
+
+// getOrganizationName returns the organization name if in organization scope
+func (ctx *authorizationContext) getOrganizationName() string {
+	if ctx.isOrganizationScope() {
+		return ctx.parentContext.name
+	}
+	return ""
+}
+
+// extractParentContext extracts parent resource information from user extra data
+func (o *SubjectAccessReviewAuthorizer) extractParentContext(attributes authorizer.Attributes) *parentContext {
+	extra := attributes.GetUser().GetExtra()
+
+	parentAPIGroup, apiGroupOK := extra[iamv1alpha1.ParentAPIGroupExtraKey]
+	parentKind, kindOK := extra[iamv1alpha1.ParentKindExtraKey]
+	parentName, nameOK := extra[iamv1alpha1.ParentNameExtraKey]
+
+	if !apiGroupOK || !kindOK || !nameOK {
+		return nil
+	}
+
+	if len(parentAPIGroup) == 1 && len(parentKind) == 1 && len(parentName) == 1 {
+		return &parentContext{
+			apiGroup: parentAPIGroup[0],
+			kind:     parentKind[0],
+			name:     parentName[0],
+		}
+	}
+
+	return nil
 }
 
 // Authorize implements authorizer.Authorizer.
@@ -78,6 +138,12 @@ func (o *SubjectAccessReviewAuthorizer) Authorize(ctx context.Context, attribute
 	// Build authorization context
 	authCtx, err := o.buildAuthorizationContext(attributes)
 	if err != nil {
+		return authorizer.DecisionDeny, "", err
+	}
+
+	// Validate organization namespace if organization-scoped
+	if err := o.validateOrganizationNamespace(authCtx, attributes); err != nil {
+		slog.WarnContext(ctx, "organization namespace validation failed", slog.String("error", err.Error()))
 		return authorizer.DecisionDeny, "", err
 	}
 
@@ -103,23 +169,32 @@ func (o *SubjectAccessReviewAuthorizer) buildAuthorizationContext(attributes aut
 	}
 
 	permission := o.buildPermissionString(attributes)
-	isProjectScope := o.isProjectParent(attributes)
-
-	var projectName string
-	if isProjectScope {
-		var err error
-		projectName, err = o.extractProjectName(attributes)
-		if err != nil {
-			return nil, fmt.Errorf("failed to extract project name: %w", err)
-		}
-	}
+	parentContext := o.extractParentContext(attributes)
+	namespace := attributes.GetNamespace()
 
 	return &authorizationContext{
-		userUID:        userUID,
-		permission:     permission,
-		isProjectScope: isProjectScope,
-		projectName:    projectName,
+		userUID:       userUID,
+		permission:    permission,
+		parentContext: parentContext,
+		namespace:     namespace,
 	}, nil
+}
+
+// validateOrganizationNamespace ensures the request namespace matches the organization's namespace
+func (o *SubjectAccessReviewAuthorizer) validateOrganizationNamespace(authCtx *authorizationContext, attributes authorizer.Attributes) error {
+	if !authCtx.isOrganizationScope() {
+		return nil // Not organization-scoped, skip validation
+	}
+
+	requestNamespace := attributes.GetNamespace()
+	expectedNamespace := fmt.Sprintf("organization-%s", authCtx.getOrganizationName())
+
+	if requestNamespace != expectedNamespace {
+		return fmt.Errorf("namespace mismatch: request namespace '%s' does not match organization namespace '%s'",
+			requestNamespace, expectedNamespace)
+	}
+
+	return nil
 }
 
 // validatePermission checks if the requested permission is registered
@@ -170,9 +245,9 @@ func (o *SubjectAccessReviewAuthorizer) buildOpenFGARequest(ctx context.Context,
 	var resource string
 	var contextualTuples []*openfgav1.TupleKey
 
-	if authCtx.isProjectScope {
+	if authCtx.isProjectScope() {
 		// Project-scoped authorization: authorize against the project resource
-		resource = fmt.Sprintf("resourcemanager.miloapis.com/Project:%s", authCtx.projectName)
+		resource = fmt.Sprintf("resourcemanager.miloapis.com/Project:%s", authCtx.getProjectName())
 		rootResourceType := "resourcemanager.miloapis.com/Project"
 		contextualTuples = buildAllContextualTuples(attributes, rootResourceType, resource)
 	} else {
@@ -419,34 +494,4 @@ func (o *SubjectAccessReviewAuthorizer) isParentResourceRegistered(protectedReso
 	}
 
 	return false
-}
-
-// isProjectParent checks if the parent context is a Project resource
-func (o *SubjectAccessReviewAuthorizer) isProjectParent(attributes authorizer.Attributes) bool {
-	extra := attributes.GetUser().GetExtra()
-
-	parentAPIGroup, apiGroupOK := extra[iamv1alpha1.ParentAPIGroupExtraKey]
-	parentKind, kindOK := extra[iamv1alpha1.ParentKindExtraKey]
-
-	if !apiGroupOK || !kindOK {
-		return false
-	}
-
-	if len(parentAPIGroup) == 1 && len(parentKind) == 1 {
-		return parentAPIGroup[0] == "resourcemanager.miloapis.com" && parentKind[0] == "Project"
-	}
-
-	return false
-}
-
-// extractProjectName extracts the project name from the parent context
-func (o *SubjectAccessReviewAuthorizer) extractProjectName(attributes authorizer.Attributes) (string, error) {
-	extra := attributes.GetUser().GetExtra()
-
-	parentName, nameOK := extra[iamv1alpha1.ParentNameExtraKey]
-	if !nameOK || len(parentName) != 1 {
-		return "", fmt.Errorf("parent project name not found in extra data")
-	}
-
-	return parentName[0], nil
 }
