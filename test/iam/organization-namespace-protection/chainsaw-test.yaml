@@ -32,15 +32,17 @@ spec:
         - apply:
             file: resources/organizations.yaml
         - create:
-            apiVersion: v1
-            kind: Namespace
-            metadata:
-              name: organization-acme
+            resource:
+              apiVersion: v1
+              kind: Namespace
+              metadata:
+                name: organization-acme
         - create:
-            apiVersion: v1
-            kind: Namespace
-            metadata:
-              name: organization-contoso
+            resource:
+              apiVersion: v1
+              kind: Namespace
+              metadata:
+                name: organization-contoso
 
     # Step 3: Create users and roles
     - try:
@@ -80,60 +82,61 @@ spec:
             content: |
               sleep 5  # Allow time for OpenFGA to sync
         - create:
-            apiVersion: v1
-            kind: Pod
-            metadata:
-              name: test-org-namespace-allowed
-              namespace: default
-            spec:
-              restartPolicy: Never
-              containers:
-                - name: curl
-                  image: curlimages/curl:latest
-                  command: ["/bin/sh", "-c"]
-                  args:
-                    - |
-                      response=$(curl -ksS https://auth-provider-openfga-authz-webhook.auth-provider-openfga-system.svc.cluster.local:8090/apis/authorization.k8s.io/v1/subjectaccessreviews \
-                        -H "Content-Type: application/json" \
-                        -d @- << EOF
-                      {
-                        "apiVersion": "authorization.k8s.io/v1",
-                        "kind": "SubjectAccessReview",
-                        "spec": {
-                          "user": "acme-admin",
-                          "uid": "acme-admin-uid",
-                          "extra": {
-                            "iam.miloapis.com/parent-api-group": ["resourcemanager.miloapis.com"],
-                            "iam.miloapis.com/parent-kind": ["Organization"],
-                            "iam.miloapis.com/parent-name": ["acme"]
-                          },
-                          "groups": ["system:authenticated"],
-                          "resourceAttributes": {
-                            "namespace": "organization-acme",
-                            "group": "iam.miloapis.com",
-                            "resource": "groups",
-                            "version": "v1alpha1",
-                            "verb": "list"
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: test-org-namespace-allowed
+                namespace: default
+              spec:
+                restartPolicy: Never
+                containers:
+                  - name: curl
+                    image: curlimages/curl:latest
+                    command: ["/bin/sh", "-c"]
+                    args:
+                      - |
+                        response=$(curl -ksS https://auth-provider-openfga-authz-webhook.auth-provider-openfga-system.svc.cluster.local:8090/apis/authorization.k8s.io/v1/subjectaccessreviews \
+                          -H "Content-Type: application/json" \
+                          -d @- << EOF
+                        {
+                          "apiVersion": "authorization.k8s.io/v1",
+                          "kind": "SubjectAccessReview",
+                          "spec": {
+                            "user": "acme-admin",
+                            "uid": "acme-admin-uid",
+                            "extra": {
+                              "iam.miloapis.com/parent-api-group": ["resourcemanager.miloapis.com"],
+                              "iam.miloapis.com/parent-kind": ["Organization"],
+                              "iam.miloapis.com/parent-name": ["acme"]
+                            },
+                            "groups": ["system:authenticated"],
+                            "resourceAttributes": {
+                              "namespace": "organization-acme",
+                              "group": "iam.miloapis.com",
+                              "resource": "groups",
+                              "version": "v1alpha1",
+                              "verb": "list"
+                            }
                           }
                         }
-                      }
-                      EOF
-                      )
-                      echo "Webhook response: $response"
-                      # Check if we got a valid SubjectAccessReview response
-                      if ! echo "$response" | grep -q '"kind":"SubjectAccessReview"'; then
-                        echo "Test failed - invalid response format"
-                        exit 1
-                      fi
-                      # Check if the request was allowed
-                      if echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*true'; then
-                        echo "Test passed - access allowed with correct namespace"
-                        exit 0
-                      else
-                        echo "Test failed - access denied with correct namespace"
-                        echo "Response: $response"
-                        exit 1
-                      fi
+                        EOF
+                        )
+                        echo "Webhook response: $response"
+                        # Check if we got a valid SubjectAccessReview response
+                        if ! echo "$response" | grep -q '"kind":"SubjectAccessReview"'; then
+                          echo "Test failed - invalid response format"
+                          exit 1
+                        fi
+                        # Check if the request was allowed
+                        if echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*true'; then
+                          echo "Test passed - access allowed with correct namespace"
+                          exit 0
+                        else
+                          echo "Test failed - access denied with correct namespace"
+                          echo "Response: $response"
+                          exit 1
+                        fi
         - wait:
             apiVersion: v1
             kind: Pod
@@ -142,71 +145,70 @@ spec:
             timeout: 1m
             for:
               condition:
-                type: Ready
-                status: "False"
-              jsonPath: .status.phase
-              value: Succeeded
+                name: Complete
+                value: "true"
 
     # Step 6: Test denied access - wrong namespace
     - try:
         - create:
-            apiVersion: v1
-            kind: Pod
-            metadata:
-              name: test-org-namespace-denied
-              namespace: default
-            spec:
-              restartPolicy: Never
-              containers:
-                - name: curl
-                  image: curlimages/curl:latest
-                  command: ["/bin/sh", "-c"]
-                  args:
-                    - |
-                      response=$(curl -ksS https://auth-provider-openfga-authz-webhook.auth-provider-openfga-system.svc.cluster.local:8090/apis/authorization.k8s.io/v1/subjectaccessreviews \
-                        -H "Content-Type: application/json" \
-                        -d @- << EOF
-                      {
-                        "apiVersion": "authorization.k8s.io/v1",
-                        "kind": "SubjectAccessReview",
-                        "spec": {
-                          "user": "acme-admin",
-                          "uid": "acme-admin-uid",
-                          "extra": {
-                            "iam.miloapis.com/parent-api-group": ["resourcemanager.miloapis.com"],
-                            "iam.miloapis.com/parent-kind": ["Organization"],
-                            "iam.miloapis.com/parent-name": ["acme"]
-                          },
-                          "groups": ["system:authenticated"],
-                          "resourceAttributes": {
-                            "namespace": "organization-contoso",
-                            "group": "iam.miloapis.com",
-                            "resource": "groups",
-                            "version": "v1alpha1",
-                            "verb": "list"
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: test-org-namespace-denied
+                namespace: default
+              spec:
+                restartPolicy: Never
+                containers:
+                  - name: curl
+                    image: curlimages/curl:latest
+                    command: ["/bin/sh", "-c"]
+                    args:
+                      - |
+                        response=$(curl -ksS https://auth-provider-openfga-authz-webhook.auth-provider-openfga-system.svc.cluster.local:8090/apis/authorization.k8s.io/v1/subjectaccessreviews \
+                          -H "Content-Type: application/json" \
+                          -d @- << EOF
+                        {
+                          "apiVersion": "authorization.k8s.io/v1",
+                          "kind": "SubjectAccessReview",
+                          "spec": {
+                            "user": "acme-admin",
+                            "uid": "acme-admin-uid",
+                            "extra": {
+                              "iam.miloapis.com/parent-api-group": ["resourcemanager.miloapis.com"],
+                              "iam.miloapis.com/parent-kind": ["Organization"],
+                              "iam.miloapis.com/parent-name": ["acme"]
+                            },
+                            "groups": ["system:authenticated"],
+                            "resourceAttributes": {
+                              "namespace": "organization-contoso",
+                              "group": "iam.miloapis.com",
+                              "resource": "groups",
+                              "version": "v1alpha1",
+                              "verb": "list"
+                            }
                           }
                         }
-                      }
-                      EOF
-                      )
-                      echo "Webhook response: $response"
-                      # Check if we got a valid SubjectAccessReview response
-                      if ! echo "$response" | grep -q '"kind":"SubjectAccessReview"'; then
-                        echo "Test failed - invalid response format"
-                        exit 1
-                      fi
-                      # Check if the request was denied with evaluation error
-                      if echo "$response" | grep -q '"evaluationError".*namespace mismatch'; then
-                        echo "Test passed - access denied with namespace mismatch error"
-                        exit 0
-                      elif echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*false'; then
-                        echo "Test passed - access denied (but without expected error message)"
-                        exit 0
-                      else
-                        echo "Test failed - access was not denied for wrong namespace"
-                        echo "Response: $response"
-                        exit 1
-                      fi
+                        EOF
+                        )
+                        echo "Webhook response: $response"
+                        # Check if we got a valid SubjectAccessReview response
+                        if ! echo "$response" | grep -q '"kind":"SubjectAccessReview"'; then
+                          echo "Test failed - invalid response format"
+                          exit 1
+                        fi
+                        # Check if the request was denied with evaluation error
+                        if echo "$response" | grep -q '"evaluationError".*namespace mismatch'; then
+                          echo "Test passed - access denied with namespace mismatch error"
+                          exit 0
+                        elif echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*false'; then
+                          echo "Test passed - access denied (but without expected error message)"
+                          exit 0
+                        else
+                          echo "Test failed - access was not denied for wrong namespace"
+                          echo "Response: $response"
+                          exit 1
+                        fi
         - wait:
             apiVersion: v1
             kind: Pod
@@ -215,62 +217,61 @@ spec:
             timeout: 1m
             for:
               condition:
-                type: Ready
-                status: "False"
-              jsonPath: .status.phase
-              value: Succeeded
+                name: Complete
+                value: "true"
 
     # Step 7: Test non-organization request - no namespace validation
     - try:
         - create:
-            apiVersion: v1
-            kind: Pod
-            metadata:
-              name: test-no-org-context
-              namespace: default
-            spec:
-              restartPolicy: Never
-              containers:
-                - name: curl
-                  image: curlimages/curl:latest
-                  command: ["/bin/sh", "-c"]
-                  args:
-                    - |
-                      response=$(curl -ksS https://auth-provider-openfga-authz-webhook.auth-provider-openfga-system.svc.cluster.local:8090/apis/authorization.k8s.io/v1/subjectaccessreviews \
-                        -H "Content-Type: application/json" \
-                        -d @- << EOF
-                      {
-                        "apiVersion": "authorization.k8s.io/v1",
-                        "kind": "SubjectAccessReview",
-                        "spec": {
-                          "user": "regular-user",
-                          "uid": "regular-user-uid",
-                          "groups": ["system:authenticated"],
-                          "resourceAttributes": {
-                            "namespace": "organization-contoso",
-                            "group": "iam.miloapis.com",
-                            "resource": "groups",
-                            "version": "v1alpha1",
-                            "verb": "list"
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: test-no-org-context
+                namespace: default
+              spec:
+                restartPolicy: Never
+                containers:
+                  - name: curl
+                    image: curlimages/curl:latest
+                    command: ["/bin/sh", "-c"]
+                    args:
+                      - |
+                        response=$(curl -ksS https://auth-provider-openfga-authz-webhook.auth-provider-openfga-system.svc.cluster.local:8090/apis/authorization.k8s.io/v1/subjectaccessreviews \
+                          -H "Content-Type: application/json" \
+                          -d @- << EOF
+                        {
+                          "apiVersion": "authorization.k8s.io/v1",
+                          "kind": "SubjectAccessReview",
+                          "spec": {
+                            "user": "regular-user",
+                            "uid": "regular-user-uid",
+                            "groups": ["system:authenticated"],
+                            "resourceAttributes": {
+                              "namespace": "organization-contoso",
+                              "group": "iam.miloapis.com",
+                              "resource": "groups",
+                              "version": "v1alpha1",
+                              "verb": "list"
+                            }
                           }
                         }
-                      }
-                      EOF
-                      )
-                      echo "Webhook response: $response"
-                      # Check if we got a valid SubjectAccessReview response
-                      if ! echo "$response" | grep -q '"kind":"SubjectAccessReview"'; then
-                        echo "Test failed - invalid response format"
-                        exit 1
-                      fi
-                      # For non-org context, there should be no namespace validation error
-                      if echo "$response" | grep -q '"evaluationError".*namespace mismatch'; then
-                        echo "Test failed - namespace validation applied to non-org request"
-                        exit 1
-                      else
-                        echo "Test passed - no namespace validation for non-org request"
-                        exit 0
-                      fi
+                        EOF
+                        )
+                        echo "Webhook response: $response"
+                        # Check if we got a valid SubjectAccessReview response
+                        if ! echo "$response" | grep -q '"kind":"SubjectAccessReview"'; then
+                          echo "Test failed - invalid response format"
+                          exit 1
+                        fi
+                        # For non-org context, there should be no namespace validation error
+                        if echo "$response" | grep -q '"evaluationError".*namespace mismatch'; then
+                          echo "Test failed - namespace validation applied to non-org request"
+                          exit 1
+                        else
+                          echo "Test passed - no namespace validation for non-org request"
+                          exit 0
+                        fi
         - wait:
             apiVersion: v1
             kind: Pod
@@ -279,7 +280,5 @@ spec:
             timeout: 1m
             for:
               condition:
-                type: Ready
-                status: "False"
-              jsonPath: .status.phase
-              value: Succeeded
+                name: Complete
+                value: "true"

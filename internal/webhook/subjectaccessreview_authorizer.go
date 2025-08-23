@@ -12,6 +12,7 @@ import (
 	"go.miloapis.com/auth-provider-openfga/internal/openfga"
 	iamv1alpha1 "go.miloapis.com/milo/pkg/apis/iam/v1alpha1"
 	"k8s.io/apiserver/pkg/authorization/authorizer"
+	"k8s.io/client-go/discovery"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -34,24 +35,27 @@ var serviceNameMapping = map[string]string{
 var _ authorizer.Authorizer = &SubjectAccessReviewAuthorizer{}
 
 type SubjectAccessReviewAuthorizer struct {
-	FGAClient  openfgav1.OpenFGAServiceClient
-	FGAStoreID string
-	K8sClient  client.Client
+	FGAClient       openfgav1.OpenFGAServiceClient
+	FGAStoreID      string
+	K8sClient       client.Client
+	DiscoveryClient discovery.DiscoveryInterface
 }
 
 // Config holds the configuration for creating a SubjectAccessReview webhook
 type Config struct {
-	FGAClient  openfgav1.OpenFGAServiceClient
-	FGAStoreID string
-	K8sClient  client.Client
+	FGAClient       openfgav1.OpenFGAServiceClient
+	FGAStoreID      string
+	K8sClient       client.Client
+	DiscoveryClient discovery.DiscoveryInterface
 }
 
 // NewSubjectAccessReviewWebhook creates a new SubjectAccessReview authorization webhook
 func NewSubjectAccessReviewWebhook(config Config) *Webhook {
 	authorizer := &SubjectAccessReviewAuthorizer{
-		FGAClient:  config.FGAClient,
-		FGAStoreID: config.FGAStoreID,
-		K8sClient:  config.K8sClient,
+		FGAClient:       config.FGAClient,
+		FGAStoreID:      config.FGAStoreID,
+		K8sClient:       config.K8sClient,
+		DiscoveryClient: config.DiscoveryClient,
 	}
 	return NewAuthorizerWebhook(authorizer)
 }
@@ -142,7 +146,7 @@ func (o *SubjectAccessReviewAuthorizer) Authorize(ctx context.Context, attribute
 	}
 
 	// Validate organization namespace if organization-scoped
-	if err := o.validateOrganizationNamespace(authCtx, attributes); err != nil {
+	if err := o.validateOrganizationNamespace(ctx, authCtx, attributes); err != nil {
 		slog.WarnContext(ctx, "organization namespace validation failed", slog.String("error", err.Error()))
 		return authorizer.DecisionDeny, "", err
 	}
@@ -180,8 +184,45 @@ func (o *SubjectAccessReviewAuthorizer) buildAuthorizationContext(attributes aut
 	}, nil
 }
 
+// isResourceNamespaced determines if a given resource type is namespace-scoped using Kubernetes API discovery
+// Uses a TTL-based cached discovery client that automatically refreshes stale cache entries
+func (o *SubjectAccessReviewAuthorizer) isResourceNamespaced(ctx context.Context, apiGroup, resource string) (bool, error) {
+	// Handle core API group (empty string represents core/v1)
+	apiGroupName := apiGroup
+	if apiGroupName == "" {
+		apiGroupName = "v1" // Core API group uses "v1" in discovery
+	}
+
+	// Get server resources for the API group
+	// The cached discovery client handles TTL-based refresh automatically
+	resourceList, err := o.DiscoveryClient.ServerResourcesForGroupVersion(apiGroupName)
+	if err != nil {
+		slog.WarnContext(ctx, "failed to get server resources, this may indicate a new API group that requires cache refresh",
+			slog.String("apiGroup", apiGroupName),
+			slog.String("error", err.Error()))
+		return false, fmt.Errorf("failed to get server resources for group %s: %w", apiGroupName, err)
+	}
+
+	// Find the resource in the list
+	for _, apiResource := range resourceList.APIResources {
+		if apiResource.Name == resource {
+			slog.DebugContext(ctx, "found resource in discovery cache",
+				slog.String("apiGroup", apiGroupName),
+				slog.String("resource", resource),
+				slog.Bool("namespaced", apiResource.Namespaced))
+			return apiResource.Namespaced, nil
+		}
+	}
+
+	// Resource not found - this could indicate a new resource that hasn't been cached yet
+	slog.WarnContext(ctx, "resource not found in API group, this may indicate a newly registered resource",
+		slog.String("apiGroup", apiGroupName),
+		slog.String("resource", resource))
+	return false, fmt.Errorf("resource %s not found in API group %s", resource, apiGroupName)
+}
+
 // validateOrganizationNamespace ensures the request namespace matches the organization's namespace
-func (o *SubjectAccessReviewAuthorizer) validateOrganizationNamespace(authCtx *authorizationContext, attributes authorizer.Attributes) error {
+func (o *SubjectAccessReviewAuthorizer) validateOrganizationNamespace(ctx context.Context, authCtx *authorizationContext, attributes authorizer.Attributes) error {
 	if !authCtx.isOrganizationScope() {
 		return nil // Not organization-scoped, skip validation
 	}
@@ -189,6 +230,24 @@ func (o *SubjectAccessReviewAuthorizer) validateOrganizationNamespace(authCtx *a
 	requestNamespace := attributes.GetNamespace()
 	expectedNamespace := fmt.Sprintf("organization-%s", authCtx.getOrganizationName())
 
+	// If no namespace specified in request, check if resource is cluster-scoped
+	if requestNamespace == "" {
+		isNamespaced, err := o.isResourceNamespaced(ctx, attributes.GetAPIGroup(), attributes.GetResource())
+		if err != nil {
+			return fmt.Errorf("failed to determine if resource is namespaced: %w", err)
+		}
+
+		if !isNamespaced {
+			// Cluster-scoped resource - no namespace validation needed
+			return nil
+		}
+
+		// Namespace-scoped resource with empty namespace = cross-namespace query
+		// Deny for organization-scoped requests
+		return fmt.Errorf("cross-namespace queries not allowed for organization-scoped requests")
+	}
+
+	// Namespace specified - validate it matches organization's namespace
 	if requestNamespace != expectedNamespace {
 		return fmt.Errorf("namespace mismatch: request namespace '%s' does not match organization namespace '%s'",
 			requestNamespace, expectedNamespace)
