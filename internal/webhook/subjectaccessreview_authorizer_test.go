@@ -408,7 +408,7 @@ func TestOrganizationNamespaceValidation(t *testing.T) {
 				l.Items = []iamv1alpha1.ProtectedResource{
 					{
 						Spec: iamv1alpha1.ProtectedResourceSpec{
-							ServiceRef:  iamv1alpha1.ServiceReference{Name: "iam.miloapis.com"},
+							ServiceRef:  iamv1alpha1.ServiceReference{Name: iamv1alpha1.SchemeGroupVersion.Group},
 							Kind:        "Group",
 							Plural:      "groups",
 							Permissions: []string{"list"},
@@ -424,7 +424,7 @@ func TestOrganizationNamespaceValidation(t *testing.T) {
 
 		mockDiscovery := &mockDiscoveryClient{
 			serverResourcesForGroupVersionFunc: func(groupVersion string) (*metav1.APIResourceList, error) {
-				if groupVersion == "iam.miloapis.com" {
+				if groupVersion == iamv1alpha1.SchemeGroupVersion.Group {
 					return &metav1.APIResourceList{
 						APIResources: []metav1.APIResource{
 							{
@@ -446,7 +446,7 @@ func TestOrganizationNamespaceValidation(t *testing.T) {
 		}
 
 		attributes := &mockAttributes{
-			apiGroup:  "iam.miloapis.com",
+			apiGroup:  iamv1alpha1.SchemeGroupVersion.Group,
 			resource:  "groups",
 			verb:      "list",
 			namespace: "organization-wrongorg", // Wrong namespace
@@ -477,7 +477,7 @@ func TestOrganizationNamespaceValidation(t *testing.T) {
 				l.Items = []iamv1alpha1.ProtectedResource{
 					{
 						Spec: iamv1alpha1.ProtectedResourceSpec{
-							ServiceRef:  iamv1alpha1.ServiceReference{Name: "iam.miloapis.com"},
+							ServiceRef:  iamv1alpha1.ServiceReference{Name: iamv1alpha1.SchemeGroupVersion.Group},
 							Kind:        "Group",
 							Plural:      "groups",
 							Permissions: []string{"list"},
@@ -498,7 +498,7 @@ func TestOrganizationNamespaceValidation(t *testing.T) {
 
 		mockDiscovery := &mockDiscoveryClient{
 			serverResourcesForGroupVersionFunc: func(groupVersion string) (*metav1.APIResourceList, error) {
-				if groupVersion == "iam.miloapis.com" {
+				if groupVersion == iamv1alpha1.SchemeGroupVersion.Group {
 					return &metav1.APIResourceList{
 						APIResources: []metav1.APIResource{
 							{
@@ -520,7 +520,7 @@ func TestOrganizationNamespaceValidation(t *testing.T) {
 		}
 
 		attributes := &mockAttributes{
-			apiGroup:  "iam.miloapis.com",
+			apiGroup:  iamv1alpha1.SchemeGroupVersion.Group,
 			resource:  "groups",
 			verb:      "list",
 			namespace: "organization-acme", // Correct namespace
@@ -548,7 +548,7 @@ func TestOrganizationNamespaceValidation(t *testing.T) {
 				l.Items = []iamv1alpha1.ProtectedResource{
 					{
 						Spec: iamv1alpha1.ProtectedResourceSpec{
-							ServiceRef:  iamv1alpha1.ServiceReference{Name: "iam.miloapis.com"},
+							ServiceRef:  iamv1alpha1.ServiceReference{Name: iamv1alpha1.SchemeGroupVersion.Group},
 							Kind:        "Group",
 							Plural:      "groups",
 							Permissions: []string{"list"},
@@ -573,7 +573,7 @@ func TestOrganizationNamespaceValidation(t *testing.T) {
 		}
 
 		attributes := &mockAttributes{
-			apiGroup:  "iam.miloapis.com",
+			apiGroup:  iamv1alpha1.SchemeGroupVersion.Group,
 			resource:  "groups",
 			verb:      "list",
 			namespace: "organization-somethingelse", // Different org namespace
@@ -668,7 +668,7 @@ func TestOrganizationNamespaceValidation(t *testing.T) {
 				l.Items = []iamv1alpha1.ProtectedResource{
 					{
 						Spec: iamv1alpha1.ProtectedResourceSpec{
-							ServiceRef:  iamv1alpha1.ServiceReference{Name: "iam.miloapis.com"},
+							ServiceRef:  iamv1alpha1.ServiceReference{Name: iamv1alpha1.SchemeGroupVersion.Group},
 							Kind:        "Group",
 							Plural:      "groups",
 							Permissions: []string{"list"},
@@ -681,7 +681,7 @@ func TestOrganizationNamespaceValidation(t *testing.T) {
 
 		mockDiscovery := &mockDiscoveryClient{
 			serverResourcesForGroupVersionFunc: func(groupVersion string) (*metav1.APIResourceList, error) {
-				if groupVersion == "iam.miloapis.com" {
+				if groupVersion == iamv1alpha1.SchemeGroupVersion.Group {
 					return &metav1.APIResourceList{
 						APIResources: []metav1.APIResource{
 							{
@@ -706,7 +706,7 @@ func TestOrganizationNamespaceValidation(t *testing.T) {
 		}
 
 		attributes := &mockAttributes{
-			apiGroup:  "iam.miloapis.com",
+			apiGroup:  iamv1alpha1.SchemeGroupVersion.Group,
 			resource:  "groups",
 			verb:      "list",
 			namespace: "", // Empty namespace = cross-namespace query
