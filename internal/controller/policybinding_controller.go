@@ -593,13 +593,13 @@ func (r *PolicyBindingReconciler) validatePolicyBindingSubjects(ctx context.Cont
 			continue
 		}
 
-		_, err := r.getUnstructuredResourceAndMapping(ctx, "iam.miloapis.com", subject.Kind, subject.Name, subject.Namespace)
+		_, err := r.getUnstructuredResourceAndMapping(ctx, iamdatumapiscomv1alpha1.SchemeGroupVersion.Group, subject.Kind, subject.Name, subject.Namespace)
 		if err != nil {
 			var subjectMsg string
 			var reason string
 
 			if meta.IsNoMatchError(err) {
-				subjectMsg = fmt.Sprintf("Subject Kind '%s' in group '%s' not recognized by the API server for subject '%s'.", subject.Kind, "iam.miloapis.com", subject.Name)
+				subjectMsg = fmt.Sprintf("Subject Kind '%s' in group '%s' not recognized by the API server for subject '%s'.", subject.Kind, iamdatumapiscomv1alpha1.SchemeGroupVersion.Group, subject.Name)
 				reason = "KindNotRecognized"
 			} else if apierrors.IsNotFound(err) {
 				subjectMsg = fmt.Sprintf("Subject %s/%s (namespace: '%s') not found.", subject.Kind, subject.Name, subject.Namespace)

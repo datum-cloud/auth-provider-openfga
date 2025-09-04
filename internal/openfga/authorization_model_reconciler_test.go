@@ -543,7 +543,7 @@ func TestAuthorizationModelsEqual_IdFieldIgnored(t *testing.T) {
 			{
 				Type: "iam.miloapis.com/InternalUser",
 				Metadata: &openfgav1.Metadata{
-					Module: "iam.miloapis.com",
+					Module: iamdatumapiscomv1alpha1.SchemeGroupVersion.Group,
 				},
 			},
 		},
@@ -555,7 +555,7 @@ func TestAuthorizationModelsEqual_IdFieldIgnored(t *testing.T) {
 			{
 				Type: "iam.miloapis.com/InternalUser",
 				Metadata: &openfgav1.Metadata{
-					Module: "iam.miloapis.com",
+					Module: iamdatumapiscomv1alpha1.SchemeGroupVersion.Group,
 				},
 			},
 		},
