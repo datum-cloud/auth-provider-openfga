@@ -12,8 +12,6 @@ import (
 	"k8s.io/apiserver/pkg/authorization/authorizer"
 )
 
-const ProjectExtraKey = "resourcemanager.miloapis.com/project-name"
-
 func NewAuthorizerWebhook(authzer authorizer.Authorizer) *Webhook {
 	return &Webhook{
 		Handler: HandlerFunc(func(ctx context.Context, r Request) Response {

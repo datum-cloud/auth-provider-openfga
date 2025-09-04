@@ -155,20 +155,11 @@ func runWebhookServer(
 
 	entryLog.Info("registering webhooks to the webhook server")
 
-	// Register the project control plane webhook
-	hookServer.Register("/project/v1alpha/projects/{project}/webhook",
-		webhook.NewAuthorizerWebhook(&webhook.ProjectControlPlaneAuthorizer{
-			FGAClient:  fgaClient,
-			FGAStoreID: openfgaStoreID,
-			K8sClient:  k8sClient,
-		}))
-
-	// Register the core control plane webhook
-	hookServer.Register("/core/v1alpha/webhook", webhook.NewAuthorizerWebhook(&webhook.CoreControlPlaneAuthorizer{
+	webhook.RegisterSubjectAccessReviewWebhook(hookServer, webhook.Config{
 		FGAClient:  fgaClient,
 		FGAStoreID: openfgaStoreID,
 		K8sClient:  k8sClient,
-	}))
+	})
 
 	entryLog.Info("starting webhook server", "port", webhookPort, "metrics-port", metricsBindAddress)
 	return mgr.Start(context.Background())
