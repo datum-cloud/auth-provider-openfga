@@ -189,17 +189,19 @@ jobs:
                 kind: Deployment
                 name: cert-manager-cainjector
                 namespace: cert-manager
-              # Certificates and ClusterIssuers
+              # Certificates and Issuers
               - apiVersion: cert-manager.io/v1
                 kind: Certificate
-                name: auth-provider-openfga-auth-provider-openfga-ca-cert
-                namespace: cert-manager
+                name: auth-provider-openfga-test-ca
+                namespace: auth-provider-openfga-system
               - apiVersion: cert-manager.io/v1
-                kind: ClusterIssuer
-                name: auth-provider-openfga-selfsigned-cluster-issuer
+                kind: Issuer
+                name: test-selfsigned-issuer
+                namespace: auth-provider-openfga-system
               - apiVersion: cert-manager.io/v1
-                kind: ClusterIssuer
-                name: auth-provider-openfga-auth-provider-openfga-ca-cluster-issuer
+                kind: Issuer
+                name: auth-provider-openfga-test-ca-issuer
+                namespace: auth-provider-openfga-system
               # Application components
               - apiVersion: apps/v1
                 kind: Deployment

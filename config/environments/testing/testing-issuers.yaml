@@ -3,9 +3,10 @@
 
 # Root self-signed issuer for testing
 apiVersion: cert-manager.io/v1
-kind: ClusterIssuer
+kind: Issuer
 metadata:
   name: test-selfsigned-issuer
+  namespace: auth-provider-openfga-system
   labels:
     app.kubernetes.io/name: auth-provider-openfga
     app.kubernetes.io/component: test-tls
@@ -18,7 +19,7 @@ apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
   name: auth-provider-openfga-test-ca
-  namespace: cert-manager
+  namespace: auth-provider-openfga-system
   labels:
     app.kubernetes.io/name: auth-provider-openfga
     app.kubernetes.io/component: test-tls
@@ -28,14 +29,15 @@ spec:
   secretName: auth-provider-openfga-test-ca-secret
   issuerRef:
     name: test-selfsigned-issuer
-    kind: ClusterIssuer
+    kind: Issuer
 
 ---
 # CA-based issuer for application certificates in testing
 apiVersion: cert-manager.io/v1
-kind: ClusterIssuer
+kind: Issuer
 metadata:
   name: auth-provider-openfga-test-ca-issuer
+  namespace: auth-provider-openfga-system
   labels:
     app.kubernetes.io/name: auth-provider-openfga
     app.kubernetes.io/component: test-tls
