@@ -1,0 +1,55 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: setup-protected-resources
+spec:
+  skipDelete: true  # Don't delete ProtectedResources - they're global infrastructure
+  steps:
+    - try:
+        - apply:
+            file: setup-protected-resources.yaml
+        - wait:
+            apiVersion: iam.miloapis.com/v1alpha1
+            kind: ProtectedResource
+            name: iam-user
+            timeout: 5m
+            for:
+              condition:
+                name: Ready
+                value: "true"
+        - wait:
+            apiVersion: iam.miloapis.com/v1alpha1
+            kind: ProtectedResource
+            name: iam-role
+            timeout: 5m
+            for:
+              condition:
+                name: Ready
+                value: "true"
+        - wait:
+            apiVersion: iam.miloapis.com/v1alpha1
+            kind: ProtectedResource
+            name: iam-group
+            timeout: 5m
+            for:
+              condition:
+                name: Ready
+                value: "true"
+        - wait:
+            apiVersion: iam.miloapis.com/v1alpha1
+            kind: ProtectedResource
+            name: resourcemanager-organization
+            timeout: 5m
+            for:
+              condition:
+                name: Ready
+                value: "true"
+        - wait:
+            apiVersion: iam.miloapis.com/v1alpha1
+            kind: ProtectedResource
+            name: iam-groupmembership
+            timeout: 5m
+            for:
+              condition:
+                name: Ready
+                value: "true"

@@ -5,41 +5,6 @@ metadata:
 spec:
   steps:
     - try:
-        # Set up all necessary protected resources
-        - apply:
-            file: ../policy-bindings/protected-resources/iam-role.yaml
-        - wait:
-            apiVersion: iam.miloapis.com/v1alpha1
-            kind: ProtectedResource
-            name: iam-role
-            timeout: 5m
-            for:
-              condition:
-                name: Ready
-                value: "true"
-        - apply:
-            file: ../policy-bindings/protected-resources/iam-user.yaml
-        - wait:
-            apiVersion: iam.miloapis.com/v1alpha1
-            kind: ProtectedResource
-            name: iam-user
-            timeout: 5m
-            for:
-              condition:
-                name: Ready
-                value: "true"
-        - apply:
-            file: ../policy-bindings/protected-resources/resourcemanager-organization.yaml
-        - wait:
-            apiVersion: iam.miloapis.com/v1alpha1
-            kind: ProtectedResource
-            name: resourcemanager-organization
-            timeout: 5m
-            for:
-              condition:
-                name: Ready
-                value: "true"
-
         # Create a role for organization management
         - apply:
             file: roles/resourcekind-organizationowner.yaml

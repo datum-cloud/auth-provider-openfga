@@ -3,16 +3,16 @@ apiVersion: iam.miloapis.com/v1alpha1
 kind: User
 metadata:
   name: acme-admin
-  namespace: iam-system
 spec:
   email: acme-admin@example.com
-  displayName: ACME Organization Admin
+  givenName: ACME
+  familyName: Admin
 ---
 apiVersion: iam.miloapis.com/v1alpha1
 kind: User
 metadata:
   name: regular-user
-  namespace: iam-system
 spec:
   email: regular@example.com
-  displayName: Regular User
+  givenName: Regular
+  familyName: User

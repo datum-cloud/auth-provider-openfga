@@ -1,8 +1,7 @@
----
 apiVersion: iam.miloapis.com/v1alpha1
 kind: Role
 metadata:
-  name: group-admin
+  name: test-group-admin
 spec:
   launchStage: Stable
   includedPermissions:

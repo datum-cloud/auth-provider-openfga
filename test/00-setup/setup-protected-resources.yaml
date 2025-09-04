@@ -1,0 +1,169 @@
+---
+# All ProtectedResources needed for E2E tests
+# These are cluster-wide and should be created once before running tests
+
+apiVersion: iam.miloapis.com/v1alpha1
+kind: ProtectedResource
+metadata:
+  name: iam-user
+spec:
+  serviceRef:
+    name: "iam.miloapis.com"
+  kind: User
+  plural: users
+  singular: user
+  permissions:
+    - list
+    - get
+    - create
+    - update
+    - delete
+    - use
+    - patch
+    - watch
+
+---
+apiVersion: iam.miloapis.com/v1alpha1
+kind: ProtectedResource
+metadata:
+  name: iam-role
+spec:
+  serviceRef:
+    name: "iam.miloapis.com"
+  kind: Role
+  plural: roles
+  singular: role
+  permissions:
+    - list
+    - get
+    - create
+    - update
+    - delete
+    - use
+    - patch
+    - watch
+
+---
+apiVersion: iam.miloapis.com/v1alpha1
+kind: ProtectedResource
+metadata:
+  name: iam-group
+spec:
+  serviceRef:
+    name: "iam.miloapis.com"
+  kind: Group
+  plural: groups
+  singular: group
+  permissions:
+    - list
+    - get
+    - create
+    - update
+    - delete
+    - use
+    - patch
+    - watch
+
+---
+apiVersion: iam.miloapis.com/v1alpha1
+kind: ProtectedResource
+metadata:
+  name: resourcemanager-organization
+spec:
+  serviceRef:
+    name: "resourcemanager.miloapis.com"
+  kind: Organization
+  plural: organizations
+  singular: organization
+  permissions:
+    - list
+    - get
+    - create
+    - update
+    - delete
+    - use
+    - patch
+    - watch
+
+---
+apiVersion: iam.miloapis.com/v1alpha1
+kind: ProtectedResource
+metadata:
+  name: resourcemanager-project
+spec:
+  serviceRef:
+    name: "resourcemanager.miloapis.com"
+  kind: Project
+  plural: projects
+  singular: project
+  permissions:
+    - list
+    - get
+    - create
+    - update
+    - delete
+    - use
+    - patch
+    - watch
+
+---
+apiVersion: iam.miloapis.com/v1alpha1
+kind: ProtectedResource
+metadata:
+  name: resourcemanager-organizationmembership
+spec:
+  serviceRef:
+    name: "resourcemanager.miloapis.com"
+  kind: OrganizationMembership
+  plural: organizationmemberships
+  singular: organizationmembership
+  permissions:
+    - list
+    - get
+    - create
+    - update
+    - delete
+    - use
+    - patch
+    - watch
+
+---
+apiVersion: iam.miloapis.com/v1alpha1
+kind: ProtectedResource
+metadata:
+  name: compute-workloads
+spec:
+  serviceRef:
+    name: "compute.miloapis.com"
+  kind: Workload
+  plural: workloads
+  singular: workload
+  permissions:
+    - list
+    - get
+    - create
+    - update
+    - delete
+    - use
+    - patch
+    - watch
+
+---
+apiVersion: iam.miloapis.com/v1alpha1
+kind: ProtectedResource
+metadata:
+  name: iam-groupmembership
+spec:
+  serviceRef:
+    name: "iam.miloapis.com"
+  kind: GroupMembership
+  plural: groupmemberships
+  singular: groupmembership
+  permissions:
+    - list
+    - get
+    - create
+    - update
+    - delete
+    - patch
+    - watch

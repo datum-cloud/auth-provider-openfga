@@ -7,8 +7,6 @@ spec:
   steps:
   # Test the creation and deletion of a group membership
   - try:
-    - create:
-        file: resources/protected-resource.yaml
     - create: # Create group
         file: resources/group.yaml
     - create: # Create user

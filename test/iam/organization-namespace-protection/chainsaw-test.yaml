@@ -4,83 +4,97 @@ metadata:
   name: organization-namespace-protection
 spec:
   steps:
-    # Step 1: Setup protected resources
+    # Step 1: Create basic namespaces and other organizations
     - try:
         - apply:
-            file: resources/protected-resources.yaml
-        - wait:
-            apiVersion: iam.miloapis.com/v1alpha1
-            kind: ProtectedResource
-            name: iam-group
-            timeout: 5m
-            for:
-              condition:
-                name: Ready
-                value: "true"
-        - wait:
-            apiVersion: iam.miloapis.com/v1alpha1
-            kind: ProtectedResource
-            name: resourcemanager-organization
-            timeout: 5m
-            for:
-              condition:
-                name: Ready
-                value: "true"
-
-    # Step 2: Create organizations and namespaces
-    - try:
+            resource:
+              apiVersion: resourcemanager.miloapis.com/v1alpha1
+              kind: Organization
+              metadata:
+                name: contoso
+              spec:
+                type: Standard
         - apply:
-            file: resources/organizations.yaml
-        - create:
+            resource:
+              apiVersion: iam.miloapis.com/v1alpha1
+              kind: User
+              metadata:
+                name: regular-user
+              spec:
+                email: regular@example.com
+                givenName: Regular
+                familyName: User
+        - apply:
             resource:
               apiVersion: v1
               kind: Namespace
               metadata:
                 name: organization-acme
-        - create:
+        - apply:
             resource:
               apiVersion: v1
               kind: Namespace
               metadata:
                 name: organization-contoso
 
-    # Step 3: Create users and roles
+    # Step 2: Create resources for testing with dynamic UIDs
     - try:
-        - apply:
-            file: resources/users.yaml
-        - apply:
-            file: resources/roles.yaml
+        - create:
+            file: test-org.yaml
+            outputs:
+              - name: org
+                value: (@)
+        - create:
+            file: test-user.yaml
+            outputs:
+              - name: user
+                value: (@)
+        - create:
+            file: test-role.yaml
+            outputs:
+              - name: role
+                value: (@)
         - wait:
             apiVersion: iam.miloapis.com/v1alpha1
             kind: Role
-            name: group-admin
-            namespace: iam-system
+            name: test-group-admin
             timeout: 5m
             for:
               condition:
                 name: Ready
                 value: "true"
-
-    # Step 4: Create policy bindings for users
-    - try:
         - apply:
-            file: resources/policy-bindings.yaml
+            resource:
+              apiVersion: iam.miloapis.com/v1alpha1
+              kind: PolicyBinding
+              metadata:
+                name: test-acme-admin-binding
+              spec:
+                subjects:
+                  - kind: User
+                    name: test-acme-admin
+                    uid: ($user.metadata.uid)
+                roleRef:
+                  name: test-group-admin
+                  namespace: ($namespace)
+                resourceSelector:
+                  resourceRef:
+                    apiGroup: resourcemanager.miloapis.com
+                    kind: Organization
+                    name: test-acme-org
+                    uid: ($org.metadata.uid)
         - wait:
             apiVersion: iam.miloapis.com/v1alpha1
             kind: PolicyBinding
-            name: acme-admin-binding
-            namespace: iam-system
+            name: test-acme-admin-binding
             timeout: 5m
             for:
               condition:
                 name: Ready
                 value: "true"
 
-    # Step 5: Test allowed access - correct namespace
+    # Step 3: Test allowed access - correct namespace
     - try:
-        - script:
-            content: |
-              sleep 5  # Allow time for OpenFGA to sync
         - create:
             resource:
               apiVersion: v1
@@ -103,12 +117,12 @@ spec:
                           "apiVersion": "authorization.k8s.io/v1",
                           "kind": "SubjectAccessReview",
                           "spec": {
-                            "user": "acme-admin",
-                            "uid": "acme-admin-uid",
+                            "user": "test-acme-admin",
+                            "uid": "test-acme-admin",
                             "extra": {
                               "iam.miloapis.com/parent-api-group": ["resourcemanager.miloapis.com"],
                               "iam.miloapis.com/parent-kind": ["Organization"],
-                              "iam.miloapis.com/parent-name": ["acme"]
+                              "iam.miloapis.com/parent-name": ["test-acme-org"]
                             },
                             "groups": ["system:authenticated"],
                             "resourceAttributes": {
@@ -148,7 +162,7 @@ spec:
                 name: Complete
                 value: "true"
 
-    # Step 6: Test denied access - wrong namespace
+    # Step 4: Test denied access - wrong namespace
     - try:
         - create:
             resource:
@@ -172,12 +186,12 @@ spec:
                           "apiVersion": "authorization.k8s.io/v1",
                           "kind": "SubjectAccessReview",
                           "spec": {
-                            "user": "acme-admin",
-                            "uid": "acme-admin-uid",
+                            "user": "test-acme-admin",
+                            "uid": "test-acme-admin",
                             "extra": {
                               "iam.miloapis.com/parent-api-group": ["resourcemanager.miloapis.com"],
                               "iam.miloapis.com/parent-kind": ["Organization"],
-                              "iam.miloapis.com/parent-name": ["acme"]
+                              "iam.miloapis.com/parent-name": ["test-acme-org"]
                             },
                             "groups": ["system:authenticated"],
                             "resourceAttributes": {
@@ -220,7 +234,7 @@ spec:
                 name: Complete
                 value: "true"
 
-    # Step 7: Test non-organization request - no namespace validation
+    # Step 5: Test non-organization request - no namespace validation
     - try:
         - create:
             resource:
@@ -245,7 +259,7 @@ spec:
                           "kind": "SubjectAccessReview",
                           "spec": {
                             "user": "regular-user",
-                            "uid": "regular-user-uid",
+                            "uid": "regular-user",
                             "groups": ["system:authenticated"],
                             "resourceAttributes": {
                               "namespace": "organization-contoso",
