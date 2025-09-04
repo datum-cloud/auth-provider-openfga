@@ -24,15 +24,8 @@ vars:
   CHAINSAW_VERSION: 'v0.2.13'
 
   # Kubernetes versions for testing
-<<<<<<< HEAD
-  ENVTEST_VERSION:
-    sh: go list -m -f "{{ .Version }}" sigs.k8s.io/controller-runtime | awk -F'[v.]' '{printf "release-%d.%d", $2, $3}'
-  ENVTEST_K8S_VERSION:
-    sh: go list -m -f "{{ .Version }}" k8s.io/api | awk -F'[v.]' '{printf "1.%d", $3}'
-=======
   ENVTEST_VERSION: "latest"
-  ENVTEST_K8S_VERSION: "1.31"
->>>>>>> b2bead1 (chore: convert makefile to taskfile)
+  ENVTEST_K8S_VERSION: "1.32"
 
 includes:
   test-infra:
