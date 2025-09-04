@@ -100,7 +100,7 @@ jobs:
           docker tag "$TAG" auth-provider-openfga:test
 
       - name: Bootstrap KIND test cluster
-        uses: datum-cloud/test-infra/.github/actions/kind-bootstrap@v0.1
+        uses: datum-cloud/test-infra/.github/actions/kind-bootstrap@v0.2.1
         with:
           cluster_name: auth-provider-openfga         # optional override
           wait_timeout: "300s"                         # optional override
