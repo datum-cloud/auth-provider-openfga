@@ -51,11 +51,11 @@ information.
 ## Essential Commands
 
 ```bash
-make dev-setup          # Complete environment setup
-make dev-deploy         # Deploy/redeploy application
-make dev-status         # Check environment status
-make dev-logs           # View application logs
-make test               # Run tests
+task dev:setup          # Complete environment setup
+task dev:deploy         # Deploy/redeploy application
+task dev:status         # Check environment status
+task dev:logs           # View application logs
+task test               # Run tests
 ```
 
 ## Documentation
@@ -80,9 +80,9 @@ make test               # Run tests
 
 ## Quick Contributing
 
-1. `make dev-setup` - Set up environment
+1. `task dev:setup` - Set up environment
 2. Make your changes
-3. `IMG=auth-provider-openfga:dev make test && make test-e2e` - Verify changes
+3. `task test && task test:e2e` - Verify changes
 4. Submit PR
 
 For detailed guidelines, see [Contributing Guide](docs/contributing.md).

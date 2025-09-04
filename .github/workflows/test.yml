@@ -17,7 +17,14 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Install Task
+        uses: arduino/setup-task@v2
+        with:
+          version: 3.x
+
       - name: Running Tests
+        env:
+          TASK_X_REMOTE_TASKFILES: "1"
         run: |
           go mod tidy
-          make test
+          task test

@@ -105,13 +105,20 @@ jobs:
           cluster_name: auth-provider-openfga         # optional override
           wait_timeout: "300s"                         # optional override
           images: |
-            ${{ needs.build.outputs.image }}          
-            auth-provider-openfga:test               
+            ${{ needs.build.outputs.image }}
+            auth-provider-openfga:test
+
+      - name: Install Task
+        uses: arduino/setup-task@v2
+        with:
+          version: 3.x
 
       - name: Deploy application dependencies via Flux
+        env:
+          TASK_X_REMOTE_TASKFILES: "1"
         run: |
           echo "🔧 Deploying application dependencies (OpenFGA) via Flux..."
-          make kustomize
+          task kustomize
           kubectl apply --server-side --wait=true -f <(bin/kustomize build config/dependencies)
           echo "⏳ Waiting for dependency HelmReleases to be ready..."
           kubectl wait --for=condition=Ready helmrelease/openfga -n openfga-system --timeout=240s
@@ -225,8 +232,10 @@ jobs:
           echo "All components are ready and healthy via FluxCD health checks!"
 
       - name: Install chainsaw and run tests
+        env:
+          TASK_X_REMOTE_TASKFILES: "1"
         run: |
-          make chainsaw
+          task chainsaw
           echo "Running chainsaw tests against the deployed system..."
           bin/chainsaw test test/
 
