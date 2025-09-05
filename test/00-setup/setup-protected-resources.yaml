@@ -63,6 +63,9 @@ spec:
     - use
     - patch
     - watch
+  parentResources:
+    - apiGroup: resourcemanager.miloapis.com
+      kind: Organization
 
 ---
 apiVersion: iam.miloapis.com/v1alpha1
@@ -126,6 +129,9 @@ spec:
     - use
     - patch
     - watch
+  parentResources:
+    - apiGroup: iam.miloapis.com
+      kind: User
 
 ---
 apiVersion: iam.miloapis.com/v1alpha1

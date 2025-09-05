@@ -113,17 +113,15 @@ spec:
                         exit 1
                       fi
 
-        - sleep:
-            duration: 30s
-
-        - assert:
-            resource:
-              apiVersion: v1
-              kind: Pod
-              metadata:
-                name: authenticated-user-test
-              status:
-                phase: Succeeded
+        - wait:
+            apiVersion: v1
+            kind: Pod
+            name: authenticated-user-test
+            timeout: 30s
+            for:
+              jsonPath:
+                path: "status.phase"
+                value: "Succeeded"
 
     - name: test-unauthenticated-user-access
       try:
@@ -185,17 +183,15 @@ spec:
                         exit 1
                       fi
 
-        - sleep:
-            duration: 30s
-
-        - assert:
-            resource:
-              apiVersion: v1
-              kind: Pod
-              metadata:
-                name: unauthenticated-user-test
-              status:
-                phase: Succeeded
+        - wait:
+            apiVersion: v1
+            kind: Pod
+            name: unauthenticated-user-test
+            timeout: 30s
+            for:
+              jsonPath:
+                path: "status.phase"
+                value: "Succeeded"
 
     - name: test-different-authenticated-user
       try:
@@ -257,14 +253,12 @@ spec:
                         exit 1
                       fi
 
-        - sleep:
-            duration: 30s
-
-        - assert:
-            resource:
-              apiVersion: v1
-              kind: Pod
-              metadata:
-                name: another-authenticated-user-test
-              status:
-                phase: Succeeded
+        - wait:
+            apiVersion: v1
+            kind: Pod
+            name: another-authenticated-user-test
+            timeout: 30s
+            for:
+              jsonPath:
+                path: "status.phase"
+                value: "Succeeded"

@@ -53,3 +53,12 @@ spec:
               condition:
                 name: Ready
                 value: "true"
+        - wait:
+            apiVersion: iam.miloapis.com/v1alpha1
+            kind: ProtectedResource
+            name: resourcemanager-organizationmembership
+            timeout: 5m
+            for:
+              condition:
+                name: Ready
+                value: "true"

@@ -29,7 +29,7 @@ spec:
               apiVersion: v1
               kind: Namespace
               metadata:
-                name: organization-acme
+                name: organization-test-acme-org
         - apply:
             resource:
               apiVersion: v1
@@ -101,7 +101,6 @@ spec:
               kind: Pod
               metadata:
                 name: test-org-namespace-allowed
-                namespace: default
               spec:
                 restartPolicy: Never
                 containers:
@@ -121,12 +120,12 @@ spec:
                             "uid": "test-acme-admin",
                             "extra": {
                               "iam.miloapis.com/parent-api-group": ["resourcemanager.miloapis.com"],
-                              "iam.miloapis.com/parent-kind": ["Organization"],
+                              "iam.miloapis.com/parent-type": ["Organization"],
                               "iam.miloapis.com/parent-name": ["test-acme-org"]
                             },
                             "groups": ["system:authenticated"],
                             "resourceAttributes": {
-                              "namespace": "organization-acme",
+                              "namespace": "organization-test-acme-org",
                               "group": "iam.miloapis.com",
                               "resource": "groups",
                               "version": "v1alpha1",
@@ -143,7 +142,7 @@ spec:
                           exit 1
                         fi
                         # Check if the request was allowed
-                        if echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*true'; then
+                        if echo "$response" | grep -q '"allowed":true'; then
                           echo "Test passed - access allowed with correct namespace"
                           exit 0
                         else
@@ -155,12 +154,11 @@ spec:
             apiVersion: v1
             kind: Pod
             name: test-org-namespace-allowed
-            namespace: default
-            timeout: 1m
+            timeout: 30s
             for:
-              condition:
-                name: Complete
-                value: "true"
+              jsonPath:
+                path: "status.phase"
+                value: "Succeeded"
 
     # Step 4: Test denied access - wrong namespace
     - try:
@@ -170,7 +168,6 @@ spec:
               kind: Pod
               metadata:
                 name: test-org-namespace-denied
-                namespace: default
               spec:
                 restartPolicy: Never
                 containers:
@@ -190,7 +187,7 @@ spec:
                             "uid": "test-acme-admin",
                             "extra": {
                               "iam.miloapis.com/parent-api-group": ["resourcemanager.miloapis.com"],
-                              "iam.miloapis.com/parent-kind": ["Organization"],
+                              "iam.miloapis.com/parent-type": ["Organization"],
                               "iam.miloapis.com/parent-name": ["test-acme-org"]
                             },
                             "groups": ["system:authenticated"],
@@ -215,7 +212,7 @@ spec:
                         if echo "$response" | grep -q '"evaluationError".*namespace mismatch'; then
                           echo "Test passed - access denied with namespace mismatch error"
                           exit 0
-                        elif echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*false'; then
+                        elif echo "$response" | grep -q '"allowed":false'; then
                           echo "Test passed - access denied (but without expected error message)"
                           exit 0
                         else
@@ -227,12 +224,11 @@ spec:
             apiVersion: v1
             kind: Pod
             name: test-org-namespace-denied
-            namespace: default
-            timeout: 1m
+            timeout: 30s
             for:
-              condition:
-                name: Complete
-                value: "true"
+              jsonPath:
+                path: "status.phase"
+                value: "Succeeded"
 
     # Step 5: Test non-organization request - no namespace validation
     - try:
@@ -242,7 +238,6 @@ spec:
               kind: Pod
               metadata:
                 name: test-no-org-context
-                namespace: default
               spec:
                 restartPolicy: Never
                 containers:
@@ -290,9 +285,8 @@ spec:
             apiVersion: v1
             kind: Pod
             name: test-no-org-context
-            namespace: default
-            timeout: 1m
+            timeout: 30s
             for:
-              condition:
-                name: Complete
-                value: "true"
+              jsonPath:
+                path: "status.phase"
+                value: "Succeeded"
