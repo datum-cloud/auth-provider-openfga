@@ -186,28 +186,35 @@ func (o *SubjectAccessReviewAuthorizer) buildAuthorizationContext(attributes aut
 
 // isResourceNamespaced determines if a given resource type is namespace-scoped using Kubernetes API discovery
 // Uses a TTL-based cached discovery client that automatically refreshes stale cache entries
-func (o *SubjectAccessReviewAuthorizer) isResourceNamespaced(ctx context.Context, apiGroup, resource string) (bool, error) {
-	// Handle core API group (empty string represents core/v1)
-	apiGroupName := apiGroup
-	if apiGroupName == "" {
-		apiGroupName = "v1" // Core API group uses "v1" in discovery
+func (o *SubjectAccessReviewAuthorizer) isResourceNamespaced(ctx context.Context, apiGroup, apiVersion, resource string) (bool, error) {
+	// Build the full group version string for discovery
+	var groupVersion string
+	if apiGroup == "" {
+		// Core API group - use version directly
+		groupVersion = apiVersion
+	} else {
+		// Named API group - combine group and version
+		groupVersion = fmt.Sprintf("%s/%s", apiGroup, apiVersion)
 	}
 
-	// Get server resources for the API group
+	// Get server resources for the API group version
 	// The cached discovery client handles TTL-based refresh automatically
-	resourceList, err := o.DiscoveryClient.ServerResourcesForGroupVersion(apiGroupName)
+	resourceList, err := o.DiscoveryClient.ServerResourcesForGroupVersion(groupVersion)
 	if err != nil {
-		slog.WarnContext(ctx, "failed to get server resources, this may indicate a new API group that requires cache refresh",
-			slog.String("apiGroup", apiGroupName),
+		slog.WarnContext(ctx, "failed to get server resources",
+			slog.String("apiGroup", apiGroup),
+			slog.String("apiVersion", apiVersion),
+			slog.String("groupVersion", groupVersion),
 			slog.String("error", err.Error()))
-		return false, fmt.Errorf("failed to get server resources for group %s: %w", apiGroupName, err)
+		return false, fmt.Errorf("failed to get server resources for group version %s: %w", groupVersion, err)
 	}
 
 	// Find the resource in the list
 	for _, apiResource := range resourceList.APIResources {
 		if apiResource.Name == resource {
 			slog.DebugContext(ctx, "found resource in discovery cache",
-				slog.String("apiGroup", apiGroupName),
+				slog.String("apiGroup", apiGroup),
+				slog.String("apiVersion", apiVersion),
 				slog.String("resource", resource),
 				slog.Bool("namespaced", apiResource.Namespaced))
 			return apiResource.Namespaced, nil
@@ -215,10 +222,12 @@ func (o *SubjectAccessReviewAuthorizer) isResourceNamespaced(ctx context.Context
 	}
 
 	// Resource not found - this could indicate a new resource that hasn't been cached yet
-	slog.WarnContext(ctx, "resource not found in API group, this may indicate a newly registered resource",
-		slog.String("apiGroup", apiGroupName),
+	slog.WarnContext(ctx, "resource not found in API group version, this may indicate a newly registered resource",
+		slog.String("apiGroup", apiGroup),
+		slog.String("apiVersion", apiVersion),
+		slog.String("groupVersion", groupVersion),
 		slog.String("resource", resource))
-	return false, fmt.Errorf("resource %s not found in API group %s", resource, apiGroupName)
+	return false, fmt.Errorf("resource %s not found in API group version %s", resource, groupVersion)
 }
 
 // validateOrganizationNamespace ensures the request namespace matches the organization's namespace
@@ -232,7 +241,7 @@ func (o *SubjectAccessReviewAuthorizer) validateOrganizationNamespace(ctx contex
 
 	// If no namespace specified in request, check if resource is cluster-scoped
 	if requestNamespace == "" {
-		isNamespaced, err := o.isResourceNamespaced(ctx, attributes.GetAPIGroup(), attributes.GetResource())
+		isNamespaced, err := o.isResourceNamespaced(ctx, attributes.GetAPIGroup(), attributes.GetAPIVersion(), attributes.GetResource())
 		if err != nil {
 			return fmt.Errorf("failed to determine if resource is namespaced: %w", err)
 		}

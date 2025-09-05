@@ -24,8 +24,9 @@ type mockAttributes struct {
 	authorizer.Attributes
 	user      user.Info
 	verb      string
-	apiGroup  string
-	resource  string
+	apiGroup   string
+	apiVersion string
+	resource   string
 	name      string
 	namespace string
 }
@@ -33,6 +34,7 @@ type mockAttributes struct {
 func (m *mockAttributes) GetUser() user.Info      { return m.user }
 func (m *mockAttributes) GetVerb() string         { return m.verb }
 func (m *mockAttributes) GetAPIGroup() string     { return m.apiGroup }
+func (m *mockAttributes) GetAPIVersion() string   { return m.apiVersion }
 func (m *mockAttributes) GetResource() string     { return m.resource }
 func (m *mockAttributes) GetName() string         { return m.name }
 func (m *mockAttributes) GetNamespace() string    { return m.namespace }
@@ -424,7 +426,7 @@ func TestOrganizationNamespaceValidation(t *testing.T) {
 
 		mockDiscovery := &mockDiscoveryClient{
 			serverResourcesForGroupVersionFunc: func(groupVersion string) (*metav1.APIResourceList, error) {
-				if groupVersion == iamv1alpha1.SchemeGroupVersion.Group {
+				if groupVersion == iamv1alpha1.SchemeGroupVersion.String() {
 					return &metav1.APIResourceList{
 						APIResources: []metav1.APIResource{
 							{
@@ -498,7 +500,7 @@ func TestOrganizationNamespaceValidation(t *testing.T) {
 
 		mockDiscovery := &mockDiscoveryClient{
 			serverResourcesForGroupVersionFunc: func(groupVersion string) (*metav1.APIResourceList, error) {
-				if groupVersion == iamv1alpha1.SchemeGroupVersion.Group {
+				if groupVersion == iamv1alpha1.SchemeGroupVersion.String() {
 					return &metav1.APIResourceList{
 						APIResources: []metav1.APIResource{
 							{
@@ -610,7 +612,7 @@ func TestOrganizationNamespaceValidation(t *testing.T) {
 
 		mockDiscovery := &mockDiscoveryClient{
 			serverResourcesForGroupVersionFunc: func(groupVersion string) (*metav1.APIResourceList, error) {
-				if groupVersion == "resourcemanager.miloapis.com" {
+				if groupVersion == "resourcemanager.miloapis.com/v1alpha1" {
 					return &metav1.APIResourceList{
 						APIResources: []metav1.APIResource{
 							{
@@ -640,10 +642,11 @@ func TestOrganizationNamespaceValidation(t *testing.T) {
 		}
 
 		attributes := &mockAttributes{
-			apiGroup:  "resourcemanager.miloapis.com",
-			resource:  "organizations",
-			verb:      "list",
-			namespace: "", // No namespace for cluster-scoped resource
+			apiGroup:   "resourcemanager.miloapis.com",
+			apiVersion: "v1alpha1",
+			resource:   "organizations",
+			verb:       "list",
+			namespace:  "", // No namespace for cluster-scoped resource
 			user: &user.DefaultInfo{
 				Name: "test-user",
 				UID:  "user-123",
@@ -681,7 +684,7 @@ func TestOrganizationNamespaceValidation(t *testing.T) {
 
 		mockDiscovery := &mockDiscoveryClient{
 			serverResourcesForGroupVersionFunc: func(groupVersion string) (*metav1.APIResourceList, error) {
-				if groupVersion == iamv1alpha1.SchemeGroupVersion.Group {
+				if groupVersion == iamv1alpha1.SchemeGroupVersion.String() {
 					return &metav1.APIResourceList{
 						APIResources: []metav1.APIResource{
 							{
@@ -706,10 +709,11 @@ func TestOrganizationNamespaceValidation(t *testing.T) {
 		}
 
 		attributes := &mockAttributes{
-			apiGroup:  iamv1alpha1.SchemeGroupVersion.Group,
-			resource:  "groups",
-			verb:      "list",
-			namespace: "", // Empty namespace = cross-namespace query
+			apiGroup:   iamv1alpha1.SchemeGroupVersion.Group,
+			apiVersion: iamv1alpha1.SchemeGroupVersion.Version,
+			resource:   "groups",
+			verb:       "list",
+			namespace:  "", // Empty namespace = cross-namespace query
 			user: &user.DefaultInfo{
 				Name: "test-user",
 				UID:  "user-123",
