@@ -460,23 +460,13 @@ tasks:
     internal: true
     vars:
       TOOL_PATH: "{{.LOCALBIN}}/{{.TOOL}}"
-      VERSIONED_TOOL_PATH: "{{.LOCALBIN}}/{{.TOOL}}-{{.VERSION}}"
     cmds:
       - |
-        if [ ! -f "{{.VERSIONED_TOOL_PATH}}" ]; then
-          set -e
-          package="{{.PACKAGE}}@{{.VERSION}}"
-          echo "Downloading ${package}"
-          rm -f "{{.TOOL_PATH}}" || true
-          GOBIN="{{.LOCALBIN}}" go install ${package}
-          # Only move if the file is different from the versioned path
-          if [ -f "{{.TOOL_PATH}}" ] && [ "{{.TOOL_PATH}}" != "{{.VERSIONED_TOOL_PATH}}" ]; then
-            mv "{{.TOOL_PATH}}" "{{.VERSIONED_TOOL_PATH}}"
-          fi
-        fi
-        ln -sf "{{.TOOL}}-{{.VERSION}}" "{{.TOOL_PATH}}"
+        package="{{.PACKAGE}}@{{.VERSION}}"
+        echo "Installing ${package}"
+        GOBIN="{{.LOCALBIN}}" go install ${package}
     status:
-      - test -f "{{.VERSIONED_TOOL_PATH}}"
+      - test -f "{{.TOOL_PATH}}"
 
   # Validation Tasks
   validate:local-dev:
