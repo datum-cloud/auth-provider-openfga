@@ -10,7 +10,7 @@ vars:
   WAIT_TIMEOUT: '{{default "420s" .WAIT_TIMEOUT}}'
 
   # Test infrastructure reference
-  TEST_INFRA_REPO_REF: 'v0.2.1'
+  TEST_INFRA_REPO_REF: 'v0.3.0'
 
   # Tool directories
   LOCALBIN: '{{.PWD}}/bin'
@@ -30,7 +30,7 @@ vars:
 includes:
   test-infra:
     taskfile: https://raw.githubusercontent.com/datum-cloud/test-infra/{{.TEST_INFRA_REPO_REF}}/Taskfile.yml
-    checksum: "6d07b0362d488f3acf15a5f6772e59853e85622ed0b33797b80b625e0f9df92a"
+    checksum: "d7fe71654d8b9eaaaca146f2748d64b8292efbd4b4b4333ace0b43fba0bcc9b6"
     vars:
       REPO_REF: "{{.TEST_INFRA_REPO_REF}}"
       CLUSTER_NAME: "{{.CLUSTER_NAME}}"
