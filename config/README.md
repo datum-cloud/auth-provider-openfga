@@ -33,7 +33,7 @@ Spin-up a fully-featured testing cluster in minutes, identical for every repo.
 
 | Component | Delivered by `test-infra` | Notes |
 |-----------|---------------------------|-------|
-| Kubernetes (Kind) | `make cluster-up` | Single-node Kind cluster on the CI runner |
+| Kubernetes (Kind) | `task test-infra:cluster-up` | Single-node Kind cluster on the CI runner |
 | Flux CD (v2) | built-in | Installs its own CRDs & controllers |
 | cert-manager v1 + CSI driver | Flux HelmReleases | CRDs + controllers, CSI DaemonSet |
 | Kyverno | Flux-managed | Admission, background, cleanup, reports controllers |
@@ -45,7 +45,7 @@ Spin-up a fully-featured testing cluster in minutes, identical for every repo.
 
 ```bash
 # bootstrap cluster, Flux, cert-manager (+ CSI), Kyverno
-make kind-bootstrap           # wrapper that pulls test-infra@v0.1 and runs `make cluster-up`
+task test-infra:cluster-up    # pulls test-infra and sets up the cluster
 ```
 
 # (optional) load your own image(s)
@@ -61,14 +61,14 @@ Services include:
 - OpenFGA (authorization service)
 - Application-specific databases (if added)
 
-**Deployment**: `make dependencies-deploy`
+**Deployment**: `task dev:deploy:dependencies`
 
 ### 3. Application Layer (`base/` + `environments/`)
 **Purpose**: The core application and environment-specific configurations
 **Managed by**: Application teams
 **Frequency**: Updated frequently during development
 
-**Deployment**: `make dev-deploy` (includes infrastructure) or `make dev-deploy-fast` (app only)
+**Deployment**: `task dev:deploy` (includes infrastructure) or `task dev:deploy:fast` (app only)
 
 ## Components (Optional Features)
 
@@ -163,15 +163,15 @@ Provides network security isolation and access control.
 
 ### Quick Start (All-in-One)
 ```bash
-make kind-create         # Bootstrap cluster and platform infrastructure
-make dev-deploy          # Dependencies + Application
+task test-infra:cluster-up  # Bootstrap cluster and platform infrastructure
+task dev:deploy             # Dependencies + Application
 ```
 
 ### Layered Deployment
 ```bash
-make kind-create         # 1. Deploy cluster and platform infrastructure
-make dependencies-deploy # 2. Deploy app dependencies
-make dev-deploy-fast     # 3. Deploy application only
+task test-infra:cluster-up     # 1. Deploy cluster and platform infrastructure
+task dev:deploy:dependencies   # 2. Deploy app dependencies
+task dev:deploy:fast           # 3. Deploy application only
 ```
 
 ### Custom Component Selection
@@ -217,7 +217,7 @@ This allows the same certificate component to work with:
 
 Validate all configurations:
 ```bash
-make validate-configs
+task validate  # or appropriate validation task
 ```
 
 This ensures all layers and environments build correctly without deployment.

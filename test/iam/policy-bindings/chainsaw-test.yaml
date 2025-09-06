@@ -6,72 +6,6 @@ spec:
   steps:
     - try:
         - apply:
-            file: protected-resources/iam-role.yaml
-        - wait:
-            apiVersion: iam.miloapis.com/v1alpha1
-            kind: ProtectedResource
-            name: iam-role
-            timeout: 5m
-            for:
-              condition:
-                name: Ready
-                value: "true"
-        - apply:
-            file: protected-resources/iam-user.yaml
-        - wait:
-            apiVersion: iam.miloapis.com/v1alpha1
-            kind: ProtectedResource
-            name: iam-user
-            timeout: 5m
-            for:
-              condition:
-                name: Ready
-                value: "true"
-        - apply:
-            file: protected-resources/iam-group.yaml
-        - wait:
-            apiVersion: iam.miloapis.com/v1alpha1
-            kind: ProtectedResource
-            name: iam-group
-            timeout: 5m
-            for:
-              condition:
-                name: Ready
-                value: "true"
-        - apply:
-            file: protected-resources/resourcemanager-organization.yaml
-        - wait:
-            apiVersion: iam.miloapis.com/v1alpha1
-            kind: ProtectedResource
-            name: resourcemanager-organization
-            timeout: 5m
-            for:
-              condition:
-                name: Ready
-                value: "true"
-        - apply:
-            file: protected-resources/resourcemanager-project.yaml
-        - wait:
-            apiVersion: iam.miloapis.com/v1alpha1
-            kind: ProtectedResource
-            name: resourcemanager-project
-            timeout: 5m
-            for:
-              condition:
-                name: Ready
-                value: "true"
-        - apply:
-            file: protected-resources/compute-workloads.yaml
-        - wait:
-            apiVersion: iam.miloapis.com/v1alpha1
-            kind: ProtectedResource
-            name: compute-workloads
-            timeout: 5m
-            for:
-              condition:
-                name: Ready
-                value: "true"
-        - apply:
             file: roles/iam-user-creator.yaml
         - wait:
             apiVersion: iam.miloapis.com/v1alpha1
@@ -236,16 +170,15 @@ spec:
                         echo "Webhook test failed - could not determine allowed status"
                         exit 1
                       fi
-        - sleep:
-            duration: 30s
-        - assert:
-            resource:
-              apiVersion: v1
-              kind: Pod
-              metadata:
-                name: webhook-test
-              status:
-                phase: Succeeded
+        - wait:
+            apiVersion: v1
+            kind: Pod
+            name: webhook-test
+            timeout: 30s
+            for:
+              jsonPath:
+                path: "status.phase"
+                value: "Succeeded"
 
         - apply:
             file: group-user.yaml
@@ -320,16 +253,15 @@ spec:
                         echo "Webhook test failed - could not determine allowed status"
                         exit 1
                       fi
-        - sleep:
-            duration: 30s
-        - assert:
-            resource:
-              apiVersion: v1
-              kind: Pod
-              metadata:
-                name: group-user-webhook-test
-              status:
-                phase: Succeeded
+        - wait:
+            apiVersion: v1
+            kind: Pod
+            name: group-user-webhook-test
+            timeout: 30s
+            for:
+              jsonPath:
+                path: "status.phase"
+                value: "Succeeded"
 
         # Test that user lost the PolicyBinding of the group after the group membership is deleted.
         - delete: # Delete group membership
@@ -396,13 +328,12 @@ spec:
                         echo "Webhook test failed - could not determine allowed status"
                         exit 1
                       fi
-        - sleep:
-            duration: 30s
-        - assert:
-            resource:
-              apiVersion: v1
-              kind: Pod
-              metadata:
-                name: group-user-webhook-test-deletion
-              status:
-                phase: Succeeded
+        - wait:
+            apiVersion: v1
+            kind: Pod
+            name: group-user-webhook-test-deletion
+            timeout: 30s
+            for:
+              jsonPath:
+                path: "status.phase"
+                value: "Succeeded"

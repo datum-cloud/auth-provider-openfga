@@ -5,41 +5,6 @@ metadata:
 spec:
   steps:
     - try:
-        # Set up all necessary protected resources
-        - apply:
-            file: ../policy-bindings/protected-resources/iam-role.yaml
-        - wait:
-            apiVersion: iam.miloapis.com/v1alpha1
-            kind: ProtectedResource
-            name: iam-role
-            timeout: 5m
-            for:
-              condition:
-                name: Ready
-                value: "true"
-        - apply:
-            file: ../policy-bindings/protected-resources/iam-user.yaml
-        - wait:
-            apiVersion: iam.miloapis.com/v1alpha1
-            kind: ProtectedResource
-            name: iam-user
-            timeout: 5m
-            for:
-              condition:
-                name: Ready
-                value: "true"
-        - apply:
-            file: ../policy-bindings/protected-resources/resourcemanager-organization.yaml
-        - wait:
-            apiVersion: iam.miloapis.com/v1alpha1
-            kind: ProtectedResource
-            name: resourcemanager-organization
-            timeout: 5m
-            for:
-              condition:
-                name: Ready
-                value: "true"
-
         # Create a role for organization management
         - apply:
             file: roles/resourcekind-organizationowner.yaml
@@ -161,16 +126,15 @@ spec:
                       value: ($user.metadata.uid)
 
         # Wait for first test to complete
-        - sleep:
-            duration: 30s
-        - assert:
-            resource:
-              apiVersion: v1
-              kind: Pod
-              metadata:
-                name: resourcekind-webhook-test-org1
-              status:
-                phase: Succeeded
+        - wait:
+            apiVersion: v1
+            kind: Pod
+            name: resourcekind-webhook-test-org1
+            timeout: 30s
+            for:
+              jsonPath:
+                path: "status.phase"
+                value: "Succeeded"
 
         # Test access to second organization (should also be allowed due to ResourceKind)
         - apply:
@@ -230,16 +194,15 @@ spec:
                       value: ($user.metadata.uid)
 
         # Wait for second test to complete
-        - sleep:
-            duration: 30s
-        - assert:
-            resource:
-              apiVersion: v1
-              kind: Pod
-              metadata:
-                name: resourcekind-webhook-test-org2
-              status:
-                phase: Succeeded
+        - wait:
+            apiVersion: v1
+            kind: Pod
+            name: resourcekind-webhook-test-org2
+            timeout: 30s
+            for:
+              jsonPath:
+                path: "status.phase"
+                value: "Succeeded"
 
         # Test that a user WITHOUT the ResourceKind binding cannot access organizations
         - apply:
@@ -305,13 +268,12 @@ spec:
                       value: ($unauthorizedUser.metadata.uid)
 
         # Wait for unauthorized test to complete
-        - sleep:
-            duration: 30s
-        - assert:
-            resource:
-              apiVersion: v1
-              kind: Pod
-              metadata:
-                name: resourcekind-webhook-test-unauthorized
-              status:
-                phase: Succeeded
+        - wait:
+            apiVersion: v1
+            kind: Pod
+            name: resourcekind-webhook-test-unauthorized
+            timeout: 30s
+            for:
+              jsonPath:
+                path: "status.phase"
+                value: "Succeeded"

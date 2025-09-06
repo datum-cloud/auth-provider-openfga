@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"os"
 	"strings"
+	"time"
 
 	openfgav1 "github.com/openfga/api/proto/openfga/v1"
 	"github.com/spf13/cobra"
@@ -16,6 +18,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"k8s.io/api/authentication/v1beta1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/discovery/cached/disk"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -32,6 +35,7 @@ func createWebhookCommand() *cobra.Command {
 	var openfgaScheme string
 	var webhookPort int
 	var metricsBindAddress string
+	var discoveryCacheTTL time.Duration
 
 	cmd := &cobra.Command{
 		Use:   "authz-webhook",
@@ -47,6 +51,7 @@ func createWebhookCommand() *cobra.Command {
 				openfgaScheme,
 				webhookPort,
 				metricsBindAddress,
+				discoveryCacheTTL,
 			)
 		},
 	}
@@ -61,6 +66,8 @@ func createWebhookCommand() *cobra.Command {
 	cmd.Flags().StringVar(&openfgaScheme, "openfga-scheme", "http", "OpenFGA Scheme (http or https)")
 	cmd.Flags().IntVar(&webhookPort, "webhook-port", 9443, "Port for the webhook server")
 	cmd.Flags().StringVar(&metricsBindAddress, "metrics-bind-address", ":8080", "Address for the metrics server")
+	cmd.Flags().DurationVar(&discoveryCacheTTL, "discovery-cache-ttl", 5*time.Minute,
+		"TTL for Kubernetes API discovery cache (enables automatic detection of new resources)")
 
 	// Mark required flags
 	if err := cmd.MarkFlagRequired("openfga-api-url"); err != nil {
@@ -82,6 +89,7 @@ func runWebhookServer(
 	openfgaScheme string,
 	webhookPort int,
 	metricsBindAddress string,
+	discoveryCacheTTL time.Duration,
 ) error {
 	log.SetLogger(zap.New(zap.JSONEncoder()))
 	entryLog := log.Log.WithName("webhook-server")
@@ -131,6 +139,18 @@ func runWebhookServer(
 		return fmt.Errorf("failed to create Kubernetes client: %w", err)
 	}
 
+	// Create temporary directory for discovery cache (will be cleaned up on process exit)
+	tempDir, err := os.MkdirTemp("", "auth-provider-discovery-cache-")
+	if err != nil {
+		return fmt.Errorf("failed to create temporary cache directory: %w", err)
+	}
+
+	// Create TTL-aware cached discovery client using native disk cache
+	discoveryClient, err := disk.NewCachedDiscoveryClientForConfig(restConfig, tempDir, "", discoveryCacheTTL)
+	if err != nil {
+		return fmt.Errorf("failed to create cached discovery client: %w", err)
+	}
+
 	// Setup Manager
 	entryLog.Info("setting up manager")
 	mgr, err := manager.New(restConfig, manager.Options{
@@ -156,9 +176,10 @@ func runWebhookServer(
 	entryLog.Info("registering webhooks to the webhook server")
 
 	webhook.RegisterSubjectAccessReviewWebhook(hookServer, webhook.Config{
-		FGAClient:  fgaClient,
-		FGAStoreID: openfgaStoreID,
-		K8sClient:  k8sClient,
+		FGAClient:       fgaClient,
+		FGAStoreID:      openfgaStoreID,
+		K8sClient:       k8sClient,
+		DiscoveryClient: discoveryClient,
 	})
 
 	entryLog.Info("starting webhook server", "port", webhookPort, "metrics-port", metricsBindAddress)

@@ -5,41 +5,6 @@ metadata:
 spec:
   steps:
     - try:
-        # Set up all necessary protected resources
-        - apply:
-            file: ../policy-bindings/protected-resources/iam-role.yaml
-        - wait:
-            apiVersion: iam.miloapis.com/v1alpha1
-            kind: ProtectedResource
-            name: iam-role
-            timeout: 5m
-            for:
-              condition:
-                name: Ready
-                value: "true"
-        - apply:
-            file: ../policy-bindings/protected-resources/iam-user.yaml
-        - wait:
-            apiVersion: iam.miloapis.com/v1alpha1
-            kind: ProtectedResource
-            name: iam-user
-            timeout: 5m
-            for:
-              condition:
-                name: Ready
-                value: "true"
-        - apply:
-            file: ../policy-bindings/protected-resources/resourcemanager-project.yaml
-        - wait:
-            apiVersion: iam.miloapis.com/v1alpha1
-            kind: ProtectedResource
-            name: resourcemanager-project
-            timeout: 5m
-            for:
-              condition:
-                name: Ready
-                value: "true"
-
         # Create a role for project management
         - apply:
             file: roles/root-fallback-admin.yaml
@@ -153,16 +118,15 @@ spec:
                       value: ($user.metadata.uid)
 
         # Wait for first test to complete
-        - sleep:
-            duration: 30s
-        - assert:
-            resource:
-              apiVersion: v1
-              kind: Pod
-              metadata:
-                name: root-fallback-list-test-authorized
-              status:
-                phase: Succeeded
+        - wait:
+            apiVersion: v1
+            kind: Pod
+            name: root-fallback-list-test-authorized
+            timeout: 30s
+            for:
+              jsonPath:
+                path: "status.phase"
+                value: "Succeeded"
 
         # Test 2: Collection operation (create) without parent context - should succeed
         - apply:
@@ -218,16 +182,15 @@ spec:
                       fi
 
         # Wait for second test to complete
-        - sleep:
-            duration: 30s
-        - assert:
-            resource:
-              apiVersion: v1
-              kind: Pod
-              metadata:
-                name: root-fallback-create-test-authorized
-              status:
-                phase: Succeeded
+        - wait:
+            apiVersion: v1
+            kind: Pod
+            name: root-fallback-create-test-authorized
+            timeout: 30s
+            for:
+              jsonPath:
+                path: "status.phase"
+                value: "Succeeded"
 
         # Test 3: Unauthorized user should be denied - validates access control still works
         - apply:
@@ -283,16 +246,15 @@ spec:
                       fi
 
         # Wait for third test to complete
-        - sleep:
-            duration: 30s
-        - assert:
-            resource:
-              apiVersion: v1
-              kind: Pod
-              metadata:
-                name: root-fallback-unauthorized-test
-              status:
-                phase: Succeeded
+        - wait:
+            apiVersion: v1
+            kind: Pod
+            name: root-fallback-unauthorized-test
+            timeout: 30s
+            for:
+              jsonPath:
+                path: "status.phase"
+                value: "Succeeded"
 
       catch:
         - describe:

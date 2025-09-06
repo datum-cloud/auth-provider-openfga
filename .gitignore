@@ -26,5 +26,7 @@ go.work
 *.swo
 *~
 
-# Ignore helm charts installed by kustomize
-config/openfga/charts
+# Directory used by task for storing state information.
+.task
+# Directory used for the test-infra repo to manage test infra components.
+.test-infra

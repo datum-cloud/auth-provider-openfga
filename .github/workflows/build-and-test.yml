@@ -100,18 +100,25 @@ jobs:
           docker tag "$TAG" auth-provider-openfga:test
 
       - name: Bootstrap KIND test cluster
-        uses: datum-cloud/test-infra/.github/actions/kind-bootstrap@v0.1
+        uses: datum-cloud/test-infra/.github/actions/kind-bootstrap@v0.3.0
         with:
           cluster_name: auth-provider-openfga         # optional override
           wait_timeout: "300s"                         # optional override
           images: |
-            ${{ needs.build.outputs.image }}          
-            auth-provider-openfga:test               
+            ${{ needs.build.outputs.image }}
+            auth-provider-openfga:test
+
+      - name: Install Task
+        uses: arduino/setup-task@v2
+        with:
+          version: 3.x
 
       - name: Deploy application dependencies via Flux
+        env:
+          TASK_X_REMOTE_TASKFILES: "1"
         run: |
           echo "🔧 Deploying application dependencies (OpenFGA) via Flux..."
-          make kustomize
+          task kustomize
           kubectl apply --server-side --wait=true -f <(bin/kustomize build config/dependencies)
           echo "⏳ Waiting for dependency HelmReleases to be ready..."
           kubectl wait --for=condition=Ready helmrelease/openfga -n openfga-system --timeout=240s
@@ -189,17 +196,19 @@ jobs:
                 kind: Deployment
                 name: cert-manager-cainjector
                 namespace: cert-manager
-              # Certificates and ClusterIssuers
+              # Certificates and Issuers
               - apiVersion: cert-manager.io/v1
                 kind: Certificate
-                name: auth-provider-openfga-auth-provider-openfga-ca-cert
-                namespace: cert-manager
+                name: auth-provider-openfga-test-ca
+                namespace: auth-provider-openfga-system
               - apiVersion: cert-manager.io/v1
-                kind: ClusterIssuer
-                name: auth-provider-openfga-selfsigned-cluster-issuer
+                kind: Issuer
+                name: test-selfsigned-issuer
+                namespace: auth-provider-openfga-system
               - apiVersion: cert-manager.io/v1
-                kind: ClusterIssuer
-                name: auth-provider-openfga-auth-provider-openfga-ca-cluster-issuer
+                kind: Issuer
+                name: auth-provider-openfga-test-ca-issuer
+                namespace: auth-provider-openfga-system
               # Application components
               - apiVersion: apps/v1
                 kind: Deployment
@@ -223,8 +232,10 @@ jobs:
           echo "All components are ready and healthy via FluxCD health checks!"
 
       - name: Install chainsaw and run tests
+        env:
+          TASK_X_REMOTE_TASKFILES: "1"
         run: |
-          make chainsaw
+          task chainsaw
           echo "Running chainsaw tests against the deployed system..."
           bin/chainsaw test test/
 

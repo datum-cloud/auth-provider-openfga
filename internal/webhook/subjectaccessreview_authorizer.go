@@ -12,6 +12,7 @@ import (
 	"go.miloapis.com/auth-provider-openfga/internal/openfga"
 	iamv1alpha1 "go.miloapis.com/milo/pkg/apis/iam/v1alpha1"
 	"k8s.io/apiserver/pkg/authorization/authorizer"
+	"k8s.io/client-go/discovery"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -34,24 +35,27 @@ var serviceNameMapping = map[string]string{
 var _ authorizer.Authorizer = &SubjectAccessReviewAuthorizer{}
 
 type SubjectAccessReviewAuthorizer struct {
-	FGAClient  openfgav1.OpenFGAServiceClient
-	FGAStoreID string
-	K8sClient  client.Client
+	FGAClient       openfgav1.OpenFGAServiceClient
+	FGAStoreID      string
+	K8sClient       client.Client
+	DiscoveryClient discovery.DiscoveryInterface
 }
 
 // Config holds the configuration for creating a SubjectAccessReview webhook
 type Config struct {
-	FGAClient  openfgav1.OpenFGAServiceClient
-	FGAStoreID string
-	K8sClient  client.Client
+	FGAClient       openfgav1.OpenFGAServiceClient
+	FGAStoreID      string
+	K8sClient       client.Client
+	DiscoveryClient discovery.DiscoveryInterface
 }
 
 // NewSubjectAccessReviewWebhook creates a new SubjectAccessReview authorization webhook
 func NewSubjectAccessReviewWebhook(config Config) *Webhook {
 	authorizer := &SubjectAccessReviewAuthorizer{
-		FGAClient:  config.FGAClient,
-		FGAStoreID: config.FGAStoreID,
-		K8sClient:  config.K8sClient,
+		FGAClient:       config.FGAClient,
+		FGAStoreID:      config.FGAStoreID,
+		K8sClient:       config.K8sClient,
+		DiscoveryClient: config.DiscoveryClient,
 	}
 	return NewAuthorizerWebhook(authorizer)
 }
@@ -63,12 +67,72 @@ func RegisterSubjectAccessReviewWebhook(server WebhookServer, config Config) {
 	server.Register(SubjectAccessReviewWebhookPath, webhook)
 }
 
+// parentContext represents the parent resource context from user extra data
+type parentContext struct {
+	apiGroup string
+	kind     string
+	name     string
+}
+
 // authorizationContext holds the essential information needed for authorization
 type authorizationContext struct {
-	userUID        string
-	permission     string
-	isProjectScope bool
-	projectName    string
+	userUID       string
+	permission    string
+	parentContext *parentContext
+	namespace     string
+}
+
+// isProjectScope checks if the parent context is a Project resource
+func (ctx *authorizationContext) isProjectScope() bool {
+	return ctx.parentContext != nil &&
+		ctx.parentContext.apiGroup == "resourcemanager.miloapis.com" &&
+		ctx.parentContext.kind == "Project"
+}
+
+// isOrganizationScope checks if the parent context is an Organization resource
+func (ctx *authorizationContext) isOrganizationScope() bool {
+	return ctx.parentContext != nil &&
+		ctx.parentContext.apiGroup == "resourcemanager.miloapis.com" &&
+		ctx.parentContext.kind == "Organization"
+}
+
+// getProjectName returns the project name if in project scope
+func (ctx *authorizationContext) getProjectName() string {
+	if ctx.isProjectScope() {
+		return ctx.parentContext.name
+	}
+	return ""
+}
+
+// getOrganizationName returns the organization name if in organization scope
+func (ctx *authorizationContext) getOrganizationName() string {
+	if ctx.isOrganizationScope() {
+		return ctx.parentContext.name
+	}
+	return ""
+}
+
+// extractParentContext extracts parent resource information from user extra data
+func (o *SubjectAccessReviewAuthorizer) extractParentContext(attributes authorizer.Attributes) *parentContext {
+	extra := attributes.GetUser().GetExtra()
+
+	parentAPIGroup, apiGroupOK := extra[iamv1alpha1.ParentAPIGroupExtraKey]
+	parentKind, kindOK := extra[iamv1alpha1.ParentKindExtraKey]
+	parentName, nameOK := extra[iamv1alpha1.ParentNameExtraKey]
+
+	if !apiGroupOK || !kindOK || !nameOK {
+		return nil
+	}
+
+	if len(parentAPIGroup) == 1 && len(parentKind) == 1 && len(parentName) == 1 {
+		return &parentContext{
+			apiGroup: parentAPIGroup[0],
+			kind:     parentKind[0],
+			name:     parentName[0],
+		}
+	}
+
+	return nil
 }
 
 // Authorize implements authorizer.Authorizer.
@@ -78,6 +142,12 @@ func (o *SubjectAccessReviewAuthorizer) Authorize(ctx context.Context, attribute
 	// Build authorization context
 	authCtx, err := o.buildAuthorizationContext(attributes)
 	if err != nil {
+		return authorizer.DecisionDeny, "", err
+	}
+
+	// Validate organization namespace if organization-scoped
+	if err := o.validateOrganizationNamespace(ctx, authCtx, attributes); err != nil {
+		slog.WarnContext(ctx, "organization namespace validation failed", slog.String("error", err.Error()))
 		return authorizer.DecisionDeny, "", err
 	}
 
@@ -103,23 +173,96 @@ func (o *SubjectAccessReviewAuthorizer) buildAuthorizationContext(attributes aut
 	}
 
 	permission := o.buildPermissionString(attributes)
-	isProjectScope := o.isProjectParent(attributes)
+	parentContext := o.extractParentContext(attributes)
+	namespace := attributes.GetNamespace()
 
-	var projectName string
-	if isProjectScope {
-		var err error
-		projectName, err = o.extractProjectName(attributes)
-		if err != nil {
-			return nil, fmt.Errorf("failed to extract project name: %w", err)
+	return &authorizationContext{
+		userUID:       userUID,
+		permission:    permission,
+		parentContext: parentContext,
+		namespace:     namespace,
+	}, nil
+}
+
+// isResourceNamespaced determines if a given resource type is namespace-scoped using Kubernetes API discovery
+// Uses a TTL-based cached discovery client that automatically refreshes stale cache entries
+func (o *SubjectAccessReviewAuthorizer) isResourceNamespaced(ctx context.Context, apiGroup, apiVersion, resource string) (bool, error) {
+	// Build the full group version string for discovery
+	var groupVersion string
+	if apiGroup == "" {
+		// Core API group - use version directly
+		groupVersion = apiVersion
+	} else {
+		// Named API group - combine group and version
+		groupVersion = fmt.Sprintf("%s/%s", apiGroup, apiVersion)
+	}
+
+	// Get server resources for the API group version
+	// The cached discovery client handles TTL-based refresh automatically
+	resourceList, err := o.DiscoveryClient.ServerResourcesForGroupVersion(groupVersion)
+	if err != nil {
+		slog.WarnContext(ctx, "failed to get server resources",
+			slog.String("apiGroup", apiGroup),
+			slog.String("apiVersion", apiVersion),
+			slog.String("groupVersion", groupVersion),
+			slog.String("error", err.Error()))
+		return false, fmt.Errorf("failed to get server resources for group version %s: %w", groupVersion, err)
+	}
+
+	// Find the resource in the list
+	for _, apiResource := range resourceList.APIResources {
+		if apiResource.Name == resource {
+			slog.DebugContext(ctx, "found resource in discovery cache",
+				slog.String("apiGroup", apiGroup),
+				slog.String("apiVersion", apiVersion),
+				slog.String("resource", resource),
+				slog.Bool("namespaced", apiResource.Namespaced))
+			return apiResource.Namespaced, nil
 		}
 	}
 
-	return &authorizationContext{
-		userUID:        userUID,
-		permission:     permission,
-		isProjectScope: isProjectScope,
-		projectName:    projectName,
-	}, nil
+	// Resource not found - this could indicate a new resource that hasn't been cached yet
+	slog.WarnContext(ctx, "resource not found in API group version, this may indicate a newly registered resource",
+		slog.String("apiGroup", apiGroup),
+		slog.String("apiVersion", apiVersion),
+		slog.String("groupVersion", groupVersion),
+		slog.String("resource", resource))
+	return false, fmt.Errorf("resource %s not found in API group version %s", resource, groupVersion)
+}
+
+// validateOrganizationNamespace ensures the request namespace matches the organization's namespace
+func (o *SubjectAccessReviewAuthorizer) validateOrganizationNamespace(ctx context.Context, authCtx *authorizationContext, attributes authorizer.Attributes) error {
+	if !authCtx.isOrganizationScope() {
+		return nil // Not organization-scoped, skip validation
+	}
+
+	requestNamespace := attributes.GetNamespace()
+	expectedNamespace := fmt.Sprintf("organization-%s", authCtx.getOrganizationName())
+
+	// If no namespace specified in request, check if resource is cluster-scoped
+	if requestNamespace == "" {
+		isNamespaced, err := o.isResourceNamespaced(ctx, attributes.GetAPIGroup(), attributes.GetAPIVersion(), attributes.GetResource())
+		if err != nil {
+			return fmt.Errorf("failed to determine if resource is namespaced: %w", err)
+		}
+
+		if !isNamespaced {
+			// Cluster-scoped resource - no namespace validation needed
+			return nil
+		}
+
+		// Namespace-scoped resource with empty namespace = cross-namespace query
+		// Deny for organization-scoped requests
+		return fmt.Errorf("cross-namespace queries not allowed for organization-scoped requests")
+	}
+
+	// Namespace specified - validate it matches organization's namespace
+	if requestNamespace != expectedNamespace {
+		return fmt.Errorf("namespace mismatch: request namespace '%s' does not match organization namespace '%s'",
+			requestNamespace, expectedNamespace)
+	}
+
+	return nil
 }
 
 // validatePermission checks if the requested permission is registered
@@ -170,9 +313,9 @@ func (o *SubjectAccessReviewAuthorizer) buildOpenFGARequest(ctx context.Context,
 	var resource string
 	var contextualTuples []*openfgav1.TupleKey
 
-	if authCtx.isProjectScope {
+	if authCtx.isProjectScope() {
 		// Project-scoped authorization: authorize against the project resource
-		resource = fmt.Sprintf("resourcemanager.miloapis.com/Project:%s", authCtx.projectName)
+		resource = fmt.Sprintf("resourcemanager.miloapis.com/Project:%s", authCtx.getProjectName())
 		rootResourceType := "resourcemanager.miloapis.com/Project"
 		contextualTuples = buildAllContextualTuples(attributes, rootResourceType, resource)
 	} else {
@@ -419,34 +562,4 @@ func (o *SubjectAccessReviewAuthorizer) isParentResourceRegistered(protectedReso
 	}
 
 	return false
-}
-
-// isProjectParent checks if the parent context is a Project resource
-func (o *SubjectAccessReviewAuthorizer) isProjectParent(attributes authorizer.Attributes) bool {
-	extra := attributes.GetUser().GetExtra()
-
-	parentAPIGroup, apiGroupOK := extra[iamv1alpha1.ParentAPIGroupExtraKey]
-	parentKind, kindOK := extra[iamv1alpha1.ParentKindExtraKey]
-
-	if !apiGroupOK || !kindOK {
-		return false
-	}
-
-	if len(parentAPIGroup) == 1 && len(parentKind) == 1 {
-		return parentAPIGroup[0] == "resourcemanager.miloapis.com" && parentKind[0] == "Project"
-	}
-
-	return false
-}
-
-// extractProjectName extracts the project name from the parent context
-func (o *SubjectAccessReviewAuthorizer) extractProjectName(attributes authorizer.Attributes) (string, error) {
-	extra := attributes.GetUser().GetExtra()
-
-	parentName, nameOK := extra[iamv1alpha1.ParentNameExtraKey]
-	if !nameOK || len(parentName) != 1 {
-		return "", fmt.Errorf("parent project name not found in extra data")
-	}
-
-	return parentName[0], nil
 }

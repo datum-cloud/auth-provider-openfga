@@ -5,33 +5,8 @@ metadata:
 spec:
   description: Test system groups support in PolicyBinding resources
   steps:
-    - name: setup-protected-resources-and-roles
+    - name: setup-roles
       try:
-        # Set up protected resources for IAM User management
-        - apply:
-            file: protected-resources/iam-user.yaml
-        - wait:
-            apiVersion: iam.miloapis.com/v1alpha1
-            kind: ProtectedResource
-            name: iam-user
-            timeout: 5m
-            for:
-              condition:
-                name: Ready
-                value: "true"
-
-        - apply:
-            file: protected-resources/resourcemanager-organizationmembership.yaml
-        - wait:
-            apiVersion: iam.miloapis.com/v1alpha1
-            kind: ProtectedResource
-            name: resourcemanager-organizationmembership
-            timeout: 5m
-            for:
-              condition:
-                name: Ready
-                value: "true"
-
         # Set up a role that allows user creation
         - apply:
             file: roles/resourcemanager-organizationmembership-creator.yaml
@@ -138,17 +113,15 @@ spec:
                         exit 1
                       fi
 
-        - sleep:
-            duration: 30s
-
-        - assert:
-            resource:
-              apiVersion: v1
-              kind: Pod
-              metadata:
-                name: authenticated-user-test
-              status:
-                phase: Succeeded
+        - wait:
+            apiVersion: v1
+            kind: Pod
+            name: authenticated-user-test
+            timeout: 30s
+            for:
+              jsonPath:
+                path: "status.phase"
+                value: "Succeeded"
 
     - name: test-unauthenticated-user-access
       try:
@@ -210,17 +183,15 @@ spec:
                         exit 1
                       fi
 
-        - sleep:
-            duration: 30s
-
-        - assert:
-            resource:
-              apiVersion: v1
-              kind: Pod
-              metadata:
-                name: unauthenticated-user-test
-              status:
-                phase: Succeeded
+        - wait:
+            apiVersion: v1
+            kind: Pod
+            name: unauthenticated-user-test
+            timeout: 30s
+            for:
+              jsonPath:
+                path: "status.phase"
+                value: "Succeeded"
 
     - name: test-different-authenticated-user
       try:
@@ -282,14 +253,12 @@ spec:
                         exit 1
                       fi
 
-        - sleep:
-            duration: 30s
-
-        - assert:
-            resource:
-              apiVersion: v1
-              kind: Pod
-              metadata:
-                name: another-authenticated-user-test
-              status:
-                phase: Succeeded
+        - wait:
+            apiVersion: v1
+            kind: Pod
+            name: another-authenticated-user-test
+            timeout: 30s
+            for:
+              jsonPath:
+                path: "status.phase"
+                value: "Succeeded"

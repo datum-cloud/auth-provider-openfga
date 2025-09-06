@@ -1,0 +1,14 @@
+---
+apiVersion: resourcemanager.miloapis.com/v1alpha1
+kind: Organization
+metadata:
+  name: acme
+spec:
+  type: Standard
+---
+apiVersion: resourcemanager.miloapis.com/v1alpha1
+kind: Organization
+metadata:
+  name: contoso
+spec:
+  type: Standard

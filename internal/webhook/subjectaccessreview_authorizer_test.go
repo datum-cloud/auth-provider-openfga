@@ -12,26 +12,32 @@ import (
 	"go.miloapis.com/auth-provider-openfga/internal/webhook"
 	iamv1alpha1 "go.miloapis.com/milo/pkg/apis/iam/v1alpha1"
 	"google.golang.org/grpc"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apiserver/pkg/authentication/user"
 	"k8s.io/apiserver/pkg/authorization/authorizer"
+	"k8s.io/client-go/discovery"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // mockAttributes is a simple mock for authorizer.Attributes
 type mockAttributes struct {
 	authorizer.Attributes
-	user     user.Info
-	verb     string
-	apiGroup string
-	resource string
-	name     string
+	user       user.Info
+	verb       string
+	apiGroup   string
+	apiVersion string
+	resource   string
+	name       string
+	namespace  string
 }
 
 func (m *mockAttributes) GetUser() user.Info      { return m.user }
 func (m *mockAttributes) GetVerb() string         { return m.verb }
 func (m *mockAttributes) GetAPIGroup() string     { return m.apiGroup }
+func (m *mockAttributes) GetAPIVersion() string   { return m.apiVersion }
 func (m *mockAttributes) GetResource() string     { return m.resource }
 func (m *mockAttributes) GetName() string         { return m.name }
+func (m *mockAttributes) GetNamespace() string    { return m.namespace }
 func (m *mockAttributes) IsResourceRequest() bool { return true }
 
 // mockFGAClient is a mock of OpenFGAServiceClient for testing.
@@ -58,6 +64,19 @@ func (m *mockK8sClient) List(ctx context.Context, list client.ObjectList, opts .
 		return m.listFunc(ctx, list, opts...)
 	}
 	return errors.New("List not implemented")
+}
+
+// mockDiscoveryClient is a mock of discovery.DiscoveryInterface for testing.
+type mockDiscoveryClient struct {
+	discovery.DiscoveryInterface
+	serverResourcesForGroupVersionFunc func(groupVersion string) (*metav1.APIResourceList, error)
+}
+
+func (m *mockDiscoveryClient) ServerResourcesForGroupVersion(groupVersion string) (*metav1.APIResourceList, error) {
+	if m.serverResourcesForGroupVersionFunc != nil {
+		return m.serverResourcesForGroupVersionFunc(groupVersion)
+	}
+	return nil, errors.New("ServerResourcesForGroupVersion not implemented")
 }
 
 func TestSubjectAccessReviewAuthorizer_Authorize_Integration(t *testing.T) {
@@ -267,9 +286,10 @@ func TestSubjectAccessReviewAuthorizer_Authorize_Integration(t *testing.T) {
 			}
 
 			auth := &webhook.SubjectAccessReviewAuthorizer{
-				FGAClient:  mockFGA,
-				K8sClient:  mockK8s,
-				FGAStoreID: "test_store",
+				FGAClient:       mockFGA,
+				K8sClient:       mockK8s,
+				FGAStoreID:      "test_store",
+				DiscoveryClient: &mockDiscoveryClient{},
 			}
 
 			decision, _, err := auth.Authorize(context.Background(), tc.attributes)
@@ -290,9 +310,10 @@ func TestSubjectAccessReviewAuthorizer_Authorize_Integration(t *testing.T) {
 func TestSubjectAccessReviewWebhookFactory(t *testing.T) {
 	t.Run("NewSubjectAccessReviewWebhook creates webhook correctly", func(t *testing.T) {
 		config := webhook.Config{
-			FGAClient:  &mockFGAClient{},
-			FGAStoreID: "test-store",
-			K8sClient:  &mockK8sClient{},
+			FGAClient:       &mockFGAClient{},
+			FGAStoreID:      "test-store",
+			K8sClient:       &mockK8sClient{},
+			DiscoveryClient: &mockDiscoveryClient{},
 		}
 
 		w := webhook.NewSubjectAccessReviewWebhook(config)
@@ -301,9 +322,10 @@ func TestSubjectAccessReviewWebhookFactory(t *testing.T) {
 
 	t.Run("RegisterSubjectAccessReviewWebhook registers correctly", func(t *testing.T) {
 		config := webhook.Config{
-			FGAClient:  &mockFGAClient{},
-			FGAStoreID: "test-store",
-			K8sClient:  &mockK8sClient{},
+			FGAClient:       &mockFGAClient{},
+			FGAStoreID:      "test-store",
+			K8sClient:       &mockK8sClient{},
+			DiscoveryClient: &mockDiscoveryClient{},
 		}
 
 		registered := false
@@ -350,9 +372,10 @@ func TestProjectScopedAuthorization(t *testing.T) {
 		}
 
 		auth := &webhook.SubjectAccessReviewAuthorizer{
-			FGAClient:  mockFGA,
-			K8sClient:  mockK8s,
-			FGAStoreID: "test_store",
+			FGAClient:       mockFGA,
+			K8sClient:       mockK8s,
+			FGAStoreID:      "test_store",
+			DiscoveryClient: &mockDiscoveryClient{},
 		}
 
 		// Create attributes with project parent extra keys
@@ -376,6 +399,337 @@ func TestProjectScopedAuthorization(t *testing.T) {
 
 		assert.NoError(t, err)
 		assert.Equal(t, authorizer.DecisionAllow, decision)
+	})
+}
+
+func TestOrganizationNamespaceValidation(t *testing.T) {
+	t.Run("organization-scoped request with wrong namespace is denied", func(t *testing.T) {
+		mockK8s := &mockK8sClient{
+			listFunc: func(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+				l := list.(*iamv1alpha1.ProtectedResourceList)
+				l.Items = []iamv1alpha1.ProtectedResource{
+					{
+						Spec: iamv1alpha1.ProtectedResourceSpec{
+							ServiceRef:  iamv1alpha1.ServiceReference{Name: iamv1alpha1.SchemeGroupVersion.Group},
+							Kind:        "Group",
+							Plural:      "groups",
+							Permissions: []string{"list"},
+						},
+					},
+				}
+				return nil
+			},
+		}
+
+		// FGA should not be called since validation fails before that
+		mockFGA := &mockFGAClient{}
+
+		mockDiscovery := &mockDiscoveryClient{
+			serverResourcesForGroupVersionFunc: func(groupVersion string) (*metav1.APIResourceList, error) {
+				if groupVersion == iamv1alpha1.SchemeGroupVersion.String() {
+					return &metav1.APIResourceList{
+						APIResources: []metav1.APIResource{
+							{
+								Name:       "groups",
+								Namespaced: true, // Namespace-scoped
+							},
+						},
+					}, nil
+				}
+				return nil, errors.New("group not found")
+			},
+		}
+
+		auth := &webhook.SubjectAccessReviewAuthorizer{
+			FGAClient:       mockFGA,
+			FGAStoreID:      "test-store",
+			K8sClient:       mockK8s,
+			DiscoveryClient: mockDiscovery,
+		}
+
+		attributes := &mockAttributes{
+			apiGroup:  iamv1alpha1.SchemeGroupVersion.Group,
+			resource:  "groups",
+			verb:      "list",
+			namespace: "organization-wrongorg", // Wrong namespace
+			user: &user.DefaultInfo{
+				Name: "test-user",
+				UID:  "user-123",
+				Extra: map[string][]string{
+					iamv1alpha1.ParentAPIGroupExtraKey: {"resourcemanager.miloapis.com"},
+					iamv1alpha1.ParentKindExtraKey:     {"Organization"},
+					iamv1alpha1.ParentNameExtraKey:     {"acme"}, // Should expect organization-acme
+				},
+			},
+		}
+
+		decision, _, err := auth.Authorize(context.Background(), attributes)
+
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "namespace mismatch")
+		assert.Contains(t, err.Error(), "organization-wrongorg")
+		assert.Contains(t, err.Error(), "organization-acme")
+		assert.Equal(t, authorizer.DecisionDeny, decision)
+	})
+
+	t.Run("organization-scoped request with correct namespace is allowed", func(t *testing.T) {
+		mockK8s := &mockK8sClient{
+			listFunc: func(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+				l := list.(*iamv1alpha1.ProtectedResourceList)
+				l.Items = []iamv1alpha1.ProtectedResource{
+					{
+						Spec: iamv1alpha1.ProtectedResourceSpec{
+							ServiceRef:  iamv1alpha1.ServiceReference{Name: iamv1alpha1.SchemeGroupVersion.Group},
+							Kind:        "Group",
+							Plural:      "groups",
+							Permissions: []string{"list"},
+						},
+					},
+				}
+				return nil
+			},
+		}
+
+		mockFGA := &mockFGAClient{
+			CheckFunc: func(ctx context.Context, req *openfgav1.CheckRequest, opts ...grpc.CallOption) (*openfgav1.CheckResponse, error) {
+				// Verify it uses organization resource for collection operations with org context
+				assert.Equal(t, "resourcemanager.miloapis.com/Organization:acme", req.TupleKey.Object)
+				return &openfgav1.CheckResponse{Allowed: true}, nil
+			},
+		}
+
+		mockDiscovery := &mockDiscoveryClient{
+			serverResourcesForGroupVersionFunc: func(groupVersion string) (*metav1.APIResourceList, error) {
+				if groupVersion == iamv1alpha1.SchemeGroupVersion.String() {
+					return &metav1.APIResourceList{
+						APIResources: []metav1.APIResource{
+							{
+								Name:       "groups",
+								Namespaced: true, // Namespace-scoped
+							},
+						},
+					}, nil
+				}
+				return nil, errors.New("group not found")
+			},
+		}
+
+		auth := &webhook.SubjectAccessReviewAuthorizer{
+			FGAClient:       mockFGA,
+			FGAStoreID:      "test-store",
+			K8sClient:       mockK8s,
+			DiscoveryClient: mockDiscovery,
+		}
+
+		attributes := &mockAttributes{
+			apiGroup:  iamv1alpha1.SchemeGroupVersion.Group,
+			resource:  "groups",
+			verb:      "list",
+			namespace: "organization-acme", // Correct namespace
+			user: &user.DefaultInfo{
+				Name: "test-user",
+				UID:  "user-123",
+				Extra: map[string][]string{
+					iamv1alpha1.ParentAPIGroupExtraKey: {"resourcemanager.miloapis.com"},
+					iamv1alpha1.ParentKindExtraKey:     {"Organization"},
+					iamv1alpha1.ParentNameExtraKey:     {"acme"},
+				},
+			},
+		}
+
+		decision, _, err := auth.Authorize(context.Background(), attributes)
+
+		require.NoError(t, err)
+		assert.Equal(t, authorizer.DecisionAllow, decision)
+	})
+
+	t.Run("non-organization request ignores namespace validation", func(t *testing.T) {
+		mockK8s := &mockK8sClient{
+			listFunc: func(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+				l := list.(*iamv1alpha1.ProtectedResourceList)
+				l.Items = []iamv1alpha1.ProtectedResource{
+					{
+						Spec: iamv1alpha1.ProtectedResourceSpec{
+							ServiceRef:  iamv1alpha1.ServiceReference{Name: iamv1alpha1.SchemeGroupVersion.Group},
+							Kind:        "Group",
+							Plural:      "groups",
+							Permissions: []string{"list"},
+						},
+					},
+				}
+				return nil
+			},
+		}
+
+		mockFGA := &mockFGAClient{
+			CheckFunc: func(ctx context.Context, req *openfgav1.CheckRequest, opts ...grpc.CallOption) (*openfgav1.CheckResponse, error) {
+				return &openfgav1.CheckResponse{Allowed: true}, nil
+			},
+		}
+
+		auth := &webhook.SubjectAccessReviewAuthorizer{
+			FGAClient:       mockFGA,
+			FGAStoreID:      "test-store",
+			K8sClient:       mockK8s,
+			DiscoveryClient: &mockDiscoveryClient{}, // No need for specific mock since no org context
+		}
+
+		attributes := &mockAttributes{
+			apiGroup:  iamv1alpha1.SchemeGroupVersion.Group,
+			resource:  "groups",
+			verb:      "list",
+			namespace: "organization-somethingelse", // Different org namespace
+			user: &user.DefaultInfo{
+				Name: "test-user",
+				UID:  "user-123",
+				// No parent context - treated as regular request
+			},
+		}
+
+		decision, _, err := auth.Authorize(context.Background(), attributes)
+
+		require.NoError(t, err) // Should not validate namespace for non-org requests
+		assert.Equal(t, authorizer.DecisionAllow, decision)
+	})
+
+	t.Run("organization-scoped request for cluster-scoped resource is allowed", func(t *testing.T) {
+		mockK8s := &mockK8sClient{
+			listFunc: func(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+				l := list.(*iamv1alpha1.ProtectedResourceList)
+				l.Items = []iamv1alpha1.ProtectedResource{
+					{
+						Spec: iamv1alpha1.ProtectedResourceSpec{
+							ServiceRef:  iamv1alpha1.ServiceReference{Name: "resourcemanager.miloapis.com"},
+							Kind:        "Organization",
+							Plural:      "organizations",
+							Permissions: []string{"list"},
+						},
+					},
+				}
+				return nil
+			},
+		}
+
+		mockDiscovery := &mockDiscoveryClient{
+			serverResourcesForGroupVersionFunc: func(groupVersion string) (*metav1.APIResourceList, error) {
+				if groupVersion == "resourcemanager.miloapis.com/v1alpha1" {
+					return &metav1.APIResourceList{
+						APIResources: []metav1.APIResource{
+							{
+								Name:       "organizations",
+								Namespaced: false, // Cluster-scoped
+							},
+						},
+					}, nil
+				}
+				return nil, errors.New("group not found")
+			},
+		}
+
+		mockFGA := &mockFGAClient{
+			CheckFunc: func(ctx context.Context, req *openfgav1.CheckRequest, opts ...grpc.CallOption) (*openfgav1.CheckResponse, error) {
+				// Should use organization resource for collection operations
+				assert.Equal(t, "resourcemanager.miloapis.com/Organization:acme", req.TupleKey.Object)
+				return &openfgav1.CheckResponse{Allowed: true}, nil
+			},
+		}
+
+		auth := &webhook.SubjectAccessReviewAuthorizer{
+			FGAClient:       mockFGA,
+			FGAStoreID:      "test-store",
+			K8sClient:       mockK8s,
+			DiscoveryClient: mockDiscovery,
+		}
+
+		attributes := &mockAttributes{
+			apiGroup:   "resourcemanager.miloapis.com",
+			apiVersion: "v1alpha1",
+			resource:   "organizations",
+			verb:       "list",
+			namespace:  "", // No namespace for cluster-scoped resource
+			user: &user.DefaultInfo{
+				Name: "test-user",
+				UID:  "user-123",
+				Extra: map[string][]string{
+					iamv1alpha1.ParentAPIGroupExtraKey: {"resourcemanager.miloapis.com"},
+					iamv1alpha1.ParentKindExtraKey:     {"Organization"},
+					iamv1alpha1.ParentNameExtraKey:     {"acme"},
+				},
+			},
+		}
+
+		decision, _, err := auth.Authorize(context.Background(), attributes)
+
+		require.NoError(t, err) // Should not validate namespace for cluster-scoped resources
+		assert.Equal(t, authorizer.DecisionAllow, decision)
+	})
+
+	t.Run("organization-scoped cross-namespace query is denied", func(t *testing.T) {
+		mockK8s := &mockK8sClient{
+			listFunc: func(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+				l := list.(*iamv1alpha1.ProtectedResourceList)
+				l.Items = []iamv1alpha1.ProtectedResource{
+					{
+						Spec: iamv1alpha1.ProtectedResourceSpec{
+							ServiceRef:  iamv1alpha1.ServiceReference{Name: iamv1alpha1.SchemeGroupVersion.Group},
+							Kind:        "Group",
+							Plural:      "groups",
+							Permissions: []string{"list"},
+						},
+					},
+				}
+				return nil
+			},
+		}
+
+		mockDiscovery := &mockDiscoveryClient{
+			serverResourcesForGroupVersionFunc: func(groupVersion string) (*metav1.APIResourceList, error) {
+				if groupVersion == iamv1alpha1.SchemeGroupVersion.String() {
+					return &metav1.APIResourceList{
+						APIResources: []metav1.APIResource{
+							{
+								Name:       "groups",
+								Namespaced: true, // Namespace-scoped
+							},
+						},
+					}, nil
+				}
+				return nil, errors.New("group not found")
+			},
+		}
+
+		// FGA should not be called since validation fails before that
+		mockFGA := &mockFGAClient{}
+
+		auth := &webhook.SubjectAccessReviewAuthorizer{
+			FGAClient:       mockFGA,
+			FGAStoreID:      "test-store",
+			K8sClient:       mockK8s,
+			DiscoveryClient: mockDiscovery,
+		}
+
+		attributes := &mockAttributes{
+			apiGroup:   iamv1alpha1.SchemeGroupVersion.Group,
+			apiVersion: iamv1alpha1.SchemeGroupVersion.Version,
+			resource:   "groups",
+			verb:       "list",
+			namespace:  "", // Empty namespace = cross-namespace query
+			user: &user.DefaultInfo{
+				Name: "test-user",
+				UID:  "user-123",
+				Extra: map[string][]string{
+					iamv1alpha1.ParentAPIGroupExtraKey: {"resourcemanager.miloapis.com"},
+					iamv1alpha1.ParentKindExtraKey:     {"Organization"},
+					iamv1alpha1.ParentNameExtraKey:     {"acme"},
+				},
+			},
+		}
+
+		decision, _, err := auth.Authorize(context.Background(), attributes)
+
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "cross-namespace queries not allowed")
+		assert.Equal(t, authorizer.DecisionDeny, decision)
 	})
 }
 

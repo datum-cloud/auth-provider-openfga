@@ -1,0 +1,495 @@
+version: '3'
+
+vars:
+  # Image configuration
+  IMG: '{{default "auth-provider-openfga:dev" .IMG}}'
+  CONTAINER_TOOL: '{{default "docker" .CONTAINER_TOOL}}'
+
+  # Cluster configuration (passed to test-infra)
+  CLUSTER_NAME: '{{default "auth-provider-openfga" .CLUSTER_NAME}}'
+  WAIT_TIMEOUT: '{{default "420s" .WAIT_TIMEOUT}}'
+
+  # Test infrastructure reference
+  TEST_INFRA_REPO_REF: 'v0.3.0'
+
+  # Tool directories
+  LOCALBIN: '{{.PWD}}/bin'
+  GOBIN: '{{default (print (env "GOPATH") "/bin") (env "GOBIN")}}'
+
+  # Tool versions
+  KUSTOMIZE_VERSION: 'v5.6.0'
+  CONTROLLER_TOOLS_VERSION: 'v0.17.2'
+  GOLANGCI_LINT_VERSION:
+    sh: test -f .golangci-version && cat .golangci-version || echo "v2.1.6"
+  CHAINSAW_VERSION: 'v0.2.13'
+
+  # Kubernetes versions for testing
+  ENVTEST_VERSION: "latest"
+  ENVTEST_K8S_VERSION: "1.32"
+
+includes:
+  test-infra:
+    taskfile: https://raw.githubusercontent.com/datum-cloud/test-infra/{{.TEST_INFRA_REPO_REF}}/Taskfile.yml
+    checksum: "d7fe71654d8b9eaaaca146f2748d64b8292efbd4b4b4333ace0b43fba0bcc9b6"
+    vars:
+      REPO_REF: "{{.TEST_INFRA_REPO_REF}}"
+      CLUSTER_NAME: "{{.CLUSTER_NAME}}"
+      WAIT_TIMEOUT: "{{.WAIT_TIMEOUT}}"
+
+tasks:
+  default:
+    desc: List all available tasks
+    cmds:
+      - task --list
+    silent: true
+
+  # Development Tasks
+  manifests:
+    desc: Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects
+    deps: [controller-gen]
+    cmds:
+      - |
+        "{{.LOCALBIN}}/controller-gen" rbac:roleName=manager-role crd webhook \
+          paths="./..." \
+          output:crd:artifacts:config=config/crd/bases \
+          output:rbac:artifacts:config=config/base/rbac
+    sources:
+      - "api/**/*.go"
+      - "internal/**/*.go"
+    generates:
+      - "config/crd/bases/*.yaml"
+      - "config/base/rbac/*.yaml"
+
+  generate:
+    desc: Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations
+    deps: [controller-gen]
+    cmds:
+      - |
+        "{{.LOCALBIN}}/controller-gen" object:headerFile="hack/boilerplate.go.txt" paths="./..."
+    sources:
+      - "api/**/*.go"
+    generates:
+      - "api/**/*_deepcopy.go"
+
+  fmt:
+    desc: Run go fmt against code
+    cmds:
+      - go fmt ./...
+
+  vet:
+    desc: Run go vet against code
+    cmds:
+      - go vet ./...
+
+  test:
+    desc: Run unit tests
+    deps: [manifests, generate, fmt, vet, setup-envtest]
+    cmds:
+      - |
+        export KUBEBUILDER_ASSETS="$({{.LOCALBIN}}/setup-envtest use {{.ENVTEST_K8S_VERSION}} --bin-dir {{.LOCALBIN}} -p path)"
+        go test $(go list ./... | grep -v /e2e) -coverprofile cover.out
+
+  test:e2e:
+    desc: Run end-to-end tests
+    deps: [kustomize, manifests, generate, fmt, vet, dev:build, dev:load, chainsaw]
+    cmds:
+      - |
+        set -e
+        # Deploy dependencies
+        echo "🔧 Deploying application dependencies..."
+        {{.LOCALBIN}}/kustomize build config/dependencies | task test-infra:kubectl -- apply --server-side --wait=true -f -
+        echo "⏳ Waiting for dependency HelmReleases to be ready..."
+        task test-infra:kubectl -- wait --for=condition=Ready helmrelease/openfga -n openfga-system --timeout=240s
+        # Deploy application
+        echo "🛠️ Deploying application components..."
+        {{.LOCALBIN}}/kustomize build config/environments/testing | task test-infra:kubectl -- apply --server-side --wait=true -f -
+        # Wait for components
+        echo "Waiting for CA certificate to be ready..."
+        task test-infra:kubectl -- wait --for=condition=Ready certificate auth-provider-openfga-test-ca -n auth-provider-openfga-system --timeout=300s
+        echo "Waiting for Issuers to be ready..."
+        task test-infra:kubectl -- wait --for=condition=Ready issuer test-selfsigned-issuer -n auth-provider-openfga-system --timeout=300s
+        task test-infra:kubectl -- wait --for=condition=Ready issuer auth-provider-openfga-test-ca-issuer -n auth-provider-openfga-system --timeout=300s
+        echo "Waiting for controller manager to be ready..."
+        task test-infra:kubectl -- wait --for=condition=Available deployment auth-provider-openfga-controller-manager -n auth-provider-openfga-system --timeout=300s
+        echo "Waiting for webhook to be ready..."
+        task test-infra:kubectl -- wait --for=condition=Available deployment auth-provider-openfga-authz-webhook -n auth-provider-openfga-system --timeout=300s
+        echo "Waiting for OpenFGA to be ready..."
+        task test-infra:kubectl -- wait --for=condition=Available deployment openfga -n openfga-system --timeout=300s
+        echo "All components are ready. Running chainsaw tests..."
+        # Run tests
+        {{.LOCALBIN}}/chainsaw test test/ --parallel 10
+
+  lint:
+    desc: Run golangci-lint linter
+    deps: [golangci-lint]
+    cmds:
+      - "{{.LOCALBIN}}/golangci-lint run"
+
+  lint:fix:
+    desc: Run golangci-lint linter and perform fixes
+    deps: [golangci-lint]
+    cmds:
+      - "{{.LOCALBIN}}/golangci-lint run --fix"
+
+  lint:config:
+    desc: Verify golangci-lint linter configuration
+    deps: [golangci-lint]
+    cmds:
+      - "{{.LOCALBIN}}/golangci-lint config verify"
+
+  lint:ci:
+    desc: Run linting with CI-like configuration
+    deps: [golangci-lint]
+    cmds:
+      - |
+        echo "🔍 Running linter with same config as CI..."
+        {{.LOCALBIN}}/golangci-lint run --config=.golangci.yml
+        echo "✅ Linting completed successfully - ready for CI!"
+
+  # Build Tasks
+  build:
+    desc: Build manager binary
+    deps: [manifests, generate, fmt, vet]
+    cmds:
+      - go build -o bin/manager cmd/main.go
+    sources:
+      - "**/*.go"
+      - "go.mod"
+      - "go.sum"
+    generates:
+      - "bin/manager"
+
+  run:
+    desc: Run a controller from your host
+    deps: [manifests, generate, fmt, vet]
+    cmds:
+      - go run ./cmd/main.go
+
+  # Development Build/Deploy Tasks (matching Milo pattern)
+  dev:build:
+    desc: Build the auth-provider-openfga container image for development
+    silent: true
+    cmds:
+      - |
+        set -e
+        echo "Building auth-provider-openfga container image: {{.IMG}}"
+        {{.CONTAINER_TOOL}} build -t "{{.IMG}}" .
+    sources:
+      - "**/*.go"
+      - "Dockerfile"
+      - "go.mod"
+      - "go.sum"
+
+  dev:load:
+    desc: Load the development image into the kind cluster
+    deps: [dev:build]
+    silent: true
+    cmds:
+      - |
+        set -e
+        echo "Loading image {{.IMG}} into kind cluster test-infra"
+        kind load docker-image {{.IMG}} --name test-infra
+
+  dev:deploy:
+    desc: Deploy auth-provider-openfga to the development environment
+    deps: [manifests, generate, dev:load, dev:deploy:dependencies]
+    silent: true
+    cmds:
+      - |
+        set -e
+        echo "🚀 Deploying application to development environment..."
+        {{.LOCALBIN}}/kustomize build config/environments/local-development | kubectl apply --server-side --wait=true -f -
+        echo "⏳ Waiting for application deployments to be ready..."
+        kubectl wait --for=condition=Available deployment --all -n auth-provider-openfga-system --timeout=180s
+        echo "✅ Development environment deployed successfully!"
+
+  dev:deploy:fast:
+    desc: Deploy app quickly (skips infrastructure)
+    deps: [manifests, generate, dev:load, dev:deploy:dependencies]
+    silent: true
+    cmds:
+      - |
+        set -e
+        echo "🚀 Fast deployment..."
+        {{.LOCALBIN}}/kustomize build config/environments/local-development | kubectl apply --server-side --wait=true -f -
+        echo "⏳ Waiting for application deployments to be ready..."
+        kubectl wait --for=condition=Available deployment --all -n auth-provider-openfga-system --timeout=180s
+        echo "✅ Fast development deployment complete!"
+
+  dev:deploy:dependencies:
+    desc: Deploy application-specific dependencies (OpenFGA)
+    deps: [kustomize]
+    silent: true
+    cmds:
+      - |
+        set -e
+        echo "📦 Deploying application dependencies (OpenFGA, etc.)..."
+        {{.LOCALBIN}}/kustomize build config/dependencies | kubectl apply --server-side --wait=true -f -
+        echo "⏳ Waiting for dependencies to be ready..."
+        kubectl wait --for=condition=Ready helmrelease/openfga -n openfga-system --timeout=240s
+        echo "✅ Application dependencies deployed successfully!"
+
+  dev:undeploy:
+    desc: Remove development environment deployments
+    deps: [kustomize]
+    silent: true
+    cmds:
+      - |
+        echo "🗑️ Removing development environment..."
+        {{.LOCALBIN}}/kustomize build config/environments/local-development | kubectl delete --ignore-not-found=true -f -
+
+  dev:reset:
+    desc: Reset development environment
+    cmds:
+      - task: dev:undeploy
+      - task: dev:deploy
+
+  dev:logs:
+    desc: Show logs from controller manager
+    cmds:
+      - |
+        echo "=== Controller Manager Logs ==="
+        kubectl logs -l control-plane=controller-manager -n auth-provider-openfga-system --tail=50 -f
+
+  dev:logs:webhook:
+    desc: Show logs from authz webhook
+    cmds:
+      - |
+        echo "=== AuthZ Webhook Logs ==="
+        kubectl logs -l app.kubernetes.io/name=openfga-authz-webhook -n auth-provider-openfga-system --tail=50 -f
+
+  dev:status:
+    desc: Show development environment status
+    cmds:
+      - |
+        echo "=== Cluster Info ==="
+        kubectl cluster-info
+        echo ""
+        echo "=== Auth Provider OpenFGA Pods ==="
+        kubectl get pods -n auth-provider-openfga-system
+        echo ""
+        echo "=== OpenFGA Pods ==="
+        kubectl get pods -n openfga-system
+        echo ""
+        echo "=== Services ==="
+        kubectl get services -n auth-provider-openfga-system
+        kubectl get services -n openfga-system
+
+  dev:forward:metrics:
+    desc: Forward metrics port for local access
+    cmds:
+      - |
+        echo "Forwarding metrics port 8080..."
+        echo "Access metrics at http://localhost:8080/metrics"
+        kubectl port-forward -n auth-provider-openfga-system svc/auth-provider-openfga-controller-manager-metrics 8080:8080
+
+  dev:forward:openfga:
+    desc: Forward OpenFGA port for local access
+    cmds:
+      - |
+        echo "Forwarding OpenFGA port 8080..."
+        echo "Access OpenFGA at http://localhost:8081"
+        kubectl port-forward -n openfga-system svc/openfga 8081:8080
+
+  dev:setup:
+    desc: Setup complete development environment
+    cmds:
+      - |
+        echo "🚀 Setting up Auth Provider OpenFGA development environment..."
+        echo "📦 Installing/checking development tools..."
+      - task: localbin-dir
+      - task: test-infra:cluster-up
+      - task: dev:deploy
+      - |
+        echo ""
+        echo "🎉 Development environment setup complete!"
+        echo "📖 Quick commands:"
+        echo "  task dev:status          # Check environment status"
+        echo "  task dev:logs            # View application logs"
+        echo "  task dev:forward:metrics # Access metrics at localhost:8080"
+        echo "  task --list              # View all available commands"
+
+  # Docker/Container Tasks
+  docker:build:
+    desc: Build docker image with the manager
+    cmds:
+      - "{{.CONTAINER_TOOL}} build -t {{.IMG}} ."
+    sources:
+      - "**/*.go"
+      - "Dockerfile"
+      - "go.mod"
+      - "go.sum"
+
+  docker:push:
+    desc: Push docker image with the manager
+    cmds:
+      - "{{.CONTAINER_TOOL}} push {{.IMG}}"
+
+  docker:buildx:
+    desc: Build and push docker image for cross-platform support
+    vars:
+      PLATFORMS: '{{default "linux/arm64,linux/amd64,linux/s390x,linux/ppc64le" .PLATFORMS}}'
+    cmds:
+      - |
+        sed -e '1 s/\(^FROM\)/FROM --platform=\$${BUILDPLATFORM}/; t' -e ' 1,// s//FROM --platform=\$${BUILDPLATFORM}/' Dockerfile > Dockerfile.cross
+        {{.CONTAINER_TOOL}} buildx create --name auth-provider-openfga-builder || true
+        {{.CONTAINER_TOOL}} buildx use auth-provider-openfga-builder
+        {{.CONTAINER_TOOL}} buildx build --push --platform={{.PLATFORMS}} --tag {{.IMG}} -f Dockerfile.cross .
+        {{.CONTAINER_TOOL}} buildx rm auth-provider-openfga-builder || true
+        rm Dockerfile.cross
+
+  build:installer:
+    desc: Generate a consolidated YAML with CRDs and deployment
+    deps: [manifests, generate, kustomize]
+    cmds:
+      - mkdir -p dist
+      - cd config/manager && {{.LOCALBIN}}/kustomize edit set image controller={{.IMG}}
+      - "{{.LOCALBIN}}/kustomize build config/default > dist/install.yaml"
+
+  # Deployment Tasks
+  install:
+    desc: Install CRDs into the K8s cluster
+    deps: [manifests, kustomize]
+    cmds:
+      - "{{.LOCALBIN}}/kustomize build config/crd | kubectl apply -f -"
+
+  uninstall:
+    desc: Uninstall CRDs from the K8s cluster
+    deps: [manifests, kustomize]
+    vars:
+      IGNORE_NOT_FOUND: '{{default "false" .IGNORE_NOT_FOUND}}'
+    cmds:
+      - "{{.LOCALBIN}}/kustomize build config/crd | kubectl delete --ignore-not-found={{.IGNORE_NOT_FOUND}} -f -"
+
+  deploy:
+    desc: Deploy controller to the K8s cluster
+    deps: [manifests, kustomize]
+    cmds:
+      - cd config/manager && {{.LOCALBIN}}/kustomize edit set image controller={{.IMG}}
+      - "{{.LOCALBIN}}/kustomize build config/default | kubectl apply -f -"
+
+  undeploy:
+    desc: Undeploy controller from the K8s cluster
+    deps: [kustomize]
+    vars:
+      IGNORE_NOT_FOUND: '{{default "false" .IGNORE_NOT_FOUND}}'
+    cmds:
+      - "{{.LOCALBIN}}/kustomize build config/default | kubectl delete --ignore-not-found={{.IGNORE_NOT_FOUND}} -f -"
+
+  # Tool Installation Tasks
+  localbin-dir:
+    desc: Create local bin directory
+    cmds:
+      - mkdir -p "{{.LOCALBIN}}"
+    status:
+      - test -d "{{.LOCALBIN}}"
+
+  kustomize:
+    desc: Download kustomize locally if necessary
+    deps: [localbin-dir]
+    cmds:
+      - task: install-go-tool
+        vars:
+          TOOL: kustomize
+          PACKAGE: sigs.k8s.io/kustomize/kustomize/v5
+          VERSION: "{{.KUSTOMIZE_VERSION}}"
+    status:
+      - test -f "{{.LOCALBIN}}/kustomize"
+
+  controller-gen:
+    desc: Download controller-gen locally if necessary
+    deps: [localbin-dir]
+    cmds:
+      - task: install-go-tool
+        vars:
+          TOOL: controller-gen
+          PACKAGE: sigs.k8s.io/controller-tools/cmd/controller-gen
+          VERSION: "{{.CONTROLLER_TOOLS_VERSION}}"
+    status:
+      - test -f "{{.LOCALBIN}}/controller-gen"
+
+  setup-envtest:
+    desc: Download the binaries required for ENVTEST
+    deps: [envtest]
+    cmds:
+      - |
+        echo "Setting up envtest binaries for Kubernetes version {{.ENVTEST_K8S_VERSION}}..."
+        {{.LOCALBIN}}/setup-envtest use {{.ENVTEST_K8S_VERSION}} --bin-dir {{.LOCALBIN}} -p path || {
+          echo "Error: Failed to set up envtest binaries for version {{.ENVTEST_K8S_VERSION}}."
+          exit 1
+        }
+
+  envtest:
+    desc: Download setup-envtest locally if necessary
+    deps: [localbin-dir]
+    cmds:
+      - task: install-go-tool
+        vars:
+          TOOL: setup-envtest
+          PACKAGE: sigs.k8s.io/controller-runtime/tools/setup-envtest
+          VERSION: "{{.ENVTEST_VERSION}}"
+    status:
+      - test -f "{{.LOCALBIN}}/setup-envtest"
+
+  golangci-lint:
+    desc: Download golangci-lint locally if necessary
+    deps: [localbin-dir]
+    cmds:
+      - task: install-go-tool
+        vars:
+          TOOL: golangci-lint
+          PACKAGE: github.com/golangci/golangci-lint/v2/cmd/golangci-lint
+          VERSION: "{{.GOLANGCI_LINT_VERSION}}"
+    status:
+      - test -f "{{.LOCALBIN}}/golangci-lint"
+
+  chainsaw:
+    desc: Download chainsaw locally if necessary
+    deps: [localbin-dir]
+    cmds:
+      - task: install-go-tool
+        vars:
+          TOOL: chainsaw
+          PACKAGE: github.com/kyverno/chainsaw
+          VERSION: "{{.CHAINSAW_VERSION}}"
+    status:
+      - test -f "{{.LOCALBIN}}/chainsaw"
+
+  install-go-tool:
+    desc: Install a Go tool if not already installed
+    internal: true
+    vars:
+      TOOL_PATH: "{{.LOCALBIN}}/{{.TOOL}}"
+    cmds:
+      - |
+        package="{{.PACKAGE}}@{{.VERSION}}"
+        echo "Installing ${package}"
+        GOBIN="{{.LOCALBIN}}" go install ${package}
+    status:
+      - test -f "{{.TOOL_PATH}}"
+
+  # Validation Tasks
+  validate:local-dev:
+    desc: Validate local development configuration
+    deps: [kustomize]
+    cmds:
+      - |
+        echo "🔍 Validating local development configuration..."
+        {{.LOCALBIN}}/kustomize build config/environments/local-development > /dev/null && echo "✅ Local development config builds successfully"
+        echo "Checking for deployment resources:"
+        {{.LOCALBIN}}/kustomize build config/environments/local-development | grep -A 1 "kind: Deployment" | grep "name:" || echo "No deployments found"
+        echo "✅ Local development configuration validated"
+
+  validate:configs:
+    desc: Validate all configurations
+    deps: [validate:local-dev]
+    cmds:
+      - |
+        echo "🔍 Validating core configurations..."
+        echo "Dependencies configuration:"
+        {{.LOCALBIN}}/kustomize build config/dependencies > /dev/null && echo "✅ Dependencies config builds successfully"
+        echo "Base configuration:"
+        {{.LOCALBIN}}/kustomize build config/base > /dev/null && echo "✅ Base config builds successfully"
+        echo "Testing configuration:"
+        {{.LOCALBIN}}/kustomize build config/environments/testing > /dev/null && echo "✅ Testing config builds successfully"
+        echo "✅ All configurations validated"

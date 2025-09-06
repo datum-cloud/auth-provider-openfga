@@ -1,0 +1,18 @@
+---
+apiVersion: iam.miloapis.com/v1alpha1
+kind: PolicyBinding
+metadata:
+  name: acme-admin-binding
+spec:
+  subjects:
+    - kind: User
+      name: acme-admin
+      uid: f4585664-89c3-4069-93d2-2bce3a46674c
+  roleRef:
+    name: group-admin
+  resourceSelector:
+    resourceRef:
+      apiGroup: resourcemanager.miloapis.com
+      kind: Organization
+      name: acme
+      uid: 33f89205-9bdd-44f1-80ca-c12f82c1753d
