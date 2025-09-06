@@ -22,13 +22,13 @@ import (
 // mockAttributes is a simple mock for authorizer.Attributes
 type mockAttributes struct {
 	authorizer.Attributes
-	user      user.Info
-	verb      string
+	user       user.Info
+	verb       string
 	apiGroup   string
 	apiVersion string
 	resource   string
-	name      string
-	namespace string
+	name       string
+	namespace  string
 }
 
 func (m *mockAttributes) GetUser() user.Info      { return m.user }
