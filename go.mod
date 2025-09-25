@@ -12,7 +12,7 @@ require (
 	github.com/onsi/gomega v1.38.0
 	github.com/openfga/api/proto v0.0.0-20250814141243-c0b62b28b14d
 	github.com/spf13/cobra v1.9.1
-	github.com/stretchr/testify v1.10.0
+	github.com/stretchr/testify v1.11.1
 	go.miloapis.com/milo v0.2.0
 	google.golang.org/grpc v1.75.0
 	google.golang.org/protobuf v1.36.8
