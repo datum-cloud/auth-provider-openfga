@@ -8,6 +8,7 @@ import (
 	openfgav1 "github.com/openfga/api/proto/openfga/v1"
 	"go.miloapis.com/auth-provider-openfga/internal/openfga"
 	iamdatumapiscomv1alpha1 "go.miloapis.com/milo/pkg/apis/iam/v1alpha1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -233,7 +234,9 @@ func (r *RoleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return ctrl.Result{}, err
 	}
 
+	oldStatus := role.Status.DeepCopy()
 	currentGeneration := role.Generation
+	role.Status.ObservedGeneration = currentGeneration
 
 	finalizeResult, err := r.Finalizers.Finalize(ctx, role)
 	if err != nil {
@@ -286,7 +289,7 @@ func (r *RoleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 				Type: "Ready", Status: metav1.ConditionFalse, Reason: "OpenFGAReconciliationFailed",
 				Message: fmt.Sprintf("Failed to reconcile with OpenFGA: %s", err.Error()), LastTransitionTime: metav1.Now(),
 			})
-			if statusUpdateErr := r.Status().Update(ctx, role); statusUpdateErr != nil {
+			if statusUpdateErr := r.updateRoleStatus(ctx, role, oldStatus); statusUpdateErr != nil {
 				log.Error(statusUpdateErr, "Failed to update Role status after OpenFGA reconciliation failure")
 			}
 			return ctrl.Result{}, err
@@ -304,8 +307,7 @@ func (r *RoleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		})
 	}
 
-	role.Status.ObservedGeneration = currentGeneration
-	if err := r.Status().Update(ctx, role); err != nil {
+	if err := r.updateRoleStatus(ctx, role, oldStatus); err != nil {
 		log.Error(err, "Failed to update Role status")
 		return ctrl.Result{}, err
 	}
@@ -350,6 +352,21 @@ func (r *RoleReconciler) enqueueRequestsForProtectedResourceChange(ctx context.C
 		}
 	}
 	return requests
+}
+
+func (r *RoleReconciler) updateRoleStatus(ctx context.Context, actualRole *iamdatumapiscomv1alpha1.Role, oldStatus *iamdatumapiscomv1alpha1.RoleStatus) error {
+	log := logf.FromContext(ctx).WithValues("roleStatusUpdate", actualRole.Name, "roleNamespace", actualRole.Namespace)
+
+	if !equality.Semantic.DeepEqual(oldStatus, &actualRole.Status) {
+		if err := r.Client.Status().Update(ctx, actualRole); err != nil {
+			log.Error(err, "Failed to update role status")
+			return fmt.Errorf("failed to update role status: %w", err)
+		}
+		log.V(1).Info("Role status updated")
+	} else {
+		log.V(1).Info("Role status unchanged; skipping update")
+	}
+	return nil
 }
 
 // SetupWithManager sets up the controller with the Manager.
