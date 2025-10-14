@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 
 	openfgav1 "github.com/openfga/api/proto/openfga/v1"
@@ -165,6 +166,9 @@ func (r *RoleReconciler) validateRolePermissions(ctx context.Context, role *iamd
 			invalidPermissions = append(invalidPermissions, permStr)
 		}
 	}
+
+	// Ensure deterministic order for downstream comparison/logging
+	sort.Strings(invalidPermissions)
 	return invalidPermissions, nil
 }
 
