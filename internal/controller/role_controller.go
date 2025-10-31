@@ -263,7 +263,7 @@ func (r *RoleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		log.Error(effectivePermsErr, "Failed to compute effective permissions for role")
 		meta.SetStatusCondition(&role.Status.Conditions, metav1.Condition{
 			Type: "Ready", Status: metav1.ConditionFalse, Reason: "EffectivePermissionsError",
-			Message: fmt.Sprintf("Failed to compute effective permissions: %s", effectivePermsErr.Error()),
+			Message:            fmt.Sprintf("Failed to compute effective permissions: %s", effectivePermsErr.Error()),
 			LastTransitionTime: metav1.Now(), ObservedGeneration: currentGeneration,
 		})
 		if statusUpdateErr := r.updateRoleStatus(ctx, role, oldStatus); statusUpdateErr != nil {
