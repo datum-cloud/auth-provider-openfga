@@ -12,8 +12,8 @@ require (
 	github.com/onsi/gomega v1.38.0
 	github.com/openfga/api/proto v0.0.0-20250814141243-c0b62b28b14d
 	github.com/spf13/cobra v1.9.1
-	github.com/stretchr/testify v1.10.0
-	go.miloapis.com/milo v0.2.0
+	github.com/stretchr/testify v1.11.1
+	go.miloapis.com/milo v0.9.3-0.20251031192420-42fae44a45e6
 	google.golang.org/grpc v1.75.0
 	google.golang.org/protobuf v1.36.8
 	k8s.io/api v0.33.4
@@ -64,7 +64,6 @@ require (
 	github.com/prometheus/procfs v0.16.1 // indirect
 	github.com/spf13/pflag v1.0.7 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
-	go.opentelemetry.io/otel/sdk/metric v1.37.0 // indirect
 	go.uber.org/automaxprocs v1.6.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.27.0 // indirect
@@ -75,7 +74,7 @@ require (
 	golang.org/x/sys v0.35.0 // indirect
 	golang.org/x/term v0.34.0 // indirect
 	golang.org/x/text v0.28.0 // indirect
-	golang.org/x/time v0.11.0 // indirect
+	golang.org/x/time v0.12.0 // indirect
 	golang.org/x/tools v0.36.0 // indirect
 	gomodules.xyz/jsonpatch/v2 v2.4.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20250707201910-8d1bb00bc6a7 // indirect
