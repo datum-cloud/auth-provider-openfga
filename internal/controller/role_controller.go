@@ -132,15 +132,9 @@ func (r *RoleReconciler) getAllEffectivePermissions(ctx context.Context, role *i
 }
 
 // validateRolePermissions checks if all effective permissions in a role are validly defined by known ProtectedResources.
-func (r *RoleReconciler) validateRolePermissions(ctx context.Context, role *iamdatumapiscomv1alpha1.Role, protectedResources []iamdatumapiscomv1alpha1.ProtectedResource) ([]string, error) {
+func (r *RoleReconciler) validateRolePermissions(ctx context.Context, role *iamdatumapiscomv1alpha1.Role, protectedResources []iamdatumapiscomv1alpha1.ProtectedResource, effectivePermissions []string) ([]string, error) {
 	log := logf.FromContext(ctx).WithValues("roleName", role.Name)
 	var invalidPermissions []string
-
-	effectivePermissions, err := r.getAllEffectivePermissions(ctx, role, nil)
-	if err != nil {
-		log.Error(err, "Failed to collect all effective permissions for role validation", "roleName", role.Name)
-		return []string{fmt.Sprintf("failed to resolve inherited roles: %s", err.Error())}, nil
-	}
 
 	for _, permStr := range effectivePermissions {
 		permAPIGroup, permResourcePlural, permName, isValidFormat := parsePermissionString(permStr)
@@ -263,7 +257,25 @@ func (r *RoleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return ctrl.Result{}, err
 	}
 
-	invalidPermissions, validationErr := r.validateRolePermissions(ctx, role, protectedResourceList.Items)
+	// Compute effective permissions once for both status population and validation
+	effectivePermissions, effectivePermsErr := r.getAllEffectivePermissions(ctx, role, nil)
+	if effectivePermsErr != nil {
+		log.Error(effectivePermsErr, "Failed to compute effective permissions for role")
+		meta.SetStatusCondition(&role.Status.Conditions, metav1.Condition{
+			Type: "Ready", Status: metav1.ConditionFalse, Reason: "EffectivePermissionsError",
+			Message:            fmt.Sprintf("Failed to compute effective permissions: %s", effectivePermsErr.Error()),
+			LastTransitionTime: metav1.Now(), ObservedGeneration: currentGeneration,
+		})
+		if statusUpdateErr := r.updateRoleStatus(ctx, role, oldStatus); statusUpdateErr != nil {
+			log.Error(statusUpdateErr, "Failed to update Role status after effective permissions error")
+		}
+		return ctrl.Result{}, effectivePermsErr
+	}
+	// Sort for deterministic output and populate status
+	sort.Strings(effectivePermissions)
+	role.Status.EffectivePermissions = effectivePermissions
+
+	invalidPermissions, validationErr := r.validateRolePermissions(ctx, role, protectedResourceList.Items, effectivePermissions)
 	permValidationCondition := metav1.Condition{
 		Type: "PermissionsValid", Status: metav1.ConditionTrue, Reason: "ValidationSuccessful",
 		Message: "All permissions validated successfully.", LastTransitionTime: metav1.Now(), ObservedGeneration: currentGeneration,
