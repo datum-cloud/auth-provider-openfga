@@ -12,6 +12,7 @@ import (
 	openfgav1 "github.com/openfga/api/proto/openfga/v1"
 	"go.miloapis.com/auth-provider-openfga/internal/openfga"
 	iamdatumapiscomv1alpha1 "go.miloapis.com/milo/pkg/apis/iam/v1alpha1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -101,6 +102,9 @@ func (r *PolicyBindingReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, fmt.Errorf("failed to get PolicyBinding: %w", err)
 	}
 
+	// Capture the old status before making any changes
+	oldStatus := policyBinding.Status.DeepCopy()
+
 	// Store the current generation of the PolicyBinding. This will be used when updating the status to indicate which
 	// version of the spec the status reflects.
 	currentGeneration := policyBinding.Generation
@@ -126,7 +130,7 @@ func (r *PolicyBindingReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	// Validate the resource selector in the policy binding is valid
-	isValid, err := r.reconcileResourceSelectorValidation(ctx, policyBinding, currentGeneration)
+	isValid, err := r.reconcileResourceSelectorValidation(ctx, policyBinding, oldStatus, currentGeneration)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to validate resource selector: %w", err)
 	}
@@ -142,7 +146,7 @@ func (r *PolicyBindingReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			LastTransitionTime: metav1.Now(),
 		})
 		// Attempt to update status with the Ready=False condition.
-		if err := r.updatePolicyBindingStatus(ctx, policyBinding, currentGeneration); err != nil {
+		if err := r.updatePolicyBindingStatus(ctx, policyBinding, oldStatus, currentGeneration); err != nil {
 			return ctrl.Result{}, fmt.Errorf("failed to update PolicyBinding status after ResourceSelector validation failure: %w", err)
 		}
 		// Resource selector validation failed. Stop reconciliation. Rely on the policy binding being re-reconciled when the target
@@ -151,7 +155,7 @@ func (r *PolicyBindingReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	// Validate the subjects in the policy binding are valid and exist in the cluster.
-	isValid, err = r.reconcileSubjectValidation(ctx, policyBinding, currentGeneration)
+	isValid, err = r.reconcileSubjectValidation(ctx, policyBinding, oldStatus, currentGeneration)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to validate subjects: %w", err)
 	}
@@ -166,7 +170,7 @@ func (r *PolicyBindingReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			LastTransitionTime: metav1.Now(),
 		})
 		// Attempt to update status with the Ready=False condition.
-		if err := r.updatePolicyBindingStatus(ctx, policyBinding, currentGeneration); err != nil {
+		if err := r.updatePolicyBindingStatus(ctx, policyBinding, oldStatus, currentGeneration); err != nil {
 			return ctrl.Result{}, fmt.Errorf("failed to update PolicyBinding status after subject validation failure: %w", err)
 		}
 		// Subject validation failed. Stop reconciliation. Rely on the policy binding being re-reconciled when the subjects
@@ -177,13 +181,13 @@ func (r *PolicyBindingReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// At this juncture, both ResourceSelector and all Subjects have been successfully validated. Their respective conditions
 	// (TargetValid=True, SubjectValid=True) have been set in memory by their validation functions. We need to persist
 	// these positive statuses before proceeding to the OpenFGA reconciliation, which is an external call.
-	if err := r.updatePolicyBindingStatus(ctx, policyBinding, currentGeneration); err != nil {
+	if err := r.updatePolicyBindingStatus(ctx, policyBinding, oldStatus, currentGeneration); err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to update PolicyBinding status after successful validations before OpenFGA reconciliation: %w", err)
 	}
 
 	// Reconcile with OpenFGA. This creates/updates/deletes tuples in OpenFGA based on the PolicyBinding. This step also
 	// implicitly validates the RoleRef by attempting to use the role.
-	ctrlResult, err := r.reconcileOpenFGAPolicy(ctx, policyBinding, currentGeneration)
+	ctrlResult, err := r.reconcileOpenFGAPolicy(ctx, policyBinding, oldStatus, currentGeneration)
 	if err != nil {
 		return ctrlResult, fmt.Errorf("failed to reconcile OpenFGA policy: %w", err)
 	}
@@ -198,7 +202,7 @@ func (r *PolicyBindingReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		LastTransitionTime: metav1.Now(),
 	})
 	// Use the new status update helper
-	if err := r.updatePolicyBindingStatus(ctx, policyBinding, currentGeneration); err != nil {
+	if err := r.updatePolicyBindingStatus(ctx, policyBinding, oldStatus, currentGeneration); err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to update PolicyBinding status after successful reconciliation: %w", err)
 	}
 
@@ -208,7 +212,7 @@ func (r *PolicyBindingReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 // reconcileResourceSelectorValidation performs validation based on whether ResourceRef or ResourceKind is specified.
 // For ResourceRef, it validates the specific resource instance exists and matches the UID.
 // For ResourceKind, it validates that the resource type is registered in ProtectedResources.
-func (r *PolicyBindingReconciler) reconcileResourceSelectorValidation(ctx context.Context, policyBinding *iamdatumapiscomv1alpha1.PolicyBinding, currentGeneration int64) (isValid bool, err error) {
+func (r *PolicyBindingReconciler) reconcileResourceSelectorValidation(ctx context.Context, policyBinding *iamdatumapiscomv1alpha1.PolicyBinding, oldStatus *iamdatumapiscomv1alpha1.PolicyBindingStatus, currentGeneration int64) (isValid bool, err error) {
 	// Fetch all ProtectedResource CRs. These define the resource types managed by IAM.
 	var protectedResourceList iamdatumapiscomv1alpha1.ProtectedResourceList
 	if err := r.List(ctx, &protectedResourceList); err != nil {
@@ -216,16 +220,16 @@ func (r *PolicyBindingReconciler) reconcileResourceSelectorValidation(ctx contex
 	}
 
 	if policyBinding.Spec.ResourceSelector.ResourceRef != nil {
-		return r.validateResourceRef(ctx, policyBinding, protectedResourceList.Items, currentGeneration)
+		return r.validateResourceRef(ctx, policyBinding, protectedResourceList.Items, oldStatus, currentGeneration)
 	} else if policyBinding.Spec.ResourceSelector.ResourceKind != nil {
-		return r.validateResourceKind(ctx, policyBinding, protectedResourceList.Items, currentGeneration)
+		return r.validateResourceKind(ctx, policyBinding, protectedResourceList.Items, oldStatus, currentGeneration)
 	} else {
 		return false, fmt.Errorf("ResourceSelector is empty")
 	}
 }
 
 // validateResourceRef validates a specific resource instance referenced by ResourceRef
-func (r *PolicyBindingReconciler) validateResourceRef(ctx context.Context, policyBinding *iamdatumapiscomv1alpha1.PolicyBinding, protectedResources []iamdatumapiscomv1alpha1.ProtectedResource, currentGeneration int64) (isValid bool, err error) {
+func (r *PolicyBindingReconciler) validateResourceRef(ctx context.Context, policyBinding *iamdatumapiscomv1alpha1.PolicyBinding, protectedResources []iamdatumapiscomv1alpha1.ProtectedResource, oldStatus *iamdatumapiscomv1alpha1.PolicyBindingStatus, currentGeneration int64) (isValid bool, err error) {
 	log := logf.FromContext(ctx)
 
 	resourceRef := policyBinding.Spec.ResourceSelector.ResourceRef
@@ -244,7 +248,7 @@ func (r *PolicyBindingReconciler) validateResourceRef(ctx context.Context, polic
 			ObservedGeneration: currentGeneration,
 		})
 
-		if err := r.updatePolicyBindingStatus(ctx, policyBinding, currentGeneration); err != nil {
+		if err := r.updatePolicyBindingStatus(ctx, policyBinding, oldStatus, currentGeneration); err != nil {
 			return false, fmt.Errorf("failed to update PolicyBinding status after type validation failure: %w", err)
 		}
 		return false, nil // No requeue, type definition needs to be fixed.
@@ -280,7 +284,7 @@ func (r *PolicyBindingReconciler) validateResourceRef(ctx context.Context, polic
 			ObservedGeneration: currentGeneration,
 		})
 
-		if err := r.updatePolicyBindingStatus(ctx, policyBinding, currentGeneration); err != nil {
+		if err := r.updatePolicyBindingStatus(ctx, policyBinding, oldStatus, currentGeneration); err != nil {
 			return false, fmt.Errorf("failed to update PolicyBinding status after target validation failure: %w", err)
 		}
 		if !stopReconciliation {
@@ -302,7 +306,7 @@ func (r *PolicyBindingReconciler) validateResourceRef(ctx context.Context, polic
 			Message:            msg,
 			ObservedGeneration: currentGeneration,
 		})
-		if err := r.updatePolicyBindingStatus(ctx, policyBinding, currentGeneration); err != nil {
+		if err := r.updatePolicyBindingStatus(ctx, policyBinding, oldStatus, currentGeneration); err != nil {
 			return false, fmt.Errorf("failed to update PolicyBinding status after target UID mismatch: %w", err)
 		}
 		// UID mismatch is a definitive validation failure. Stop reconciliation.
@@ -322,7 +326,7 @@ func (r *PolicyBindingReconciler) validateResourceRef(ctx context.Context, polic
 }
 
 // validateResourceKind validates a resource kind for system-wide access
-func (r *PolicyBindingReconciler) validateResourceKind(ctx context.Context, policyBinding *iamdatumapiscomv1alpha1.PolicyBinding, protectedResources []iamdatumapiscomv1alpha1.ProtectedResource, currentGeneration int64) (isValid bool, err error) {
+func (r *PolicyBindingReconciler) validateResourceKind(ctx context.Context, policyBinding *iamdatumapiscomv1alpha1.PolicyBinding, protectedResources []iamdatumapiscomv1alpha1.ProtectedResource, oldStatus *iamdatumapiscomv1alpha1.PolicyBindingStatus, currentGeneration int64) (isValid bool, err error) {
 	log := logf.FromContext(ctx)
 
 	resourceKind := policyBinding.Spec.ResourceSelector.ResourceKind
@@ -341,7 +345,7 @@ func (r *PolicyBindingReconciler) validateResourceKind(ctx context.Context, poli
 			ObservedGeneration: currentGeneration,
 		})
 
-		if err := r.updatePolicyBindingStatus(ctx, policyBinding, currentGeneration); err != nil {
+		if err := r.updatePolicyBindingStatus(ctx, policyBinding, oldStatus, currentGeneration); err != nil {
 			return false, fmt.Errorf("failed to update PolicyBinding status after kind validation failure: %w", err)
 		}
 		return false, nil // No requeue, type definition needs to be fixed.
@@ -376,10 +380,10 @@ func (r *PolicyBindingReconciler) validateResourceKind(ctx context.Context, poli
 //
 // The function returns `isValid=true` if all subjects are valid, and `isValid=false` otherwise. It also returns a
 // `ctrl.Result` and `error` to guide the main Reconcile loop (e.g., to requeue or stop).
-func (r *PolicyBindingReconciler) reconcileSubjectValidation(ctx context.Context, policyBinding *iamdatumapiscomv1alpha1.PolicyBinding, currentGeneration int64) (isValid bool, err error) {
+func (r *PolicyBindingReconciler) reconcileSubjectValidation(ctx context.Context, policyBinding *iamdatumapiscomv1alpha1.PolicyBinding, oldStatus *iamdatumapiscomv1alpha1.PolicyBindingStatus, currentGeneration int64) (isValid bool, err error) {
 	log := logf.FromContext(ctx)
 
-	subjectsAreValid, subjectValidationMessages, err := r.validatePolicyBindingSubjects(ctx, policyBinding)
+	subjectsAreValid, subjectValidationMessages, err := r.validatePolicyBindingSubjects(ctx, policyBinding, oldStatus, currentGeneration)
 	if err != nil {
 		return false, fmt.Errorf("failed to validate PolicyBinding subjects: %w", err)
 	}
@@ -398,7 +402,7 @@ func (r *PolicyBindingReconciler) reconcileSubjectValidation(ctx context.Context
 		})
 		// The main Reconcile loop will handle the overall Ready condition. Update status now to reflect the
 		// SubjectValid=False state due to validation failures.
-		if err := r.updatePolicyBindingStatus(ctx, policyBinding, currentGeneration); err != nil {
+		if err := r.updatePolicyBindingStatus(ctx, policyBinding, oldStatus, currentGeneration); err != nil {
 			return false, fmt.Errorf("failed to update PolicyBinding status after subject validation failure: %w", err)
 		}
 		// Validation failed cleanly; stop reconciliation.
@@ -431,7 +435,7 @@ func (r *PolicyBindingReconciler) reconcileSubjectValidation(ctx context.Context
 // If `ReconcilePolicy` is successful, it implies that the referenced Role was valid (found and usable). In this case,
 // `ConditionTypeRoleValid` is set to True. The main "Ready" condition will be set to True by the calling Reconcile
 // function.
-func (r *PolicyBindingReconciler) reconcileOpenFGAPolicy(ctx context.Context, policyBinding *iamdatumapiscomv1alpha1.PolicyBinding, currentGeneration int64) (ctrl.Result, error) {
+func (r *PolicyBindingReconciler) reconcileOpenFGAPolicy(ctx context.Context, policyBinding *iamdatumapiscomv1alpha1.PolicyBinding, oldStatus *iamdatumapiscomv1alpha1.PolicyBindingStatus, currentGeneration int64) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 	policyReconciler := openfga.PolicyReconciler{
 		StoreID:   r.StoreID,
@@ -466,7 +470,7 @@ func (r *PolicyBindingReconciler) reconcileOpenFGAPolicy(ctx context.Context, po
 			Message:            fmt.Sprintf("Failed to create authorization binding: %s", err.Error()),
 			LastTransitionTime: metav1.Now(),
 		})
-		if statusErr := r.updatePolicyBindingStatus(ctx, policyBinding, currentGeneration); statusErr != nil {
+		if statusErr := r.updatePolicyBindingStatus(ctx, policyBinding, oldStatus, currentGeneration); statusErr != nil {
 			log.Error(statusErr, "Failed to update PolicyBinding status after reconciliation error")
 		}
 		// Requeue because OpenFGA reconciliation failed.
@@ -492,10 +496,23 @@ func (r *PolicyBindingReconciler) reconcileOpenFGAPolicy(ctx context.Context, po
 
 // updatePolicyBindingStatus is a helper function to consistently update the PolicyBinding's status subresource. It sets
 // the ObservedGeneration to the current generation of the PolicyBinding resource before performing the update. This is
-// crucial for Kubernetes controllers to signal that the status reflects the latest spec.
-func (r *PolicyBindingReconciler) updatePolicyBindingStatus(ctx context.Context, policyBinding *iamdatumapiscomv1alpha1.PolicyBinding, observedGen int64) error {
+// crucial for Kubernetes controllers to signal that the status reflects the latest spec. The status is only updated if
+// it differs from the old status to avoid unnecessary API calls.
+func (r *PolicyBindingReconciler) updatePolicyBindingStatus(ctx context.Context, policyBinding *iamdatumapiscomv1alpha1.PolicyBinding, oldStatus *iamdatumapiscomv1alpha1.PolicyBindingStatus, observedGen int64) error {
+	log := logf.FromContext(ctx).WithValues("policyBindingName", policyBinding.Name, "policyBindingNamespace", policyBinding.Namespace)
+
 	policyBinding.Status.ObservedGeneration = observedGen
-	return r.Status().Update(ctx, policyBinding)
+
+	// Only update if the status has actually changed
+	if !equality.Semantic.DeepEqual(oldStatus, &policyBinding.Status) {
+		if err := r.Status().Update(ctx, policyBinding); err != nil {
+			return err
+		}
+		log.V(1).Info("PolicyBinding status updated")
+	} else {
+		log.V(1).Info("PolicyBinding status unchanged; skipping update")
+	}
+	return nil
 }
 
 // getUnstructuredResourceAndMapping is a helper function to resolve the GroupVersionKind (GVK) of a resource reference
@@ -570,7 +587,7 @@ func (r *PolicyBindingReconciler) validateResourceType(
 // Kubernetes API server. 3. The subject resource actually exists in the cluster. It accumulates validation messages for
 // any invalid subjects. If a subject lookup results in an API error that suggests a transient issue (not a simple "not
 // found" or "kind not recognized"), it returns an error to trigger a requeue of the PolicyBinding.
-func (r *PolicyBindingReconciler) validatePolicyBindingSubjects(ctx context.Context, policyBinding *iamdatumapiscomv1alpha1.PolicyBinding) (subjectsValid bool, validationMessages []string, requeueErr error) {
+func (r *PolicyBindingReconciler) validatePolicyBindingSubjects(ctx context.Context, policyBinding *iamdatumapiscomv1alpha1.PolicyBinding, oldStatus *iamdatumapiscomv1alpha1.PolicyBindingStatus, currentGeneration int64) (subjectsValid bool, validationMessages []string, requeueErr error) {
 	log := logf.FromContext(ctx)
 	subjectsValid = true // Assume valid until proven otherwise.
 
