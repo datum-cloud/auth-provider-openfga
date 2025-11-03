@@ -262,9 +262,11 @@ func (r *RoleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	if effectivePermsErr != nil {
 		log.Error(effectivePermsErr, "Failed to compute effective permissions for role")
 		meta.SetStatusCondition(&role.Status.Conditions, metav1.Condition{
-			Type: "Ready", Status: metav1.ConditionFalse, Reason: "EffectivePermissionsError",
+			Type:               "Ready",
+			Status:             metav1.ConditionFalse,
+			Reason:             "EffectivePermissionsError",
 			Message:            fmt.Sprintf("Failed to compute effective permissions: %s", effectivePermsErr.Error()),
-			LastTransitionTime: metav1.Now(), ObservedGeneration: currentGeneration,
+			ObservedGeneration: currentGeneration,
 		})
 		if statusUpdateErr := r.updateRoleStatus(ctx, role, oldStatus); statusUpdateErr != nil {
 			log.Error(statusUpdateErr, "Failed to update Role status after effective permissions error")
@@ -277,8 +279,11 @@ func (r *RoleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 
 	invalidPermissions, validationErr := r.validateRolePermissions(ctx, role, protectedResourceList.Items, effectivePermissions)
 	permValidationCondition := metav1.Condition{
-		Type: "PermissionsValid", Status: metav1.ConditionTrue, Reason: "ValidationSuccessful",
-		Message: "All permissions validated successfully.", LastTransitionTime: metav1.Now(), ObservedGeneration: currentGeneration,
+		Type:               "PermissionsValid",
+		Status:             metav1.ConditionTrue,
+		Reason:             "ValidationSuccessful",
+		Message:            "All permissions validated successfully.",
+		ObservedGeneration: currentGeneration,
 	}
 	if validationErr != nil {
 		log.Error(validationErr, "Error validating role permissions")
@@ -302,8 +307,10 @@ func (r *RoleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		if err := openFgaReconciler.ReconcileRole(ctx, role); err != nil {
 			log.Error(err, "Failed to reconcile Role with OpenFGA")
 			meta.SetStatusCondition(&role.Status.Conditions, metav1.Condition{
-				Type: "Ready", Status: metav1.ConditionFalse, Reason: "OpenFGAReconciliationFailed",
-				Message: fmt.Sprintf("Failed to reconcile with OpenFGA: %s", err.Error()), LastTransitionTime: metav1.Now(),
+				Type:    "Ready",
+				Status:  metav1.ConditionFalse,
+				Reason:  "OpenFGAReconciliationFailed",
+				Message: fmt.Sprintf("Failed to reconcile with OpenFGA: %s", err.Error()),
 			})
 			if statusUpdateErr := r.updateRoleStatus(ctx, role, oldStatus); statusUpdateErr != nil {
 				log.Error(statusUpdateErr, "Failed to update Role status after OpenFGA reconciliation failure")
@@ -312,14 +319,20 @@ func (r *RoleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		}
 		log.Info("Role successfully reconciled with OpenFGA")
 		meta.SetStatusCondition(&role.Status.Conditions, metav1.Condition{
-			Type: "Ready", Status: metav1.ConditionTrue, Reason: "ReconciliationSuccessful",
-			Message: "Role reconciled successfully with OpenFGA.", LastTransitionTime: metav1.Now(), ObservedGeneration: currentGeneration,
+			Type:               "Ready",
+			Status:             metav1.ConditionTrue,
+			Reason:             "ReconciliationSuccessful",
+			Message:            "Role reconciled successfully with OpenFGA.",
+			ObservedGeneration: currentGeneration,
 		})
 	} else {
 		log.Info("Skipping OpenFGA reconciliation due to invalid permissions.")
 		meta.SetStatusCondition(&role.Status.Conditions, metav1.Condition{
-			Type: "Ready", Status: metav1.ConditionFalse, Reason: "InvalidPermissions",
-			Message: permValidationCondition.Message, LastTransitionTime: metav1.Now(), ObservedGeneration: currentGeneration,
+			Type:               "Ready",
+			Status:             metav1.ConditionFalse,
+			Reason:             "InvalidPermissions",
+			Message:            permValidationCondition.Message,
+			ObservedGeneration: currentGeneration,
 		})
 	}
 

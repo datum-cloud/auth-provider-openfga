@@ -180,11 +180,10 @@ func (r *GroupMembershipReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 			"groupRefValid", isGroupRefValid)
 
 		meta.SetStatusCondition(&groupMembership.Status.Conditions, metav1.Condition{
-			Type:               "Ready",
-			Status:             metav1.ConditionFalse,
-			Reason:             "ReferenceInvalid",
-			Message:            fmt.Sprintf("User and/or Group reference are invalid. See %s and %s conditions for details.", ConditionTypeUserRefValid, ConditionTypeGroupRefValid),
-			LastTransitionTime: metav1.Now(),
+			Type:    "Ready",
+			Status:  metav1.ConditionFalse,
+			Reason:  "ReferenceInvalid",
+			Message: fmt.Sprintf("User and/or Group reference are invalid. See %s and %s conditions for details.", ConditionTypeUserRefValid, ConditionTypeGroupRefValid),
 		})
 		err = r.Status().Update(ctx, groupMembership)
 		if err != nil {
@@ -211,11 +210,10 @@ func (r *GroupMembershipReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 	// Update status conditions
 	meta.SetStatusCondition(&groupMembership.Status.Conditions, metav1.Condition{
-		Type:               "Ready",
-		Status:             metav1.ConditionTrue,
-		Reason:             "Reconciled",
-		Message:            "Group membership successfully reconciled",
-		LastTransitionTime: metav1.Now(),
+		Type:    "Ready",
+		Status:  metav1.ConditionTrue,
+		Reason:  "Reconciled",
+		Message: "Group membership successfully reconciled",
 	})
 	if err := r.Status().Update(ctx, groupMembership); err != nil {
 		log.Error(err, "Failed to update GroupMembership status")
@@ -239,11 +237,10 @@ func (r *GroupMembershipReconciler) validateRef(
 	if err != nil {
 		if errors.IsNotFound(err) {
 			meta.SetStatusCondition(conditions, metav1.Condition{
-				Type:               conditionType,
-				Status:             metav1.ConditionFalse,
-				Reason:             ReasonValidationFailed,
-				Message:            fmt.Sprintf("Reference not found: %v", err),
-				LastTransitionTime: metav1.Now(),
+				Type:    conditionType,
+				Status:  metav1.ConditionFalse,
+				Reason:  ReasonValidationFailed,
+				Message: fmt.Sprintf("Reference not found: %v", err),
 			})
 			return false, nil
 		}
@@ -252,11 +249,10 @@ func (r *GroupMembershipReconciler) validateRef(
 	}
 
 	meta.SetStatusCondition(conditions, metav1.Condition{
-		Type:               conditionType,
-		Status:             metav1.ConditionTrue,
-		Reason:             ReasonValidationSuccessful,
-		Message:            "Reference is valid.",
-		LastTransitionTime: metav1.Now(),
+		Type:    conditionType,
+		Status:  metav1.ConditionTrue,
+		Reason:  ReasonValidationSuccessful,
+		Message: "Reference is valid.",
 	})
 	return true, nil
 }
