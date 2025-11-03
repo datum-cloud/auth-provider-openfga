@@ -9,6 +9,7 @@ import (
 	openfgav1 "github.com/openfga/api/proto/openfga/v1"
 	"go.miloapis.com/auth-provider-openfga/internal/openfga"
 	iamdatumapiscomv1alpha1 "go.miloapis.com/milo/pkg/apis/iam/v1alpha1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -135,6 +136,9 @@ func (r *AuthorizationModelReconciler) reconcileProtectedResource(ctx context.Co
 	log := logf.FromContext(ctx).WithValues("protectedResourceName", triggeringPR.Name, "operation", "reconcileProtectedResource")
 	log.Info("Proceeding with regular reconciliation")
 
+	// Capture the old status before making any changes
+	oldStatus := triggeringPR.Status.DeepCopy()
+
 	var prList iamdatumapiscomv1alpha1.ProtectedResourceList
 	if err := r.List(ctx, &prList); err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to list ProtectedResources: %w", err)
@@ -145,7 +149,7 @@ func (r *AuthorizationModelReconciler) reconcileProtectedResource(ctx context.Co
 	}
 
 	log.Info("Successfully reconciled IAM authorization model.")
-	if err := r.updateTriggeringPRStatus(ctx, triggeringPR, true, "IAMSystemConfigured", "Resource is configured to be protected by the IAM system."); err != nil {
+	if err := r.updateTriggeringPRStatus(ctx, triggeringPR, oldStatus, true, "IAMSystemConfigured", "Resource is configured to be protected by the IAM system."); err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to update ProtectedResource status: %w", err)
 	}
 
@@ -156,37 +160,42 @@ func (r *AuthorizationModelReconciler) reconcileProtectedResource(ctx context.Co
 // ProtectedResource. This is used to reflect the outcome of reconciliation
 // attempts, providing visibility into whether the resource is correctly
 // configured within the IAM system. It sets the ObservedGeneration to match the
-// reconciled generation and updates the Ready condition.
+// reconciled generation and updates the Ready condition. The status is only
+// updated if it differs from the old status to avoid unnecessary API calls.
 func (r *AuthorizationModelReconciler) updateTriggeringPRStatus(
 	ctx context.Context,
 	pr *iamdatumapiscomv1alpha1.ProtectedResource,
+	oldStatus *iamdatumapiscomv1alpha1.ProtectedResourceStatus,
 	isSuccess bool,
 	reasonForCondition string,
 	messageForCondition string,
 ) error {
 	log := logf.FromContext(ctx).WithValues("protectedResourceName", pr.Name, "targetSuccess", isSuccess, "reason", reasonForCondition)
 
-	prCopy := pr.DeepCopy()
-	prCopy.Status.ObservedGeneration = pr.Generation
+	pr.Status.ObservedGeneration = pr.Generation
 
 	conditionStatus := metav1.ConditionFalse
 	if isSuccess {
 		conditionStatus = metav1.ConditionTrue
 	}
 
-	meta.SetStatusCondition(&prCopy.Status.Conditions, metav1.Condition{
-		Type:               "Ready",
-		Status:             conditionStatus,
-		Reason:             reasonForCondition,
-		Message:            messageForCondition,
-		LastTransitionTime: metav1.Now(),
+	meta.SetStatusCondition(&pr.Status.Conditions, metav1.Condition{
+		Type:    "Ready",
+		Status:  conditionStatus,
+		Reason:  reasonForCondition,
+		Message: messageForCondition,
 	})
 
-	if err := r.Status().Update(ctx, prCopy); err != nil {
-		log.Error(err, "Failed to update ProtectedResource status")
-		return err
+	// Only update if the status has actually changed
+	if !equality.Semantic.DeepEqual(oldStatus, &pr.Status) {
+		if err := r.Status().Update(ctx, pr); err != nil {
+			log.Error(err, "Failed to update ProtectedResource status")
+			return err
+		}
+		log.Info("Successfully updated ProtectedResource status.")
+	} else {
+		log.V(1).Info("ProtectedResource status unchanged; skipping update")
 	}
-	log.Info("Successfully updated ProtectedResource status.")
 	return nil
 }
 

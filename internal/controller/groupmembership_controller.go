@@ -7,6 +7,7 @@ import (
 	openfgav1 "github.com/openfga/api/proto/openfga/v1"
 	"go.miloapis.com/auth-provider-openfga/internal/openfga"
 	iammiloapiscomv1alpha1 "go.miloapis.com/milo/pkg/apis/iam/v1alpha1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -124,6 +125,9 @@ func (r *GroupMembershipReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, err
 	}
 
+	// Capture the old status before making any changes
+	oldStatus := groupMembership.Status.DeepCopy()
+
 	// Run the finalizer
 	finalizeResult, err := r.Finalizers.Finalize(ctx, groupMembership)
 	if err != nil {
@@ -180,16 +184,22 @@ func (r *GroupMembershipReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 			"groupRefValid", isGroupRefValid)
 
 		meta.SetStatusCondition(&groupMembership.Status.Conditions, metav1.Condition{
-			Type:               "Ready",
-			Status:             metav1.ConditionFalse,
-			Reason:             "ReferenceInvalid",
-			Message:            fmt.Sprintf("User and/or Group reference are invalid. See %s and %s conditions for details.", ConditionTypeUserRefValid, ConditionTypeGroupRefValid),
-			LastTransitionTime: metav1.Now(),
+			Type:    "Ready",
+			Status:  metav1.ConditionFalse,
+			Reason:  "ReferenceInvalid",
+			Message: fmt.Sprintf("User and/or Group reference are invalid. See %s and %s conditions for details.", ConditionTypeUserRefValid, ConditionTypeGroupRefValid),
 		})
-		err = r.Status().Update(ctx, groupMembership)
-		if err != nil {
-			log.Error(err, "Failed to update GroupMembership status")
-			return ctrl.Result{}, err
+
+		// Only update if the status has actually changed
+		if !equality.Semantic.DeepEqual(oldStatus, &groupMembership.Status) {
+			err = r.Status().Update(ctx, groupMembership)
+			if err != nil {
+				log.Error(err, "Failed to update GroupMembership status")
+				return ctrl.Result{}, err
+			}
+			log.V(1).Info("GroupMembership status updated")
+		} else {
+			log.V(1).Info("GroupMembership status unchanged; skipping update")
 		}
 
 		return ctrl.Result{}, nil
@@ -211,15 +221,21 @@ func (r *GroupMembershipReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 	// Update status conditions
 	meta.SetStatusCondition(&groupMembership.Status.Conditions, metav1.Condition{
-		Type:               "Ready",
-		Status:             metav1.ConditionTrue,
-		Reason:             "Reconciled",
-		Message:            "Group membership successfully reconciled",
-		LastTransitionTime: metav1.Now(),
+		Type:    "Ready",
+		Status:  metav1.ConditionTrue,
+		Reason:  "Reconciled",
+		Message: "Group membership successfully reconciled",
 	})
-	if err := r.Status().Update(ctx, groupMembership); err != nil {
-		log.Error(err, "Failed to update GroupMembership status")
-		return ctrl.Result{}, err
+
+	// Only update if the status has actually changed
+	if !equality.Semantic.DeepEqual(oldStatus, &groupMembership.Status) {
+		if err := r.Status().Update(ctx, groupMembership); err != nil {
+			log.Error(err, "Failed to update GroupMembership status")
+			return ctrl.Result{}, err
+		}
+		log.V(1).Info("GroupMembership status updated")
+	} else {
+		log.V(1).Info("GroupMembership status unchanged; skipping update")
 	}
 
 	log.Info("Successfully reconciled GroupMembership")
@@ -239,11 +255,10 @@ func (r *GroupMembershipReconciler) validateRef(
 	if err != nil {
 		if errors.IsNotFound(err) {
 			meta.SetStatusCondition(conditions, metav1.Condition{
-				Type:               conditionType,
-				Status:             metav1.ConditionFalse,
-				Reason:             ReasonValidationFailed,
-				Message:            fmt.Sprintf("Reference not found: %v", err),
-				LastTransitionTime: metav1.Now(),
+				Type:    conditionType,
+				Status:  metav1.ConditionFalse,
+				Reason:  ReasonValidationFailed,
+				Message: fmt.Sprintf("Reference not found: %v", err),
 			})
 			return false, nil
 		}
@@ -252,11 +267,10 @@ func (r *GroupMembershipReconciler) validateRef(
 	}
 
 	meta.SetStatusCondition(conditions, metav1.Condition{
-		Type:               conditionType,
-		Status:             metav1.ConditionTrue,
-		Reason:             ReasonValidationSuccessful,
-		Message:            "Reference is valid.",
-		LastTransitionTime: metav1.Now(),
+		Type:    conditionType,
+		Status:  metav1.ConditionTrue,
+		Reason:  ReasonValidationSuccessful,
+		Message: "Reference is valid.",
 	})
 	return true, nil
 }
