@@ -10,7 +10,7 @@ require (
 	github.com/google/go-cmp v0.7.0
 	github.com/onsi/ginkgo/v2 v2.24.0
 	github.com/onsi/gomega v1.38.0
-	github.com/openfga/api/proto v0.0.0-20250814141243-c0b62b28b14d
+	github.com/openfga/api/proto v0.0.0-20251105142303-feed3db3d69d
 	github.com/spf13/cobra v1.9.1
 	github.com/stretchr/testify v1.11.1
 	go.miloapis.com/milo v0.9.3-0.20251031192420-42fae44a45e6
