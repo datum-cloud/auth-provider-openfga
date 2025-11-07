@@ -394,18 +394,13 @@ func (r *PolicyBindingReconciler) reconcileSubjectValidation(ctx context.Context
 		// One or more subjects are invalid (e.g., not found, UID missing), but no error occurred that requires a requeue.
 		// Set the SubjectValid condition to False. The main Reconcile loop will handle setting Ready=False.
 		meta.SetStatusCondition(&policyBinding.Status.Conditions, metav1.Condition{
-			Type:               "Ready",
+			Type:               ConditionTypeSubjectValid,
 			Status:             metav1.ConditionFalse,
-			Reason:             "SubjectValidationFailed",
+			Reason:             ReasonValidationFailed,
 			Message:            msg,
 			LastTransitionTime: metav1.Now(),
 		})
-		// The main Reconcile loop will handle the overall Ready condition. Update status now to reflect the
-		// SubjectValid=False state due to validation failures.
-		if err := r.updatePolicyBindingStatus(ctx, policyBinding, oldStatus, currentGeneration); err != nil {
-			return false, fmt.Errorf("failed to update PolicyBinding status after subject validation failure: %w", err)
-		}
-		// Validation failed cleanly; stop reconciliation.
+		// Validation failed cleanly; stop reconciliation. Status will be persisted by the caller.
 		return false, nil
 	}
 
