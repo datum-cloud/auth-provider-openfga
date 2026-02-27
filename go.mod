@@ -15,7 +15,7 @@ require (
 	github.com/stretchr/testify v1.11.1
 	go.miloapis.com/milo v0.9.3-0.20251031192420-42fae44a45e6
 	google.golang.org/grpc v1.75.0
-	google.golang.org/protobuf v1.36.8
+	google.golang.org/protobuf v1.36.11
 	k8s.io/api v0.33.4
 	k8s.io/apimachinery v0.33.4
 	k8s.io/apiserver v0.33.4
