@@ -50,7 +50,7 @@ jobs:
     with:
       bundle-name: ghcr.io/datum-cloud/auth-provider-openfga-kustomize
       bundle-path: config
-      image-overlays: config/base
+      image-overlays: config/base/services/authz-webhook,config/base/services/controller-manager
       image-name: ghcr.io/datum-cloud/auth-provider-openfga
       debug: true
     secrets: inherit
