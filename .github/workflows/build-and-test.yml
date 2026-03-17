@@ -24,7 +24,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
   validate-kustomize:
     uses: datum-cloud/actions/.github/workflows/validate-kustomize.yaml@v1.12.1
@@ -64,7 +64,7 @@ jobs:
       packages: read
     steps:
       - name: Clone the code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
       - name: Log in to Container Registry
         uses: docker/login-action@v3
