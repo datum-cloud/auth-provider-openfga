@@ -151,13 +151,21 @@ func (o *SubjectAccessReviewAuthorizer) Authorize(ctx context.Context, attribute
 		return authorizer.DecisionDeny, "", err
 	}
 
+	// Fetch ProtectedResources once. When K8sClient is the manager's cached
+	// client (mgr.GetClient()), this read is served from the in-memory informer
+	// cache and does not make a network round-trip.
+	protectedResources := &iamv1alpha1.ProtectedResourceList{}
+	if err := o.K8sClient.List(ctx, protectedResources); err != nil {
+		return authorizer.DecisionDeny, "", fmt.Errorf("failed to list ProtectedResources: %w", err)
+	}
+
 	// Validate permission exists
-	if err := o.validatePermission(ctx, attributes); err != nil {
+	if err := o.validatePermissionFromList(ctx, attributes, protectedResources); err != nil {
 		return authorizer.DecisionDeny, "", err
 	}
 
 	// Build and execute OpenFGA check
-	checkReq, err := o.buildOpenFGARequest(ctx, attributes, authCtx)
+	checkReq, err := o.buildOpenFGARequest(ctx, attributes, authCtx, protectedResources)
 	if err != nil {
 		return authorizer.DecisionDeny, "", fmt.Errorf("failed to build OpenFGA request: %w", err)
 	}
@@ -265,13 +273,10 @@ func (o *SubjectAccessReviewAuthorizer) validateOrganizationNamespace(ctx contex
 	return nil
 }
 
-// validatePermission checks if the requested permission is registered
-func (o *SubjectAccessReviewAuthorizer) validatePermission(ctx context.Context, attributes authorizer.Attributes) error {
-	permissionExists, err := o.validatePermissionWithServiceDefaulting(ctx, attributes)
-	if err != nil {
-		slog.ErrorContext(ctx, "failed to validate permission", slog.String("error", err.Error()))
-		return fmt.Errorf("failed to validate permission: %w", err)
-	}
+// validatePermissionFromList checks if the requested permission is registered
+// using an already-fetched ProtectedResourceList to avoid a redundant API call.
+func (o *SubjectAccessReviewAuthorizer) validatePermissionFromList(ctx context.Context, attributes authorizer.Attributes, protectedResources *iamv1alpha1.ProtectedResourceList) error {
+	permissionExists := o.permissionExistsInList(attributes, protectedResources)
 
 	if !permissionExists {
 		permission := o.buildPermissionString(attributes)
@@ -280,6 +285,22 @@ func (o *SubjectAccessReviewAuthorizer) validatePermission(ctx context.Context, 
 	}
 
 	return nil
+}
+
+// permissionExistsInList reports whether the verb on the requested resource is
+// declared as a permission in any entry of the already-fetched list.
+func (o *SubjectAccessReviewAuthorizer) permissionExistsInList(attributes authorizer.Attributes, protectedResources *iamv1alpha1.ProtectedResourceList) bool {
+	apiGroup := o.getEffectiveAPIGroup(attributes)
+	resource := attributes.GetResource()
+	verb := attributes.GetVerb()
+
+	for _, pr := range protectedResources.Items {
+		if pr.Spec.ServiceRef.Name == apiGroup && pr.Spec.Plural == resource {
+			return slices.Contains(pr.Spec.Permissions, verb)
+		}
+	}
+
+	return false
 }
 
 // executeOpenFGACheck performs the OpenFGA authorization check
@@ -306,7 +327,7 @@ func (o *SubjectAccessReviewAuthorizer) executeOpenFGACheck(ctx context.Context,
 }
 
 // buildOpenFGARequest creates the appropriate OpenFGA check request based on the authorization context
-func (o *SubjectAccessReviewAuthorizer) buildOpenFGARequest(ctx context.Context, attributes authorizer.Attributes, authCtx *authorizationContext) (*openfgav1.CheckRequest, error) {
+func (o *SubjectAccessReviewAuthorizer) buildOpenFGARequest(ctx context.Context, attributes authorizer.Attributes, authCtx *authorizationContext, protectedResources *iamv1alpha1.ProtectedResourceList) (*openfgav1.CheckRequest, error) {
 	user := fmt.Sprintf("iam.miloapis.com/InternalUser:%s", authCtx.userUID)
 	relation := o.buildHashedPermissionRelation(attributes)
 
@@ -321,7 +342,7 @@ func (o *SubjectAccessReviewAuthorizer) buildOpenFGARequest(ctx context.Context,
 	} else {
 		// Regular authorization: build resource and contextual tuples based on request type
 		var err error
-		resource, contextualTuples, err = o.buildResourceAndContextualTuples(ctx, attributes)
+		resource, contextualTuples, err = o.buildResourceAndContextualTuples(ctx, attributes, protectedResources)
 		if err != nil {
 			return nil, err
 		}
@@ -343,26 +364,6 @@ func (o *SubjectAccessReviewAuthorizer) buildOpenFGARequest(ctx context.Context,
 	}
 
 	return checkReq, nil
-}
-
-// validatePermissionWithServiceDefaulting validates permissions with consistent service name defaulting
-func (o *SubjectAccessReviewAuthorizer) validatePermissionWithServiceDefaulting(ctx context.Context, attributes authorizer.Attributes) (bool, error) {
-	protectedResourceList := &iamv1alpha1.ProtectedResourceList{}
-	if err := o.K8sClient.List(ctx, protectedResourceList); err != nil {
-		return false, fmt.Errorf("failed to list ProtectedResources: %w", err)
-	}
-
-	apiGroup := o.getEffectiveAPIGroup(attributes)
-	resource := attributes.GetResource()
-	verb := attributes.GetVerb()
-
-	for _, pr := range protectedResourceList.Items {
-		if pr.Spec.ServiceRef.Name == apiGroup && pr.Spec.Plural == resource {
-			return slices.Contains(pr.Spec.Permissions, verb), nil
-		}
-	}
-
-	return false, nil
 }
 
 // getEffectiveAPIGroup returns the API group with service name mapping applied consistently
@@ -431,9 +432,9 @@ func (o *SubjectAccessReviewAuthorizer) buildParentResourceType(attributes autho
 }
 
 // buildResourceAndContextualTuples builds the resource identifier and contextual tuples for regular (non-project) authorization
-func (o *SubjectAccessReviewAuthorizer) buildResourceAndContextualTuples(ctx context.Context, attributes authorizer.Attributes) (string, []*openfgav1.TupleKey, error) {
+func (o *SubjectAccessReviewAuthorizer) buildResourceAndContextualTuples(ctx context.Context, attributes authorizer.Attributes, protectedResources *iamv1alpha1.ProtectedResourceList) (string, []*openfgav1.TupleKey, error) {
 	// Get the ProtectedResource to understand the correct resource structure
-	protectedResource, err := o.getProtectedResource(ctx, attributes)
+	protectedResource, err := o.getProtectedResource(attributes, protectedResources)
 	if err != nil {
 		return "", nil, fmt.Errorf("failed to get protected resource: %w", err)
 	}
@@ -514,17 +515,13 @@ func (o *SubjectAccessReviewAuthorizer) buildHashedPermissionRelation(attributes
 	return hashedPermission
 }
 
-// getProtectedResource retrieves the ProtectedResource for the given attributes
-func (o *SubjectAccessReviewAuthorizer) getProtectedResource(ctx context.Context, attributes authorizer.Attributes) (*iamv1alpha1.ProtectedResource, error) {
-	protectedResourceList := &iamv1alpha1.ProtectedResourceList{}
-	if err := o.K8sClient.List(ctx, protectedResourceList); err != nil {
-		return nil, fmt.Errorf("failed to list ProtectedResources: %w", err)
-	}
-
+// getProtectedResource finds the ProtectedResource for the given attributes within
+// an already-fetched list. No additional API call is made.
+func (o *SubjectAccessReviewAuthorizer) getProtectedResource(attributes authorizer.Attributes, protectedResources *iamv1alpha1.ProtectedResourceList) (*iamv1alpha1.ProtectedResource, error) {
 	apiGroup := attributes.GetAPIGroup()
 	resource := attributes.GetResource()
 
-	for _, pr := range protectedResourceList.Items {
+	for _, pr := range protectedResources.Items {
 		// Check if the APIGroup and Resource (Plural) match
 		if pr.Spec.ServiceRef.Name == apiGroup && pr.Spec.Plural == resource {
 			return &pr, nil

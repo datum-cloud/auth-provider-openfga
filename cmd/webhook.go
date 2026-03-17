@@ -19,7 +19,6 @@ import (
 	"k8s.io/api/authentication/v1beta1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/discovery/cached/disk"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -133,12 +132,6 @@ func runWebhookServer(
 		return fmt.Errorf("failed to add iamv1alpha1 to scheme: %w", err)
 	}
 
-	// Create Kubernetes client
-	k8sClient, err := client.New(restConfig, client.Options{Scheme: runtimeScheme})
-	if err != nil {
-		return fmt.Errorf("failed to create Kubernetes client: %w", err)
-	}
-
 	// Create temporary directory for discovery cache (will be cleaned up on process exit)
 	tempDir, err := os.MkdirTemp("", "auth-provider-discovery-cache-")
 	if err != nil {
@@ -175,10 +168,13 @@ func runWebhookServer(
 
 	entryLog.Info("registering webhooks to the webhook server")
 
+	// Use the manager's cached client so ProtectedResource List calls are served
+	// from the in-memory informer cache instead of making a network round-trip on
+	// every SubjectAccessReview.
 	webhook.RegisterSubjectAccessReviewWebhook(hookServer, webhook.Config{
 		FGAClient:       fgaClient,
 		FGAStoreID:      openfgaStoreID,
-		K8sClient:       k8sClient,
+		K8sClient:       mgr.GetClient(),
 		DiscoveryClient: discoveryClient,
 	})
 
