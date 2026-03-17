@@ -27,7 +27,7 @@ jobs:
         uses: actions/checkout@v5
 
   validate-kustomize:
-    uses: datum-cloud/actions/.github/workflows/validate-kustomize.yaml@v1.9.0
+    uses: datum-cloud/actions/.github/workflows/validate-kustomize.yaml@v1.12.1
 
   publish-container-image:
     needs: validate-kustomize
@@ -35,7 +35,7 @@ jobs:
       id-token: write
       contents: read
       packages: write
-    uses: datum-cloud/actions/.github/workflows/publish-docker.yaml@v1.9.0
+    uses: datum-cloud/actions/.github/workflows/publish-docker.yaml@v1.12.1
     with:
       image-name: auth-provider-openfga
     secrets: inherit
@@ -46,7 +46,7 @@ jobs:
       id-token: write
       contents: read
       packages: write
-    uses: datum-cloud/actions/.github/workflows/publish-kustomize-bundle.yaml@v1.9.0
+    uses: datum-cloud/actions/.github/workflows/publish-kustomize-bundle.yaml@v1.12.1
     with:
       bundle-name: ghcr.io/datum-cloud/auth-provider-openfga-kustomize
       bundle-path: config
