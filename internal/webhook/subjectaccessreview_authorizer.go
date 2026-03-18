@@ -39,16 +39,29 @@ var serviceNameMapping = map[string]string{
 var _ authorizer.Authorizer = &SubjectAccessReviewAuthorizer{}
 
 type SubjectAccessReviewAuthorizer struct {
-	FGAClient              openfgav1.OpenFGAServiceClient
-	FGAStoreID             string
+	FGAClient  openfgav1.OpenFGAServiceClient
+	FGAStoreID string
+	// AuthorizationModelID pins every CheckRequest to a specific authorization
+	// model. When set, OpenFGA skips its internal model lookup (one DB read
+	// saved per Check call). If empty, OpenFGA resolves the latest model on
+	// each call (safe but slower).
+	AuthorizationModelID   string
 	ProtectedResourceCache *ProtectedResourceCache
 	DiscoveryClient        discovery.DiscoveryInterface
+	// SystemGroupMaterializer persists system group membership tuples to OpenFGA
+	// on first encounter so that OpenFGA's check query cache can resolve them.
+	// If nil, system group tuples are not written (useful in tests that do not
+	// exercise this path).
+	SystemGroupMaterializer *SystemGroupMaterializer
 }
 
 // Config holds the configuration for creating a SubjectAccessReview webhook
 type Config struct {
-	FGAClient              openfgav1.OpenFGAServiceClient
-	FGAStoreID             string
+	FGAClient  openfgav1.OpenFGAServiceClient
+	FGAStoreID string
+	// AuthorizationModelID pins CheckRequests to a specific model, eliminating
+	// the per-request model lookup in OpenFGA. Leave empty to use the latest.
+	AuthorizationModelID   string
 	ProtectedResourceCache *ProtectedResourceCache
 	DiscoveryClient        discovery.DiscoveryInterface
 }
@@ -56,10 +69,12 @@ type Config struct {
 // NewSubjectAccessReviewWebhook creates a new SubjectAccessReview authorization webhook
 func NewSubjectAccessReviewWebhook(config Config) *Webhook {
 	authorizer := &SubjectAccessReviewAuthorizer{
-		FGAClient:              config.FGAClient,
-		FGAStoreID:             config.FGAStoreID,
-		ProtectedResourceCache: config.ProtectedResourceCache,
-		DiscoveryClient:        config.DiscoveryClient,
+		FGAClient:               config.FGAClient,
+		FGAStoreID:              config.FGAStoreID,
+		AuthorizationModelID:    config.AuthorizationModelID,
+		ProtectedResourceCache:  config.ProtectedResourceCache,
+		DiscoveryClient:         config.DiscoveryClient,
+		SystemGroupMaterializer: NewSystemGroupMaterializer(config.FGAClient, config.FGAStoreID),
 	}
 	return NewAuthorizerWebhook(authorizer)
 }
@@ -184,7 +199,24 @@ func (o *SubjectAccessReviewAuthorizer) Authorize(ctx context.Context, attribute
 	scope := scopeLabel(authCtx)
 	span.SetAttributes(attribute.String("authz.scope", scope))
 
-	// Step 2: Validate organization namespace if organization-scoped
+	// Step 2: Materialize system group memberships as stored tuples so that
+	// OpenFGA's check query cache can resolve them. This is a best-effort
+	// optimization; a write failure is logged but does not block the request.
+	if o.SystemGroupMaterializer != nil {
+		if materializeErr := o.SystemGroupMaterializer.EnsureMaterialized(
+			ctx,
+			authCtx.userUID,
+			attributes.GetUser().GetGroups(),
+		); materializeErr != nil {
+			slog.WarnContext(ctx, "failed to materialize system group memberships; proceeding without stored tuples",
+				slog.String("user_uid", authCtx.userUID),
+				slog.String("error", materializeErr.Error()),
+				slog.String("request_id", requestID),
+			)
+		}
+	}
+
+	// Step 4: Validate organization namespace if organization-scoped
 	stepStart = time.Now()
 	ctx, validateNsSpan := tracer.Start(ctx, "validate_organization_namespace")
 	validateNsErr := o.validateOrganizationNamespace(ctx, authCtx, attributes)
@@ -200,7 +232,7 @@ func (o *SubjectAccessReviewAuthorizer) Authorize(ctx context.Context, attribute
 		return authorizer.DecisionDeny, "", validateNsErr
 	}
 
-	// Step 3: Validate permission exists
+	// Step 5: Validate permission exists
 	stepStart = time.Now()
 	ctx, validatePermSpan := tracer.Start(ctx, "validate_permission")
 	validatePermErr := o.validatePermission(ctx, attributes)
@@ -212,7 +244,7 @@ func (o *SubjectAccessReviewAuthorizer) Authorize(ctx context.Context, attribute
 		return authorizer.DecisionDeny, "", validatePermErr
 	}
 
-	// Step 4: Build OpenFGA check request
+	// Step 6: Build OpenFGA check request
 	stepStart = time.Now()
 	ctx, buildReqSpan := tracer.Start(ctx, "build_openfga_request")
 	checkReq, err := o.buildOpenFGARequest(ctx, attributes, authCtx)
@@ -225,7 +257,7 @@ func (o *SubjectAccessReviewAuthorizer) Authorize(ctx context.Context, attribute
 		return authorizer.DecisionDeny, "", buildErr
 	}
 
-	// Step 5: Execute OpenFGA check
+	// Step 7: Execute OpenFGA check
 	stepStart = time.Now()
 	decision, reason, checkErr := o.executeOpenFGACheck(ctx, checkReq)
 	authzStepDuration.WithLabelValues("openfga_check").Observe(time.Since(stepStart).Seconds())
@@ -474,7 +506,8 @@ func (o *SubjectAccessReviewAuthorizer) buildOpenFGARequest(ctx context.Context,
 	}
 
 	checkReq := &openfgav1.CheckRequest{
-		StoreId: o.FGAStoreID,
+		StoreId:              o.FGAStoreID,
+		AuthorizationModelId: o.AuthorizationModelID,
 		TupleKey: &openfgav1.CheckRequestTupleKey{
 			User:     user,
 			Relation: relation,
