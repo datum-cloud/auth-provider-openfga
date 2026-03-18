@@ -1,0 +1,408 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: direct-permission-model
+spec:
+  steps:
+    # Step 1: Setup — Create Role, User, Organization
+    - name: setup-role-user-org
+      try:
+        - apply:
+            file: resources/role.yaml
+        - wait:
+            apiVersion: iam.miloapis.com/v1alpha1
+            kind: Role
+            name: direct-perm-model.test-organizationviewer
+            timeout: 5m
+            for:
+              condition:
+                name: Ready
+                value: "true"
+
+        - create:
+            file: resources/user.yaml
+            outputs:
+              - name: user
+                value: (@)
+
+        - create:
+            file: resources/organization.yaml
+            outputs:
+              - name: org
+                value: (@)
+
+      catch:
+        - describe:
+            apiVersion: iam.miloapis.com/v1alpha1
+            kind: Role
+        - describe:
+            apiVersion: iam.miloapis.com/v1alpha1
+            kind: User
+        - describe:
+            apiVersion: resourcemanager.miloapis.com/v1alpha1
+            kind: Organization
+
+    # Step 2: Create PolicyBinding and verify authorization decisions
+    - name: create-policy-binding-and-verify-authz
+      try:
+        - apply:
+            resource:
+              apiVersion: iam.miloapis.com/v1alpha1
+              kind: PolicyBinding
+              metadata:
+                name: direct-perm-model-test-binding
+              spec:
+                roleRef:
+                  name: direct-perm-model.test-organizationviewer
+                  namespace: ($namespace)
+                subjects:
+                  - kind: User
+                    name: "direct-perm-model-test-user"
+                    uid: ($user.metadata.uid)
+                resourceSelector:
+                  resourceRef:
+                    apiGroup: "resourcemanager.miloapis.com"
+                    kind: Organization
+                    name: "direct-perm-model-test-org"
+                    uid: ($org.metadata.uid)
+
+        - wait:
+            apiVersion: iam.miloapis.com/v1alpha1
+            kind: PolicyBinding
+            name: direct-perm-model-test-binding
+            timeout: 5m
+            for:
+              condition:
+                name: Ready
+                value: 'true'
+
+        # Verify organizations.get is allowed (permission is in the role)
+        - apply:
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: authz-test-allowed
+              spec:
+                restartPolicy: Never
+                containers:
+                - name: curl
+                  image: curlimages/curl:latest
+                  command: ["/bin/sh", "-c"]
+                  args:
+                    - |
+                      response=$(curl -ksS https://auth-provider-openfga-authz-webhook.auth-provider-openfga-system.svc.cluster.local:8090/apis/authorization.k8s.io/v1/subjectaccessreviews \
+                        -H "Content-Type: application/json" \
+                        -d @- << EOF
+                      {
+                        "apiVersion": "authorization.k8s.io/v1",
+                        "kind": "SubjectAccessReview",
+                        "spec": {
+                          "user": "direct-perm-model-test-user",
+                          "uid": "$USER_UID",
+                          "extra": {
+                            "resourcemanager.miloapis.com/organization-id": ["direct-perm-model-test-org"]
+                          },
+                          "groups": ["system:authenticated"],
+                          "resourceAttributes": {
+                            "group": "resourcemanager.miloapis.com",
+                            "resource": "organizations",
+                            "version": "v1alpha1",
+                            "verb": "get",
+                            "name": "direct-perm-model-test-org"
+                          }
+                        }
+                      }
+                      EOF
+                      )
+                      echo "Webhook response (organizations.get - expect allowed): $response"
+                      if ! echo "$response" | grep -q '"kind":"SubjectAccessReview"'; then
+                        echo "FAIL: invalid response format"
+                        exit 1
+                      fi
+                      if echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*true'; then
+                        echo "PASS: organizations.get was allowed"
+                        exit 0
+                      elif echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*false'; then
+                        echo "FAIL: organizations.get was denied (expected allowed)"
+                        exit 1
+                      else
+                        echo "FAIL: could not determine allowed status"
+                        exit 1
+                      fi
+                  env:
+                    - name: USER_UID
+                      value: ($user.metadata.uid)
+
+        - wait:
+            apiVersion: v1
+            kind: Pod
+            name: authz-test-allowed
+            timeout: 30s
+            for:
+              jsonPath:
+                path: "status.phase"
+                value: "Succeeded"
+
+        # Verify organizations.delete is denied (permission NOT in the role)
+        - apply:
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: authz-test-denied
+              spec:
+                restartPolicy: Never
+                containers:
+                - name: curl
+                  image: curlimages/curl:latest
+                  command: ["/bin/sh", "-c"]
+                  args:
+                    - |
+                      response=$(curl -ksS https://auth-provider-openfga-authz-webhook.auth-provider-openfga-system.svc.cluster.local:8090/apis/authorization.k8s.io/v1/subjectaccessreviews \
+                        -H "Content-Type: application/json" \
+                        -d @- << EOF
+                      {
+                        "apiVersion": "authorization.k8s.io/v1",
+                        "kind": "SubjectAccessReview",
+                        "spec": {
+                          "user": "direct-perm-model-test-user",
+                          "uid": "$USER_UID",
+                          "extra": {
+                            "resourcemanager.miloapis.com/organization-id": ["direct-perm-model-test-org"]
+                          },
+                          "groups": ["system:authenticated"],
+                          "resourceAttributes": {
+                            "group": "resourcemanager.miloapis.com",
+                            "resource": "organizations",
+                            "version": "v1alpha1",
+                            "verb": "delete",
+                            "name": "direct-perm-model-test-org"
+                          }
+                        }
+                      }
+                      EOF
+                      )
+                      echo "Webhook response (organizations.delete - expect denied): $response"
+                      if ! echo "$response" | grep -q '"kind":"SubjectAccessReview"'; then
+                        echo "FAIL: invalid response format"
+                        exit 1
+                      fi
+                      if echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*false'; then
+                        echo "PASS: organizations.delete was denied as expected"
+                        exit 0
+                      elif echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*true'; then
+                        echo "FAIL: organizations.delete was allowed (expected denied)"
+                        exit 1
+                      else
+                        echo "FAIL: could not determine allowed status"
+                        exit 1
+                      fi
+                  env:
+                    - name: USER_UID
+                      value: ($user.metadata.uid)
+
+        - wait:
+            apiVersion: v1
+            kind: Pod
+            name: authz-test-denied
+            timeout: 30s
+            for:
+              jsonPath:
+                path: "status.phase"
+                value: "Succeeded"
+
+      catch:
+        - describe:
+            apiVersion: v1
+            kind: Pod
+        - describe:
+            apiVersion: iam.miloapis.com/v1alpha1
+            kind: PolicyBinding
+
+    # Step 3: Verify ConfigMap openfga-authorization-model exists with a non-empty model-id key
+    - name: verify-configmap-exists
+      try:
+        # Use a script so we can wait for the ConfigMap to be populated and
+        # validate the model-id is non-empty, retrying briefly to handle any
+        # propagation delay between the controller writing the model and the
+        # ConfigMap appearing in the API server.
+        - script:
+            timeout: 2m
+            content: |
+              for i in $(seq 1 24); do
+                MODEL_ID=$(kubectl get configmap openfga-authorization-model \
+                  -n auth-provider-openfga-system \
+                  -o jsonpath='{.data.model-id}' 2>/dev/null || true)
+                echo "Attempt $i: model-id='$MODEL_ID'"
+                if [ -n "$MODEL_ID" ]; then
+                  echo "PASS: ConfigMap openfga-authorization-model has a non-empty model-id: $MODEL_ID"
+                  exit 0
+                fi
+                sleep 5
+              done
+              echo "FAIL: ConfigMap openfga-authorization-model does not have a non-empty model-id"
+              exit 1
+
+      catch:
+        - describe:
+            apiVersion: v1
+            kind: ConfigMap
+            name: openfga-authorization-model
+            namespace: auth-provider-openfga-system
+
+    # Step 4: Capture current model ID, create new ProtectedResource to trigger
+    # a model refresh, then verify the model-id in the ConfigMap changed.
+    - name: trigger-model-refresh-and-verify-id-changed
+      try:
+        # Capture the model ID before creating the new ProtectedResource so we
+        # have a baseline to compare against after the refresh.
+        - script:
+            content: |
+              kubectl get configmap openfga-authorization-model \
+                -n auth-provider-openfga-system \
+                -o jsonpath='{.data.model-id}'
+            outputs:
+              - name: modelIdBefore
+                value: (stdout)
+
+        # Create the new ProtectedResource to force a model rebuild
+        - apply:
+            file: resources/test-protected-resource.yaml
+
+        - wait:
+            apiVersion: iam.miloapis.com/v1alpha1
+            kind: ProtectedResource
+            name: direct-perm-model-test-resource
+            timeout: 5m
+            for:
+              condition:
+                name: Ready
+                value: "true"
+
+        # Poll until the ConfigMap model-id differs from the captured baseline.
+        # Retries for up to 2 min (24 x 5 s) to accommodate propagation lag
+        # between the controller writing the new OpenFGA model and the ConfigMap
+        # being updated in the API server.
+        - script:
+            timeout: 3m
+            content: |
+              for i in $(seq 1 24); do
+                CURRENT=$(kubectl get configmap openfga-authorization-model \
+                  -n auth-provider-openfga-system \
+                  -o jsonpath='{.data.model-id}' 2>/dev/null || true)
+                echo "Attempt $i: model-id before='$MODEL_ID_BEFORE' current='$CURRENT'"
+                if [ -n "$CURRENT" ] && [ "$CURRENT" != "$MODEL_ID_BEFORE" ]; then
+                  echo "PASS: model-id changed from '$MODEL_ID_BEFORE' to '$CURRENT'"
+                  exit 0
+                fi
+                sleep 5
+              done
+              echo "FAIL: model-id did not change within the timeout"
+              exit 1
+            env:
+              - name: MODEL_ID_BEFORE
+                value: ($modelIdBefore)
+
+      catch:
+        - describe:
+            apiVersion: iam.miloapis.com/v1alpha1
+            kind: ProtectedResource
+            name: direct-perm-model-test-resource
+        - describe:
+            apiVersion: v1
+            kind: ConfigMap
+            name: openfga-authorization-model
+            namespace: auth-provider-openfga-system
+
+    # Step 5: Verify authorization still works after the model ID refresh
+    - name: verify-authz-after-model-refresh
+      try:
+        - apply:
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: authz-test-post-refresh
+              spec:
+                restartPolicy: Never
+                containers:
+                - name: curl
+                  image: curlimages/curl:latest
+                  command: ["/bin/sh", "-c"]
+                  args:
+                    - |
+                      response=$(curl -ksS https://auth-provider-openfga-authz-webhook.auth-provider-openfga-system.svc.cluster.local:8090/apis/authorization.k8s.io/v1/subjectaccessreviews \
+                        -H "Content-Type: application/json" \
+                        -d @- << EOF
+                      {
+                        "apiVersion": "authorization.k8s.io/v1",
+                        "kind": "SubjectAccessReview",
+                        "spec": {
+                          "user": "direct-perm-model-test-user",
+                          "uid": "$USER_UID",
+                          "extra": {
+                            "resourcemanager.miloapis.com/organization-id": ["direct-perm-model-test-org"]
+                          },
+                          "groups": ["system:authenticated"],
+                          "resourceAttributes": {
+                            "group": "resourcemanager.miloapis.com",
+                            "resource": "organizations",
+                            "version": "v1alpha1",
+                            "verb": "get",
+                            "name": "direct-perm-model-test-org"
+                          }
+                        }
+                      }
+                      EOF
+                      )
+                      echo "Post-refresh webhook response (organizations.get - expect allowed): $response"
+                      if ! echo "$response" | grep -q '"kind":"SubjectAccessReview"'; then
+                        echo "FAIL: invalid response format"
+                        exit 1
+                      fi
+                      if echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*true'; then
+                        echo "PASS: organizations.get still allowed after model ID refresh"
+                        exit 0
+                      elif echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*false'; then
+                        echo "FAIL: organizations.get was denied after model ID refresh (expected allowed)"
+                        exit 1
+                      else
+                        echo "FAIL: could not determine allowed status"
+                        exit 1
+                      fi
+                  env:
+                    - name: USER_UID
+                      value: ($user.metadata.uid)
+
+        - wait:
+            apiVersion: v1
+            kind: Pod
+            name: authz-test-post-refresh
+            timeout: 30s
+            for:
+              jsonPath:
+                path: "status.phase"
+                value: "Succeeded"
+
+      catch:
+        - describe:
+            apiVersion: v1
+            kind: Pod
+            name: authz-test-post-refresh
+
+    # Step 6: Cleanup — delete the test ProtectedResource and IAM resources.
+    # Chainsaw automatically deletes resources created via apply/create in the
+    # test namespace, but the ProtectedResource is cluster-scoped so we must
+    # delete it explicitly.
+    - name: cleanup
+      try:
+        - delete:
+            file: resources/test-protected-resource.yaml
+        - wait:
+            apiVersion: iam.miloapis.com/v1alpha1
+            kind: ProtectedResource
+            name: direct-perm-model-test-resource
+            timeout: 5m
+            for:
+              deletion: {}

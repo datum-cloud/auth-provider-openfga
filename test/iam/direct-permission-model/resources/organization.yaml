@@ -1,0 +1,6 @@
+apiVersion: resourcemanager.miloapis.com/v1alpha1
+kind: Organization
+metadata:
+  name: direct-perm-model-test-org
+spec:
+  type: Standard
