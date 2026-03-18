@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	openfgav1 "github.com/openfga/api/proto/openfga/v1"
+	"google.golang.org/grpc/status"
 )
 
 // SystemGroupMaterializer persists system group membership tuples to OpenFGA the
@@ -81,8 +82,17 @@ func (m *SystemGroupMaterializer) EnsureMaterialized(ctx context.Context, userUI
 		},
 	})
 	if err != nil {
-		// Log but do not fail authorization — this is a best-effort optimization.
-		// The caller must decide whether to fall back to contextual tuples or deny.
+		// OpenFGA returns gRPC code 2017 when a tuple already exists. This is
+		// expected after a pod restart (the sync.Map is lost but the tuples
+		// persist in the datastore). Treat "already exists" as success and
+		// cache the user to avoid re-attempting on every request.
+		if st, ok := status.FromError(err); ok && st.Code() == 2017 {
+			m.materialized.Store(userUID, struct{}{})
+			slog.DebugContext(ctx, "system group memberships already exist in OpenFGA",
+				slog.String("user_uid", userUID),
+			)
+			return nil
+		}
 		return fmt.Errorf("failed to write system group membership tuples for user %s: %w", userUID, err)
 	}
 
