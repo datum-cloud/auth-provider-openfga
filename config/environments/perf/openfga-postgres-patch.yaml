@@ -6,29 +6,25 @@ metadata:
 spec:
   dependsOn:
     - name: openfga-database
+  timeout: 1m
+  install:
+    timeout: 1m
+    remediation:
+      retries: 30
+  upgrade:
+    timeout: 1m
+    remediation:
+      retries: 30
   values:
     datastore:
       engine: postgres
       # Dev/test only — plaintext credentials acceptable for ephemeral Kind clusters.
       # Do NOT use this pattern for non-ephemeral environments.
       uri: postgres://postgres:openfga@openfga-database-postgresql.openfga-system.svc.cluster.local:5432/openfga?sslmode=disable
-    migrate:
+      applyMigrations: true
+      waitForMigrations: false
+      migrationType: job
+    checkQueryCache:
       enabled: true
-  # The chart's migration Job is a post-upgrade hook, but the default init container
-  # (wait-for-migration) blocks the pod until the Job completes — creating a deadlock.
-  # Use a postRenderer to remove the init container from the rendered deployment.
-  postRenderers:
-    - kustomize:
-        patches:
-          - target:
-              kind: Deployment
-              name: openfga
-            patch: |
-              apiVersion: apps/v1
-              kind: Deployment
-              metadata:
-                name: openfga
-              spec:
-                template:
-                  spec:
-                    initContainers: []
+      limit: 10000
+      ttl: 10s
