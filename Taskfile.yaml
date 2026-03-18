@@ -5,12 +5,15 @@ vars:
   IMG: '{{default "auth-provider-openfga:dev" .IMG}}'
   CONTAINER_TOOL: '{{default "docker" .CONTAINER_TOOL}}'
 
+  # Performance test tooling
+  K6: '{{default "k6" .K6}}'
+
   # Cluster configuration (passed to test-infra)
   CLUSTER_NAME: '{{default "auth-provider-openfga" .CLUSTER_NAME}}'
   WAIT_TIMEOUT: '{{default "420s" .WAIT_TIMEOUT}}'
 
   # Test infrastructure reference
-  TEST_INFRA_REPO_REF: 'v0.3.0'
+  TEST_INFRA_REPO_REF: 'v0.6.2'
 
   # Tool directories
   LOCALBIN: '{{.PWD}}/bin'
@@ -30,7 +33,7 @@ vars:
 includes:
   test-infra:
     taskfile: https://raw.githubusercontent.com/datum-cloud/test-infra/{{.TEST_INFRA_REPO_REF}}/Taskfile.yml
-    checksum: "d7fe71654d8b9eaaaca146f2748d64b8292efbd4b4b4333ace0b43fba0bcc9b6"
+    checksum: "a1cf6063def6ee21ba42f8a0818127c92a9a5c313c293387f2294e42480dd3d5"
     vars:
       REPO_REF: "{{.TEST_INFRA_REPO_REF}}"
       CLUSTER_NAME: "{{.CLUSTER_NAME}}"
@@ -375,6 +378,201 @@ tasks:
       IGNORE_NOT_FOUND: '{{default "false" .IGNORE_NOT_FOUND}}'
     cmds:
       - "{{.LOCALBIN}}/kustomize build config/default | kubectl delete --ignore-not-found={{.IGNORE_NOT_FOUND}} -f -"
+
+  # Performance Test Tasks
+
+  test:perf:forward:
+    desc: Start background port-forwards for the authz webhook (and optionally Victoria Metrics)
+    cmds:
+      - |
+        mkdir -p .tmp
+        if [ -f .tmp/perf-forward.pid ] && kill -0 "$(cat .tmp/perf-forward.pid)" 2>/dev/null; then
+          echo "Port-forward already running (PID $(cat .tmp/perf-forward.pid))"
+          exit 0
+        fi
+        # Use kubectl directly (not via task wrapper) so we get the real process PID
+        # for reliable lifecycle management (kill on cleanup).
+        kubectl --kubeconfig .test-infra/kubeconfig port-forward -n auth-provider-openfga-system \
+          svc/auth-provider-openfga-authz-webhook 8090:8090 &
+        echo $! > .tmp/perf-forward.pid
+        sleep 2
+
+        # Optionally start Victoria Metrics port-forward for OTLP metrics ingestion
+        if [ "${PERF_METRICS:-false}" = "true" ]; then
+          if [ -f .tmp/perf-vm-forward.pid ] && kill -0 "$(cat .tmp/perf-vm-forward.pid)" 2>/dev/null; then
+            echo "Victoria Metrics port-forward already running (PID $(cat .tmp/perf-vm-forward.pid))"
+          else
+            echo "Starting Victoria Metrics port-forward (port 8428)..."
+            kubectl --kubeconfig .test-infra/kubeconfig port-forward -n telemetry-system \
+              svc/vmsingle-telemetry-system-vm-stack-victoria-metrics-k8s-stack 8428:8428 &
+            echo $! > .tmp/perf-vm-forward.pid
+            sleep 2
+          fi
+        fi
+
+  test:perf:forward:stop:
+    desc: Stop background port-forwards started by test:perf:forward
+    cmds:
+      - |
+        if [ -f .tmp/perf-forward.pid ]; then
+          kill "$(cat .tmp/perf-forward.pid)" 2>/dev/null || true
+          rm -f .tmp/perf-forward.pid
+        fi
+        if [ -f .tmp/perf-vm-forward.pid ]; then
+          kill "$(cat .tmp/perf-vm-forward.pid)" 2>/dev/null || true
+          rm -f .tmp/perf-vm-forward.pid
+        fi
+
+  test:perf:setup:
+    desc: Deploy PostgreSQL + OpenFGA postgres overlay + app + fixtures (idempotent)
+    deps: [kustomize]
+    cmds:
+      - |
+        set -e
+        echo "Applying perf Kustomize overlay (PostgreSQL + OpenFGA postgres patch + app)..."
+        {{.LOCALBIN}}/kustomize build config/environments/perf | task test-infra:kubectl -- apply --server-side -f -
+
+        echo "Waiting for PostgreSQL HelmRelease to be Ready..."
+        task test-infra:kubectl -- wait --for=condition=Ready helmrelease/openfga-database \
+          -n openfga-system --timeout=300s
+
+        echo "Waiting for OpenFGA HelmRelease to be Ready..."
+        task test-infra:kubectl -- wait --for=condition=Ready helmrelease/openfga \
+          -n openfga-system --timeout=240s
+
+        echo "Waiting for OpenFGA deployment to be Available..."
+        task test-infra:kubectl -- wait --for=condition=Available deployment/openfga \
+          -n openfga-system --timeout=120s
+
+        echo "Running store-init job..."
+        {{.LOCALBIN}}/kustomize build config/environments/perf/store-init | task test-infra:kubectl -- apply --server-side -f -
+        task test-infra:kubectl -- wait --for=condition=Complete job/openfga-store-init \
+          -n openfga-system --timeout=120s
+
+        echo "Re-applying perf overlay to pick up store-id ConfigMap in app Deployments..."
+        {{.LOCALBIN}}/kustomize build config/environments/perf | task test-infra:kubectl -- apply --server-side -f -
+
+        echo "Waiting for controller-manager to be Available..."
+        task test-infra:kubectl -- wait --for=condition=Available \
+          deployment/auth-provider-openfga-controller-manager \
+          -n auth-provider-openfga-system --timeout=300s
+
+        echo "Waiting for authz webhook to be Available..."
+        task test-infra:kubectl -- wait --for=condition=Available \
+          deployment/auth-provider-openfga-authz-webhook \
+          -n auth-provider-openfga-system --timeout=300s
+
+        echo "Running fixture setup script..."
+        KUBECTL="task test-infra:kubectl --" \
+          bash test/perf/setup-fixtures.sh > /dev/null
+
+        echo "Perf setup complete."
+
+  test:perf:teardown:
+    desc: Revert OpenFGA to in-memory storage and remove PostgreSQL deployment
+    deps: [kustomize]
+    cmds:
+      - |
+        set -e
+        echo "Re-applying in-memory OpenFGA configuration..."
+        {{.LOCALBIN}}/kustomize build config/dependencies | task test-infra:kubectl -- apply --server-side -f -
+
+        echo "Deleting PostgreSQL HelmRelease and OCIRepository..."
+        task test-infra:kubectl -- delete helmrelease openfga-database \
+          -n openfga-system --ignore-not-found
+        task test-infra:kubectl -- delete ocirepository postgresql \
+          -n openfga-system --ignore-not-found
+
+        echo "Deleting store-init job and configmap..."
+        task test-infra:kubectl -- delete job openfga-store-init \
+          -n openfga-system --ignore-not-found
+        task test-infra:kubectl -- delete configmap openfga-store-id \
+          -n openfga-system --ignore-not-found
+
+        echo "Waiting for OpenFGA HelmRelease to be Ready after revert..."
+        task test-infra:kubectl -- wait --for=condition=Ready helmrelease/openfga \
+          -n openfga-system --timeout=240s
+
+        echo "Waiting for OpenFGA deployment to be Available after revert..."
+        task test-infra:kubectl -- wait --for=condition=Available deployment/openfga \
+          -n openfga-system --timeout=120s
+
+        echo "Teardown complete."
+
+  test:perf:annotate:
+    desc: "Create a Grafana annotation (usage: task test:perf:annotate -- tweak description)"
+    cmds:
+      - bash test/perf/annotate.sh {{.CLI_ARGS}}
+
+  test:perf:clean:
+    desc: Remove k6 result files and port-forward PID files
+    cmds:
+      - |
+        rm -f test/perf/results/*.json
+        rm -f .tmp/perf-forward.pid
+        rm -f .tmp/perf-vm-forward.pid
+        echo "Cleaned perf results and PID files."
+
+  test:perf:
+    desc: Run the full SubjectAccessReview performance test against the local Kind cluster
+    deps: [kustomize]
+    cmds:
+      - |
+        set -e
+
+        # Verify k6 is available before proceeding
+        if ! command -v {{.K6}} >/dev/null 2>&1; then
+          echo "ERROR: k6 not found (looked for '{{.K6}}')."
+          echo "Install k6: https://grafana.com/docs/k6/latest/set-up/install-k6/"
+          exit 1
+        fi
+
+        task test:perf:setup
+
+        task test:perf:forward
+
+        # Ensure the port-forward is stopped on exit (success or failure)
+        trap "task test:perf:forward:stop" EXIT
+
+        # The SAR spec.uid field must match the OpenFGA tuple key, which is the
+        # user resource NAME (not the Kubernetes metadata.uid). The policy
+        # reconciler writes tuples keyed by subject.Name ("perf-test-user").
+        PERF_USER_UID="perf-test-user"
+        echo "Using user name as PERF_USER_UID: ${PERF_USER_UID}"
+
+        mkdir -p test/perf/results
+        RESULT_FILE="test/perf/results/result-$(date +%Y%m%d-%H%M%S).json"
+
+        # Build k6 output flags
+        K6_OUTPUTS="--out json=${RESULT_FILE}"
+        if [ "${PERF_METRICS:-false}" = "true" ]; then
+          K6_OUTPUTS="${K6_OUTPUTS} --out experimental-opentelemetry"
+          echo "Metrics will be forwarded via OpenTelemetry to ${K6_OTEL_EXPORTER_OTLP_ENDPOINT:-http://localhost:8428}"
+        fi
+
+        # Annotate the start of the perf test run in Grafana
+        PERF_VUS_VAL="${PERF_VUS:-10}"
+        PERF_DURATION_VAL="${PERF_DURATION:-30s}"
+        bash test/perf/annotate.sh perf-test "Perf test: ${PERF_VUS_VAL} VUs, ${PERF_DURATION_VAL} sustained" 2>&1 || true
+
+        K6_OTEL_EXPORTER_OTLP_ENDPOINT="${K6_OTEL_EXPORTER_OTLP_ENDPOINT:-http://localhost:8428}" \
+        K6_OTEL_EXPORTER_OTLP_PROTOCOL="${K6_OTEL_EXPORTER_OTLP_PROTOCOL:-http/protobuf}" \
+        K6_OTEL_METRIC_PREFIX="${K6_OTEL_METRIC_PREFIX:-k6_}" \
+        {{.K6}} run \
+          ${K6_OUTPUTS} \
+          -e WEBHOOK_URL="${WEBHOOK_URL:-https://localhost:8090/apis/authorization.k8s.io/v1/subjectaccessreviews}" \
+          -e AUTH_TOKEN="${AUTH_TOKEN:-}" \
+          -e TLS_SKIP_VERIFY="${TLS_SKIP_VERIFY:-true}" \
+          -e PERF_VUS="${PERF_VUS_VAL}" \
+          -e PERF_DURATION="${PERF_DURATION_VAL}" \
+          -e PERF_RAMP_UP="${PERF_RAMP_UP:-5s}" \
+          -e PERF_USER_UID="${PERF_USER_UID}" \
+          -e PERF_ORG_NAME="${PERF_ORG_NAME:-perf-test-org}" \
+          -e ENVIRONMENT="${ENVIRONMENT:-kind-local}" \
+          test/perf/sar-load-test.js
+
+        echo ""
+        echo "Results written to: ${RESULT_FILE}"
 
   # Tool Installation Tasks
   localbin-dir:

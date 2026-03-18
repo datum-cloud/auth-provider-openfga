@@ -30,3 +30,10 @@ go.work
 .task
 # Directory used for the test-infra repo to manage test infra components.
 .test-infra
+
+# Performance test results (JSON output from k6 runs)
+test/perf/results/
+!test/perf/results/.gitkeep
+
+# Temporary files used by perf Taskfile tasks (port-forward PID, etc.)
+.tmp/

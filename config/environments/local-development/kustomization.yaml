@@ -21,6 +21,6 @@ components:
 
 # Development-specific image configurations
 images:
-  - name: auth-provider-openfga
+  - name: ghcr.io/datum-cloud/auth-provider-openfga
     newName: auth-provider-openfga
     newTag: dev

@@ -19,8 +19,6 @@ func NewAuthorizerWebhook(authzer authorizer.Authorizer) *Webhook {
 				return Denied("must specify oneof resource or non-resource attributes, not both")
 			}
 
-			slog.InfoContext(ctx, "authorizing request", slog.Any("request", r))
-
 			extra := map[string][]string{}
 			for key, val := range r.Spec.Extra {
 				extra[key] = []string(val)

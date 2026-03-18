@@ -6,11 +6,16 @@ import (
 	"log/slog"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
+	"time"
 
 	openfgav1 "github.com/openfga/api/proto/openfga/v1"
 	"go.miloapis.com/auth-provider-openfga/internal/openfga"
 	iamv1alpha1 "go.miloapis.com/milo/pkg/apis/iam/v1alpha1"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"k8s.io/apiserver/pkg/authorization/authorizer"
 	"k8s.io/client-go/discovery"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -112,6 +117,20 @@ func (ctx *authorizationContext) getOrganizationName() string {
 	return ""
 }
 
+// scopeLabel returns the metric scope label for an authorization context.
+func scopeLabel(authCtx *authorizationContext) string {
+	if authCtx == nil {
+		return "unknown"
+	}
+	if authCtx.isProjectScope() {
+		return "project"
+	}
+	if authCtx.isOrganizationScope() {
+		return "organization"
+	}
+	return "cluster"
+}
+
 // extractParentContext extracts parent resource information from user extra data
 func (o *SubjectAccessReviewAuthorizer) extractParentContext(attributes authorizer.Attributes) *parentContext {
 	extra := attributes.GetUser().GetExtra()
@@ -137,32 +156,126 @@ func (o *SubjectAccessReviewAuthorizer) extractParentContext(attributes authoriz
 
 // Authorize implements authorizer.Authorizer.
 func (o *SubjectAccessReviewAuthorizer) Authorize(ctx context.Context, attributes authorizer.Attributes) (authorizer.Decision, string, error) {
-	slog.InfoContext(ctx, "authorizing request", slog.Any("attributes", attributes))
+	start := time.Now()
+	requestID := requestIDFromContext(ctx)
+	tracer := otel.GetTracerProvider().Tracer("authz-webhook")
 
-	// Build authorization context
+	ctx, span := tracer.Start(ctx, "authorize")
+	defer span.End()
+
+	span.SetAttributes(
+		attribute.String("authz.user", attributes.GetUser().GetName()),
+		attribute.String("authz.resource", attributes.GetResource()),
+		attribute.String("authz.verb", attributes.GetVerb()),
+		attribute.String("authz.resource_group", attributes.GetAPIGroup()),
+	)
+
+	// Step 1: Build authorization context
+	stepStart := time.Now()
+	ctx, buildCtxSpan := tracer.Start(ctx, "build_authorization_context")
 	authCtx, err := o.buildAuthorizationContext(attributes)
+	buildCtxSpan.End()
+	authzStepDuration.WithLabelValues("build_context").Observe(time.Since(stepStart).Seconds())
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return authorizer.DecisionDeny, "", err
 	}
 
-	// Validate organization namespace if organization-scoped
-	if err := o.validateOrganizationNamespace(ctx, authCtx, attributes); err != nil {
-		slog.WarnContext(ctx, "organization namespace validation failed", slog.String("error", err.Error()))
-		return authorizer.DecisionDeny, "", err
+	scope := scopeLabel(authCtx)
+	span.SetAttributes(attribute.String("authz.scope", scope))
+
+	// Step 2: Validate organization namespace if organization-scoped
+	stepStart = time.Now()
+	ctx, validateNsSpan := tracer.Start(ctx, "validate_organization_namespace")
+	validateNsErr := o.validateOrganizationNamespace(ctx, authCtx, attributes)
+	validateNsSpan.End()
+	authzStepDuration.WithLabelValues("validate_namespace").Observe(time.Since(stepStart).Seconds())
+	if validateNsErr != nil {
+		slog.WarnContext(ctx, "organization namespace validation failed",
+			slog.String("error", validateNsErr.Error()),
+			slog.String("request_id", requestID),
+		)
+		span.RecordError(validateNsErr)
+		span.SetStatus(codes.Error, validateNsErr.Error())
+		return authorizer.DecisionDeny, "", validateNsErr
 	}
 
-	// Validate permission exists
-	if err := o.validatePermission(ctx, attributes); err != nil {
-		return authorizer.DecisionDeny, "", err
+	// Step 3: Validate permission exists
+	stepStart = time.Now()
+	ctx, validatePermSpan := tracer.Start(ctx, "validate_permission")
+	validatePermErr := o.validatePermission(ctx, attributes)
+	validatePermSpan.End()
+	authzStepDuration.WithLabelValues("validate_permission").Observe(time.Since(stepStart).Seconds())
+	if validatePermErr != nil {
+		span.RecordError(validatePermErr)
+		span.SetStatus(codes.Error, validatePermErr.Error())
+		return authorizer.DecisionDeny, "", validatePermErr
 	}
 
-	// Build and execute OpenFGA check
+	// Step 4: Build OpenFGA check request
+	stepStart = time.Now()
+	ctx, buildReqSpan := tracer.Start(ctx, "build_openfga_request")
 	checkReq, err := o.buildOpenFGARequest(ctx, attributes, authCtx)
+	buildReqSpan.End()
+	authzStepDuration.WithLabelValues("build_openfga_request").Observe(time.Since(stepStart).Seconds())
 	if err != nil {
-		return authorizer.DecisionDeny, "", fmt.Errorf("failed to build OpenFGA request: %w", err)
+		buildErr := fmt.Errorf("failed to build OpenFGA request: %w", err)
+		span.RecordError(buildErr)
+		span.SetStatus(codes.Error, buildErr.Error())
+		return authorizer.DecisionDeny, "", buildErr
 	}
 
-	return o.executeOpenFGACheck(ctx, checkReq)
+	// Step 5: Execute OpenFGA check
+	stepStart = time.Now()
+	decision, reason, checkErr := o.executeOpenFGACheck(ctx, checkReq)
+	authzStepDuration.WithLabelValues("openfga_check").Observe(time.Since(stepStart).Seconds())
+
+	// Record total end-to-end duration at the authorizer level as well, labeled
+	// with the decision and scope so it can be used independently of the HTTP
+	// handler metrics.
+	totalDuration := time.Since(start)
+	decisionStr := decisionLabel(decision, checkErr)
+	resourceGroup := attributes.GetAPIGroup()
+
+	authzRequestDuration.WithLabelValues(decisionStr, scope, resourceGroup).Observe(totalDuration.Seconds())
+	authzDecisionsTotal.WithLabelValues(decisionStr, scope, resourceGroup).Inc()
+
+	span.SetAttributes(attribute.String("authz.decision", decisionStr))
+	if checkErr != nil {
+		span.RecordError(checkErr)
+		span.SetStatus(codes.Error, checkErr.Error())
+	}
+
+	slog.InfoContext(ctx, "authorization completed",
+		slog.String("request_id", requestID),
+		slog.String("traceID", traceIDFromSpan(span)),
+		slog.Duration("duration", totalDuration),
+		slog.String("decision", decisionStr),
+		slog.String("scope", scope),
+		slog.String("resource_group", resourceGroup),
+		slog.String("resource", attributes.GetResource()),
+		slog.String("verb", attributes.GetVerb()),
+		slog.String("user", attributes.GetUser().GetName()),
+	)
+
+	return decision, reason, checkErr
+}
+
+// decisionLabel maps an authorizer.Decision and optional error to the metric
+// label used on authz_request_duration_seconds and authz_decisions_total.
+func decisionLabel(decision authorizer.Decision, err error) string {
+	if err != nil {
+		return "error"
+	}
+	switch decision {
+	case authorizer.DecisionAllow:
+		return "allowed"
+	case authorizer.DecisionDeny:
+		return "denied"
+	default:
+		return "no_opinion"
+	}
 }
 
 // buildAuthorizationContext extracts and validates the essential information needed for authorization
@@ -197,10 +310,21 @@ func (o *SubjectAccessReviewAuthorizer) isResourceNamespaced(ctx context.Context
 		groupVersion = fmt.Sprintf("%s/%s", apiGroup, apiVersion)
 	}
 
+	tracer := otel.GetTracerProvider().Tracer("authz-webhook")
+	ctx, discoverySpan := tracer.Start(ctx, "k8s.discovery.ServerResourcesForGroupVersion")
+	discoverySpan.SetAttributes(attribute.String("api.group_version", groupVersion))
+
 	// Get server resources for the API group version
 	// The cached discovery client handles TTL-based refresh automatically
+	stepStart := time.Now()
 	resourceList, err := o.DiscoveryClient.ServerResourcesForGroupVersion(groupVersion)
+	discoveryDuration := time.Since(stepStart)
+	discoverySpan.End()
+
+	authzStepDuration.WithLabelValues("k8s_discovery").Observe(discoveryDuration.Seconds())
+
 	if err != nil {
+		authzK8sAPICallsTotal.WithLabelValues("discovery", "get", "error").Inc()
 		slog.WarnContext(ctx, "failed to get server resources",
 			slog.String("apiGroup", apiGroup),
 			slog.String("apiVersion", apiVersion),
@@ -208,6 +332,12 @@ func (o *SubjectAccessReviewAuthorizer) isResourceNamespaced(ctx context.Context
 			slog.String("error", err.Error()))
 		return false, fmt.Errorf("failed to get server resources for group version %s: %w", groupVersion, err)
 	}
+	authzK8sAPICallsTotal.WithLabelValues("discovery", "get", "success").Inc()
+
+	slog.DebugContext(ctx, "k8s discovery completed",
+		slog.String("group_version", groupVersion),
+		slog.Duration("duration", discoveryDuration),
+	)
 
 	// Find the resource in the list
 	for _, apiResource := range resourceList.APIResources {
@@ -284,6 +414,16 @@ func (o *SubjectAccessReviewAuthorizer) validatePermission(ctx context.Context, 
 
 // executeOpenFGACheck performs the OpenFGA authorization check
 func (o *SubjectAccessReviewAuthorizer) executeOpenFGACheck(ctx context.Context, checkReq *openfgav1.CheckRequest) (authorizer.Decision, string, error) {
+	tracer := otel.GetTracerProvider().Tracer("authz-webhook")
+	ctx, checkSpan := tracer.Start(ctx, "openfga.check")
+	checkSpan.SetAttributes(
+		attribute.String("openfga.store_id", o.FGAStoreID),
+		attribute.String("openfga.user", checkReq.TupleKey.User),
+		attribute.String("openfga.relation", checkReq.TupleKey.Relation),
+		attribute.String("openfga.object", checkReq.TupleKey.Object),
+	)
+	defer checkSpan.End()
+
 	slog.InfoContext(ctx, "checking OpenFGA authorization",
 		slog.String("user", checkReq.TupleKey.User),
 		slog.String("resource", checkReq.TupleKey.Object),
@@ -293,11 +433,18 @@ func (o *SubjectAccessReviewAuthorizer) executeOpenFGACheck(ctx context.Context,
 
 	resp, err := o.FGAClient.Check(ctx, checkReq)
 	if err != nil {
+		openfgaCheckTotal.WithLabelValues("false", "true").Inc()
+		checkSpan.RecordError(err)
+		checkSpan.SetStatus(codes.Error, err.Error())
 		slog.ErrorContext(ctx, "failed to check authorization in OpenFGA", slog.String("error", err.Error()))
 		return authorizer.DecisionNoOpinion, "", err
 	}
 
-	if resp.GetAllowed() {
+	allowed := resp.GetAllowed()
+	openfgaCheckTotal.WithLabelValues(strconv.FormatBool(allowed), "false").Inc()
+	checkSpan.SetAttributes(attribute.Bool("openfga.allowed", allowed))
+
+	if allowed {
 		slog.DebugContext(ctx, "subject was granted access through OpenFGA")
 		return authorizer.DecisionAllow, "", nil
 	}
@@ -347,10 +494,29 @@ func (o *SubjectAccessReviewAuthorizer) buildOpenFGARequest(ctx context.Context,
 
 // validatePermissionWithServiceDefaulting validates permissions with consistent service name defaulting
 func (o *SubjectAccessReviewAuthorizer) validatePermissionWithServiceDefaulting(ctx context.Context, attributes authorizer.Attributes) (bool, error) {
+	tracer := otel.GetTracerProvider().Tracer("authz-webhook")
+	ctx, listSpan := tracer.Start(ctx, "k8s.list.ProtectedResources/validatePermission")
+	defer listSpan.End()
+
+	stepStart := time.Now()
 	protectedResourceList := &iamv1alpha1.ProtectedResourceList{}
-	if err := o.K8sClient.List(ctx, protectedResourceList); err != nil {
+	err := o.K8sClient.List(ctx, protectedResourceList)
+	duration := time.Since(stepStart)
+
+	authzStepDuration.WithLabelValues("k8s_list_protectedresources").Observe(duration.Seconds())
+
+	slog.DebugContext(ctx, "k8s list ProtectedResources completed (validatePermission)",
+		slog.Duration("duration", duration),
+		slog.Bool("error", err != nil),
+	)
+
+	if err != nil {
+		authzK8sAPICallsTotal.WithLabelValues("protectedresources", "list", "error").Inc()
+		listSpan.RecordError(err)
+		listSpan.SetStatus(codes.Error, err.Error())
 		return false, fmt.Errorf("failed to list ProtectedResources: %w", err)
 	}
+	authzK8sAPICallsTotal.WithLabelValues("protectedresources", "list", "success").Inc()
 
 	apiGroup := o.getEffectiveAPIGroup(attributes)
 	resource := attributes.GetResource()
@@ -516,10 +682,29 @@ func (o *SubjectAccessReviewAuthorizer) buildHashedPermissionRelation(attributes
 
 // getProtectedResource retrieves the ProtectedResource for the given attributes
 func (o *SubjectAccessReviewAuthorizer) getProtectedResource(ctx context.Context, attributes authorizer.Attributes) (*iamv1alpha1.ProtectedResource, error) {
+	tracer := otel.GetTracerProvider().Tracer("authz-webhook")
+	ctx, listSpan := tracer.Start(ctx, "k8s.list.ProtectedResources/buildRequest")
+	defer listSpan.End()
+
+	stepStart := time.Now()
 	protectedResourceList := &iamv1alpha1.ProtectedResourceList{}
-	if err := o.K8sClient.List(ctx, protectedResourceList); err != nil {
+	err := o.K8sClient.List(ctx, protectedResourceList)
+	duration := time.Since(stepStart)
+
+	authzStepDuration.WithLabelValues("k8s_list_protectedresources").Observe(duration.Seconds())
+
+	slog.DebugContext(ctx, "k8s list ProtectedResources completed (buildRequest)",
+		slog.Duration("duration", duration),
+		slog.Bool("error", err != nil),
+	)
+
+	if err != nil {
+		authzK8sAPICallsTotal.WithLabelValues("protectedresources", "list", "error").Inc()
+		listSpan.RecordError(err)
+		listSpan.SetStatus(codes.Error, err.Error())
 		return nil, fmt.Errorf("failed to list ProtectedResources: %w", err)
 	}
+	authzK8sAPICallsTotal.WithLabelValues("protectedresources", "list", "success").Inc()
 
 	apiGroup := attributes.GetAPIGroup()
 	resource := attributes.GetResource()
