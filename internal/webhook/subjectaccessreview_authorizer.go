@@ -46,28 +46,16 @@ type SubjectAccessReviewAuthorizer struct {
 	// each call (safe but slower).
 	AuthorizationModelID   string
 	ProtectedResourceCache *ProtectedResourceCache
-	// ProjectOrgCache maps project names to their parent organization names.
-	// When set, project-scoped authorization checks are split into two parallel
-	// OpenFGA calls (one against the project, one against the org) to avoid
-	// OpenFGA's sequential graph traversal through the project → org parent chain.
-	// If the project is not in the cache, the request falls through to the
-	// standard single-Check flow.
-	ProjectOrgCache *ProjectOrganizationCache
-	DiscoveryClient discovery.DiscoveryInterface
+	DiscoveryClient        discovery.DiscoveryInterface
 }
 
 // Config holds the configuration for creating a SubjectAccessReview webhook
 type Config struct {
-	FGAClient  openfgav1.OpenFGAServiceClient
-	FGAStoreID string
-	// AuthorizationModelID pins CheckRequests to a specific model, eliminating
-	// the per-request model lookup in OpenFGA. Leave empty to use the latest.
+	FGAClient              openfgav1.OpenFGAServiceClient
+	FGAStoreID             string
 	AuthorizationModelID   string
 	ProtectedResourceCache *ProtectedResourceCache
-	// ProjectOrgCache maps project names to their parent organization names.
-	// When nil, project-scoped requests use the standard single-Check flow.
-	ProjectOrgCache *ProjectOrganizationCache
-	DiscoveryClient discovery.DiscoveryInterface
+	DiscoveryClient        discovery.DiscoveryInterface
 }
 
 // NewSubjectAccessReviewWebhook creates a new SubjectAccessReview authorization webhook
@@ -77,7 +65,6 @@ func NewSubjectAccessReviewWebhook(config Config) *Webhook {
 		FGAStoreID:             config.FGAStoreID,
 		AuthorizationModelID:   config.AuthorizationModelID,
 		ProtectedResourceCache: config.ProtectedResourceCache,
-		ProjectOrgCache:        config.ProjectOrgCache,
 		DiscoveryClient:        config.DiscoveryClient,
 	}
 	return NewAuthorizerWebhook(authorizer)
@@ -231,47 +218,7 @@ func (o *SubjectAccessReviewAuthorizer) Authorize(ctx context.Context, attribute
 		return authorizer.DecisionDeny, "", validatePermErr
 	}
 
-	// Step 6: For project-scoped requests, attempt parallel project+org checks
-	// when the ProjectOrgCache has the project's parent organization. This bypasses
-	// OpenFGA's sequential graph traversal through the project → org parent chain.
-	if authCtx.isProjectScope() && o.ProjectOrgCache != nil {
-		if orgName, found := o.ProjectOrgCache.GetOrganizationForProject(authCtx.getProjectName()); found {
-			stepStart = time.Now()
-			decision, reason, checkErr := o.executeParallelProjectCheck(ctx, attributes, authCtx, orgName)
-			authzStepDuration.WithLabelValues("parallel_project_org_check").Observe(time.Since(stepStart).Seconds())
-
-			totalDuration := time.Since(start)
-			decisionStr := decisionLabel(decision, checkErr)
-			resourceGroup := attributes.GetAPIGroup()
-
-			authzRequestDuration.WithLabelValues(decisionStr, scope, resourceGroup).Observe(totalDuration.Seconds())
-			authzDecisionsTotal.WithLabelValues(decisionStr, scope, resourceGroup).Inc()
-
-			span.SetAttributes(attribute.String("authz.decision", decisionStr))
-			if checkErr != nil {
-				span.RecordError(checkErr)
-				span.SetStatus(codes.Error, checkErr.Error())
-			}
-
-			slog.InfoContext(ctx, "authorization completed (parallel project+org check)",
-				slog.String("request_id", requestID),
-				slog.String("traceID", traceIDFromSpan(span)),
-				slog.Duration("duration", totalDuration),
-				slog.String("decision", decisionStr),
-				slog.String("scope", scope),
-				slog.String("resource_group", resourceGroup),
-				slog.String("resource", attributes.GetResource()),
-				slog.String("verb", attributes.GetVerb()),
-				slog.String("user", attributes.GetUser().GetName()),
-				slog.String("project", authCtx.getProjectName()),
-				slog.String("organization", orgName),
-			)
-
-			return decision, reason, checkErr
-		}
-	}
-
-	// Step 7: Build OpenFGA check request (standard single-Check flow)
+	// Step 6: Build and execute OpenFGA check request
 	stepStart = time.Now()
 	ctx, buildReqSpan := tracer.Start(ctx, "build_openfga_request")
 	checkReq, err := o.buildOpenFGARequest(ctx, attributes, authCtx)
@@ -713,125 +660,4 @@ func (o *SubjectAccessReviewAuthorizer) getProtectedResource(ctx context.Context
 		slog.Duration("duration", duration),
 	)
 	return nil, fmt.Errorf("no ProtectedResource found for APIGroup=%s, Resource=%s", apiGroup, resource)
-}
-
-// executeParallelProjectCheck performs two OpenFGA Check calls concurrently:
-// one against the project resource and one against the parent organization.
-// Either check returning allowed grants access, implementing the union of
-// project-level and org-level policy bindings without relying on OpenFGA's
-// sequential graph traversal.
-func (o *SubjectAccessReviewAuthorizer) executeParallelProjectCheck(
-	ctx context.Context,
-	attributes authorizer.Attributes,
-	authCtx *authorizationContext,
-	orgName string,
-) (authorizer.Decision, string, error) {
-	tracer := otel.GetTracerProvider().Tracer("authz-webhook")
-	ctx, span := tracer.Start(ctx, "parallel_project_org_check")
-	defer span.End()
-
-	user := fmt.Sprintf("iam.miloapis.com/InternalUser:%s", authCtx.userUID)
-	relation := o.buildHashedPermissionRelation(attributes)
-
-	projectObject := fmt.Sprintf("resourcemanager.miloapis.com/Project:%s", authCtx.getProjectName())
-	orgObject := fmt.Sprintf("resourcemanager.miloapis.com/Organization:%s", orgName)
-
-	span.SetAttributes(
-		attribute.String("openfga.store_id", o.FGAStoreID),
-		attribute.String("openfga.user", user),
-		attribute.String("openfga.relation", relation),
-		attribute.String("openfga.project_object", projectObject),
-		attribute.String("openfga.org_object", orgObject),
-	)
-
-	type checkResult struct {
-		allowed bool
-		err     error
-	}
-
-	projectCh := make(chan checkResult, 1)
-	orgCh := make(chan checkResult, 1)
-
-	go func() {
-		goCtx, projectSpan := tracer.Start(ctx, "openfga.check.project")
-		defer projectSpan.End()
-		resp, err := o.FGAClient.Check(goCtx, &openfgav1.CheckRequest{
-			StoreId:              o.FGAStoreID,
-			AuthorizationModelId: o.AuthorizationModelID,
-			TupleKey: &openfgav1.CheckRequestTupleKey{
-				User:     user,
-				Relation: relation,
-				Object:   projectObject,
-			},
-		})
-		if err != nil {
-			projectSpan.RecordError(err)
-			projectCh <- checkResult{false, err}
-			return
-		}
-		allowed := resp.GetAllowed()
-		projectSpan.SetAttributes(attribute.Bool("openfga.allowed", allowed))
-		projectCh <- checkResult{allowed, nil}
-	}()
-
-	go func() {
-		goCtx, orgSpan := tracer.Start(ctx, "openfga.check.org_inheritance")
-		defer orgSpan.End()
-		resp, err := o.FGAClient.Check(goCtx, &openfgav1.CheckRequest{
-			StoreId:              o.FGAStoreID,
-			AuthorizationModelId: o.AuthorizationModelID,
-			TupleKey: &openfgav1.CheckRequestTupleKey{
-				User:     user,
-				Relation: relation,
-				Object:   orgObject,
-			},
-		})
-		if err != nil {
-			orgSpan.RecordError(err)
-			orgCh <- checkResult{false, err}
-			return
-		}
-		allowed := resp.GetAllowed()
-		orgSpan.SetAttributes(attribute.Bool("openfga.allowed", allowed))
-		orgCh <- checkResult{allowed, nil}
-	}()
-
-	projectResult := <-projectCh
-	orgResult := <-orgCh
-
-	// Track check outcomes in metrics. Each parallel call is counted separately
-	// using the existing openfgaCheckTotal counter so dashboards remain accurate.
-	if projectResult.err != nil {
-		openfgaCheckTotal.WithLabelValues("false", "true").Inc()
-	} else {
-		openfgaCheckTotal.WithLabelValues(strconv.FormatBool(projectResult.allowed), "false").Inc()
-	}
-	if orgResult.err != nil {
-		openfgaCheckTotal.WithLabelValues("false", "true").Inc()
-	} else {
-		openfgaCheckTotal.WithLabelValues(strconv.FormatBool(orgResult.allowed), "false").Inc()
-	}
-
-	// Both checks failed with errors — surface the project check error.
-	if projectResult.err != nil && orgResult.err != nil {
-		span.RecordError(projectResult.err)
-		slog.ErrorContext(ctx, "both parallel OpenFGA checks failed",
-			slog.String("project_error", projectResult.err.Error()),
-			slog.String("org_error", orgResult.err.Error()),
-		)
-		return authorizer.DecisionNoOpinion, "", projectResult.err
-	}
-
-	// Union: either check allowing grants access.
-	if projectResult.allowed || orgResult.allowed {
-		span.SetAttributes(attribute.Bool("openfga.allowed", true))
-		slog.DebugContext(ctx, "subject granted access through parallel project+org check",
-			slog.Bool("project_allowed", projectResult.allowed),
-			slog.Bool("org_allowed", orgResult.allowed),
-		)
-		return authorizer.DecisionAllow, "", nil
-	}
-
-	span.SetAttributes(attribute.Bool("openfga.allowed", false))
-	return authorizer.DecisionDeny, "", nil
 }

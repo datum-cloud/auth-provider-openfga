@@ -26,5 +26,5 @@ spec:
       migrationType: job
     checkQueryCache:
       enabled: true
-      limit: 10000
-      ttl: 10s
+      limit: 100000
+      ttl: 30s

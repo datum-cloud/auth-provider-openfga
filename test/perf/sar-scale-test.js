@@ -353,18 +353,16 @@ function buildProjectSAR(user, org, project) {
       uid: user,
       groups: ['system:authenticated'],
       extra: {
-        // Parent context fields tell the webhook this is a project-scoped check.
-        // The webhook's extractParentContext reads these to determine scope.
-        'iam.miloapis.com/parent-api-group': ['resourcemanager.miloapis.com'],
-        'iam.miloapis.com/parent-kind': ['Project'],
-        'iam.miloapis.com/parent-name': [project],
+        // Organization context — the webhook checks org-level access which
+        // inherits to all projects under the org.
+        'resourcemanager.miloapis.com/organization-id': [org],
       },
       resourceAttributes: {
         group: 'resourcemanager.miloapis.com',
-        resource: 'projects',
+        resource: 'organizations',
         version: 'v1alpha1',
         verb: 'get',
-        name: project,
+        name: org,
       },
     },
   };
