@@ -18,8 +18,8 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/protobuf/types/known/wrapperspb"
 	"k8s.io/api/authentication/v1beta1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/discovery/cached/disk"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
@@ -39,6 +39,8 @@ func createWebhookCommand() *cobra.Command {
 	var metricsBindAddress string
 	var discoveryCacheTTL time.Duration
 	var otlpEndpoint string
+	var configmapNamespace string
+	var configmapName string
 
 	cmd := &cobra.Command{
 		Use:   "authz-webhook",
@@ -56,6 +58,8 @@ func createWebhookCommand() *cobra.Command {
 				metricsBindAddress,
 				discoveryCacheTTL,
 				otlpEndpoint,
+				configmapNamespace,
+				configmapName,
 			)
 		},
 	}
@@ -74,6 +78,10 @@ func createWebhookCommand() *cobra.Command {
 		"TTL for Kubernetes API discovery cache (enables automatic detection of new resources)")
 	cmd.Flags().StringVar(&otlpEndpoint, "otlp-endpoint", os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
 		"OTLP HTTP endpoint for OpenTelemetry trace export (e.g. tempo:4318). Leave empty to disable tracing.")
+	cmd.Flags().StringVar(&configmapNamespace, "configmap-namespace", os.Getenv("POD_NAMESPACE"),
+		"Namespace to watch for the authorization model ConfigMap. Defaults to the POD_NAMESPACE environment variable.")
+	cmd.Flags().StringVar(&configmapName, "configmap-name", "openfga-authorization-model",
+		"Name of the ConfigMap that stores the current authorization model ID.")
 
 	// Mark required flags
 	if err := cmd.MarkFlagRequired("openfga-api-url"); err != nil {
@@ -97,6 +105,8 @@ func runWebhookServer(
 	metricsBindAddress string,
 	discoveryCacheTTL time.Duration,
 	otlpEndpoint string,
+	configmapNamespace string,
+	configmapName string,
 ) error {
 	log.SetLogger(zap.New(zap.JSONEncoder()))
 	entryLog := log.Log.WithName("webhook-server")
@@ -137,21 +147,6 @@ func runWebhookServer(
 
 	fgaClient := openfgav1.NewOpenFGAServiceClient(conn)
 
-	// Read the latest authorization model ID so that CheckRequests can be
-	// pinned to it, eliminating one DB read per Check call inside OpenFGA.
-	// A failure here is non-fatal: the webhook will still function correctly
-	// by resolving the latest model on each request.
-	modelID := ""
-	if modelsResp, modelsErr := fgaClient.ReadAuthorizationModels(ctx, &openfgav1.ReadAuthorizationModelsRequest{
-		StoreId:  openfgaStoreID,
-		PageSize: wrapperspb.Int32(1),
-	}); modelsErr != nil {
-		entryLog.Error(modelsErr, "failed to read authorization models; CheckRequests will resolve model dynamically")
-	} else if len(modelsResp.AuthorizationModels) > 0 {
-		modelID = modelsResp.AuthorizationModels[0].Id
-		entryLog.Info("pinning CheckRequests to authorization model", "model_id", modelID)
-	}
-
 	// Setup Kubernetes client config
 	restConfig, err := config.GetConfig()
 	if err != nil {
@@ -159,6 +154,9 @@ func runWebhookServer(
 	}
 
 	runtimeScheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(runtimeScheme); err != nil {
+		return fmt.Errorf("failed to add corev1 to scheme: %w", err)
+	}
 	if err := v1beta1.AddToScheme(runtimeScheme); err != nil {
 		return fmt.Errorf("failed to add v1beta1 to scheme: %w", err)
 	}
@@ -207,6 +205,16 @@ func runWebhookServer(
 		return fmt.Errorf("failed to create ProtectedResource cache: %w", err)
 	}
 
+	// Build the authorization model ID watcher. It watches the
+	// openfga-authorization-model ConfigMap and updates its cached model ID
+	// whenever the controller-manager writes a new model. The watcher starts
+	// with an empty seed — the first informer event after cache sync will
+	// populate it.
+	modelIDWatcher, err := webhook.NewAuthorizationModelIDWatcher(ctx, mgr, configmapNamespace, configmapName, "")
+	if err != nil {
+		return fmt.Errorf("failed to create authorization model ID watcher: %w", err)
+	}
+
 	// Setup webhooks
 	entryLog.Info("setting up webhook server")
 	hookServer := mgr.GetWebhookServer()
@@ -216,7 +224,7 @@ func runWebhookServer(
 	webhook.RegisterSubjectAccessReviewWebhook(hookServer, webhook.Config{
 		FGAClient:              fgaClient,
 		FGAStoreID:             openfgaStoreID,
-		AuthorizationModelID:   modelID,
+		ModelIDWatcher:         modelIDWatcher,
 		ProtectedResourceCache: prCache,
 		DiscoveryClient:        discoveryClient,
 	})

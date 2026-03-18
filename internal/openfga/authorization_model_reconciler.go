@@ -13,12 +13,36 @@ import (
 	iamdatumapiscomv1alpha1 "go.miloapis.com/milo/pkg/apis/iam/v1alpha1"
 	"google.golang.org/protobuf/testing/protocmp"
 	"google.golang.org/protobuf/types/known/wrapperspb"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+)
+
+const (
+	// AuthorizationModelConfigMapName is the name of the ConfigMap that holds
+	// AuthorizationModelConfigMapName is the default name for the ConfigMap
+	// that holds the latest authorization model ID. Used as the flag default.
+	AuthorizationModelConfigMapName = "openfga-authorization-model"
+
+	// AuthorizationModelIDKey is the key within the ConfigMap's data map that
+	// stores the model ID string.
+	AuthorizationModelIDKey = "model-id"
 )
 
 type AuthorizationModelReconciler struct {
 	StoreID string
 	OpenFGA openfgav1.OpenFGAServiceClient
+
+	// K8sClient is used to create/update the ConfigMap that holds the current
+	// authorization model ID. When nil, the ConfigMap write is skipped.
+	K8sClient client.Client
+	// Namespace is the Kubernetes namespace in which the ConfigMap is created.
+	Namespace string
+	// ConfigMapName is the name of the ConfigMap that stores the model ID.
+	// Defaults to DefaultAuthorizationModelConfigMapName if empty.
+	ConfigMapName string
 }
 
 // getAuthorizationModelComparisonOptions returns the standardized cmp.Option slice for comparing authorization models
@@ -133,7 +157,7 @@ func (r *AuthorizationModelReconciler) ReconcileAuthorizationModel(ctx context.C
 		log.Info("Authorization model diff detected", "diff", diff)
 	}
 
-	_, err = r.OpenFGA.WriteAuthorizationModel(ctx, &openfgav1.WriteAuthorizationModelRequest{
+	writeResp, err := r.OpenFGA.WriteAuthorizationModel(ctx, &openfgav1.WriteAuthorizationModelRequest{
 		StoreId:         r.StoreID,
 		SchemaVersion:   mergedAuthorizationModel.SchemaVersion,
 		TypeDefinitions: mergedAuthorizationModel.TypeDefinitions,
@@ -143,6 +167,48 @@ func (r *AuthorizationModelReconciler) ReconcileAuthorizationModel(ctx context.C
 		return fmt.Errorf("failed to reconcile authorization model: %w", err)
 	}
 
+	if r.K8sClient != nil && r.Namespace != "" && writeResp.GetAuthorizationModelId() != "" {
+		if cmErr := r.writeModelIDToConfigMap(ctx, writeResp.GetAuthorizationModelId()); cmErr != nil {
+			// Log the error but do not fail the reconciliation — the webhook
+			// can still resolve the latest model dynamically.
+			log.Error(cmErr, "failed to write authorization model ID to ConfigMap",
+				"model_id", writeResp.GetAuthorizationModelId())
+		}
+	}
+
+	return nil
+}
+
+// writeModelIDToConfigMap creates or updates the openfga-authorization-model
+// ConfigMap in the configured namespace with the given model ID.
+func (r *AuthorizationModelReconciler) writeModelIDToConfigMap(ctx context.Context, modelID string) error {
+	cmName := r.ConfigMapName
+
+	log := logf.FromContext(ctx).WithValues("component", "AuthorizationModelReconciler", "model_id", modelID)
+
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      cmName,
+			Namespace: r.Namespace,
+		},
+	}
+
+	result, err := controllerutil.CreateOrUpdate(ctx, r.K8sClient, cm, func() error {
+		if cm.Data == nil {
+			cm.Data = make(map[string]string)
+		}
+		cm.Data[AuthorizationModelIDKey] = modelID
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create/update authorization model ConfigMap: %w", err)
+	}
+
+	log.Info("authorization model ID written to ConfigMap",
+		"configmap", cmName,
+		"namespace", r.Namespace,
+		"result", result,
+	)
 	return nil
 }
 

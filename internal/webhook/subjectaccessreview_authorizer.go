@@ -40,11 +40,11 @@ var _ authorizer.Authorizer = &SubjectAccessReviewAuthorizer{}
 type SubjectAccessReviewAuthorizer struct {
 	FGAClient  openfgav1.OpenFGAServiceClient
 	FGAStoreID string
-	// AuthorizationModelID pins every CheckRequest to a specific authorization
-	// model. When set, OpenFGA skips its internal model lookup (one DB read
-	// saved per Check call). If empty, OpenFGA resolves the latest model on
-	// each call (safe but slower).
-	AuthorizationModelID   string
+	// ModelIDWatcher provides the current authorization model ID. When the
+	// returned ID is non-empty OpenFGA skips its internal model lookup (one DB
+	// read saved per Check call). If the watcher returns an empty string
+	// OpenFGA resolves the latest model on each call (safe but slower).
+	ModelIDWatcher         *AuthorizationModelIDWatcher
 	ProtectedResourceCache *ProtectedResourceCache
 	DiscoveryClient        discovery.DiscoveryInterface
 }
@@ -53,7 +53,7 @@ type SubjectAccessReviewAuthorizer struct {
 type Config struct {
 	FGAClient              openfgav1.OpenFGAServiceClient
 	FGAStoreID             string
-	AuthorizationModelID   string
+	ModelIDWatcher         *AuthorizationModelIDWatcher
 	ProtectedResourceCache *ProtectedResourceCache
 	DiscoveryClient        discovery.DiscoveryInterface
 }
@@ -63,7 +63,7 @@ func NewSubjectAccessReviewWebhook(config Config) *Webhook {
 	authorizer := &SubjectAccessReviewAuthorizer{
 		FGAClient:              config.FGAClient,
 		FGAStoreID:             config.FGAStoreID,
-		AuthorizationModelID:   config.AuthorizationModelID,
+		ModelIDWatcher:         config.ModelIDWatcher,
 		ProtectedResourceCache: config.ProtectedResourceCache,
 		DiscoveryClient:        config.DiscoveryClient,
 	}
@@ -473,9 +473,14 @@ func (o *SubjectAccessReviewAuthorizer) buildOpenFGARequest(ctx context.Context,
 		return nil, err
 	}
 
+	var modelID string
+	if o.ModelIDWatcher != nil {
+		modelID = o.ModelIDWatcher.GetModelID()
+	}
+
 	return &openfgav1.CheckRequest{
 		StoreId:              o.FGAStoreID,
-		AuthorizationModelId: o.AuthorizationModelID,
+		AuthorizationModelId: modelID,
 		TupleKey: &openfgav1.CheckRequestTupleKey{
 			User:     user,
 			Relation: relation,

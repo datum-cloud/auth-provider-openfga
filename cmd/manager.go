@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/tls"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -35,6 +36,9 @@ func createManagerCommand() *cobra.Command {
 	var renewDeadline time.Duration
 	var retryPeriod time.Duration
 
+	var configmapNamespace string
+	var configmapName string
+
 	cmd := &cobra.Command{
 		Use:   "manager",
 		Short: "Start the controller manager",
@@ -53,6 +57,8 @@ func createManagerCommand() *cobra.Command {
 				leaseDuration,
 				renewDeadline,
 				retryPeriod,
+				configmapNamespace,
+				configmapName,
 			)
 		},
 	}
@@ -75,6 +81,10 @@ func createManagerCommand() *cobra.Command {
 		"OpenFGA API URL (e.g. localhost:8080 or api.us1.fga.dev)")
 	cmd.Flags().StringVar(&openfgaStoreID, "openfga-store-id", "", "OpenFGA Store ID")
 	cmd.Flags().StringVar(&openfgaScheme, "openfga-scheme", "http", "OpenFGA Scheme (http or https)")
+	cmd.Flags().StringVar(&configmapNamespace, "configmap-namespace", os.Getenv("POD_NAMESPACE"),
+		"Namespace in which to create/update the authorization model ConfigMap. Defaults to the POD_NAMESPACE environment variable.")
+	cmd.Flags().StringVar(&configmapName, "configmap-name", "openfga-authorization-model",
+		"Name of the ConfigMap used to store the current authorization model ID.")
 
 	// Mark required flags
 	if err := cmd.MarkFlagRequired("openfga-api-url"); err != nil {
@@ -100,6 +110,8 @@ func runManager(
 	leaseDuration time.Duration,
 	renewDeadline time.Duration,
 	retryPeriod time.Duration,
+	configmapNamespace string,
+	configmapName string,
 ) error {
 	opts := zap.Options{
 		Development: true,
@@ -185,10 +197,12 @@ func runManager(
 
 	// Add the new AuthorizationModelReconciler
 	if err = (&controller.AuthorizationModelReconciler{
-		Client:     mgr.GetClient(),
-		Scheme:     mgr.GetScheme(),
-		FGAClient:  fgaClient,
-		FGAStoreID: openfgaStoreID,
+		Client:             mgr.GetClient(),
+		Scheme:             mgr.GetScheme(),
+		FGAClient:          fgaClient,
+		FGAStoreID:         openfgaStoreID,
+		ConfigMapNamespace: configmapNamespace,
+		ConfigMapName:      configmapName,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to create controller AuthorizationModel: %w", err)
 	}

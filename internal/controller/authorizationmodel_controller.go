@@ -76,16 +76,22 @@ func (f *ProtectedResourceFinalizer) Finalize(ctx context.Context, obj client.Ob
 // reflects the state defined by these resources.
 type AuthorizationModelReconciler struct {
 	client.Client
-	Scheme       *runtime.Scheme
-	FGAClient    openfgav1.OpenFGAServiceClient
-	FGAStoreID   string
-	modelBuilder *openfga.AuthorizationModelReconciler
-	Finalizers   finalizer.Finalizers
+	Scheme     *runtime.Scheme
+	FGAClient  openfgav1.OpenFGAServiceClient
+	FGAStoreID string
+	// ConfigMapNamespace is the Kubernetes namespace where the model ID
+	// ConfigMap will be written. When empty the ConfigMap write is skipped.
+	ConfigMapNamespace string
+	// ConfigMapName is the name of the ConfigMap that stores the model ID.
+	ConfigMapName string
+	modelBuilder  *openfga.AuthorizationModelReconciler
+	Finalizers    finalizer.Finalizers
 }
 
 //+kubebuilder:rbac:groups=iam.miloapis.com,resources=protectedresources,verbs=get;list;watch;update;patch
 //+kubebuilder:rbac:groups=iam.miloapis.com,resources=protectedresources/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=iam.miloapis.com,resources=protectedresources/finalizers,verbs=update
+//+kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch
 
 // Reconcile is the core reconciliation loop for the
 // AuthorizationModelReconciler. It is invoked when changes are detected in
@@ -215,8 +221,11 @@ func (r *AuthorizationModelReconciler) SetupWithManager(mgr ctrl.Manager) error 
 	// FGAStoreID. This component is responsible for interacting with OpenFGA to
 	// reconcile the authorization model.
 	r.modelBuilder = &openfga.AuthorizationModelReconciler{
-		StoreID: r.FGAStoreID,
-		OpenFGA: r.FGAClient,
+		StoreID:       r.FGAStoreID,
+		OpenFGA:       r.FGAClient,
+		K8sClient:     r.Client,
+		Namespace:     r.ConfigMapNamespace,
+		ConfigMapName: r.ConfigMapName,
 	}
 
 	// Initialize the finalizer manager and register our custom
