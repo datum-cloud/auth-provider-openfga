@@ -203,6 +203,15 @@ func runManager(
 		return fmt.Errorf("unable to create controller GroupMembership: %w", err)
 	}
 
+	if err = (&controller.SystemGroupReconciler{
+		Client:     mgr.GetClient(),
+		Scheme:     mgr.GetScheme(),
+		FGAClient:  fgaClient,
+		FGAStoreID: openfgaStoreID,
+	}).SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("unable to create controller SystemGroup: %w", err)
+	}
+
 	//+kubebuilder:scaffold:builder
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {

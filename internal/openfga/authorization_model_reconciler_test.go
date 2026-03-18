@@ -46,6 +46,18 @@ func (m *MockOpenFGAServiceClient) WriteAuthorizationModel(ctx context.Context, 
 	return &openfgav1.WriteAuthorizationModelResponse{}, nil
 }
 
+// buildExpectedResourceTypeDefinition is a test helper that constructs the
+// TypeDefinition the reconciler would generate for a resource with direct
+// permissions (no parent). It mirrors getResourceTypeDefinition for the
+// no-parent case and is used to build golden-state models in tests.
+func buildExpectedResourceTypeDefinition(resourceType string, permissions []string) *openfgav1.TypeDefinition {
+	node := &resourceGraphNode{
+		ResourceType:    resourceType,
+		ParentResources: []string{},
+	}
+	return getResourceTypeDefinition(permissions, node)
+}
+
 func TestAuthorizationModelReconciler_ReconcileAuthorizationModel(t *testing.T) {
 	// Set up test logger
 	logf.SetLogger(zap.New())
@@ -73,106 +85,14 @@ func TestAuthorizationModelReconciler_ReconcileAuthorizationModel(t *testing.T) 
 			currentModel: &openfgav1.AuthorizationModel{
 				SchemaVersion: "1.2",
 				TypeDefinitions: []*openfgav1.TypeDefinition{
-					// Create the exact same type definitions that would be generated
+					// Direct-permission model: only InternalUser, InternalUserGroup,
+					// and the resource type definitions.
 					getUserTypeDefinition(),
 					getUserGroupTypeDefinition(),
-					getRoleTypeDefinition([]string{"test.service.com/testresources.get", "test.service.com/testresources.list"}),
-					getRoleBindingTypeDefinition([]string{"test.service.com/testresources.get", "test.service.com/testresources.list"}),
-					getRootTypeDefinition([]string{"test.service.com/testresources.get", "test.service.com/testresources.list"}, []string{"test.service.com/TestResource"}),
-					// Add the resource type definition that would be generated
-					{
-						Type: "test.service.com/TestResource",
-						Metadata: &openfgav1.Metadata{
-							Relations: map[string]*openfgav1.RelationMetadata{
-								"iam.miloapis.com/RoleBinding": {
-									DirectlyRelatedUserTypes: []*openfgav1.RelationReference{
-										{Type: "iam.miloapis.com/RoleBinding"},
-									},
-								},
-								"iam.miloapis.com/RootBinding": {
-									DirectlyRelatedUserTypes: []*openfgav1.RelationReference{
-										{Type: "iam.miloapis.com/Root"},
-									},
-								},
-							},
-							SourceInfo: &openfgav1.SourceInfo{
-								File: "dynamically_managed_iam_datumapis_com.fga",
-							},
-							Module: "test.service.com",
-						},
-						Relations: map[string]*openfgav1.Userset{
-							"iam.miloapis.com/RoleBinding": {
-								Userset: &openfgav1.Userset_This{},
-							},
-							"iam.miloapis.com/RootBinding": {
-								Userset: &openfgav1.Userset_This{},
-							},
-							hashPermission("test.service.com/testresources.get"): {
-								Userset: &openfgav1.Userset_Union{
-									Union: &openfgav1.Usersets{
-										Child: []*openfgav1.Userset{
-											{
-												Userset: &openfgav1.Userset_TupleToUserset{
-													TupleToUserset: &openfgav1.TupleToUserset{
-														Tupleset: &openfgav1.ObjectRelation{
-															Relation: "iam.miloapis.com/RoleBinding",
-														},
-														ComputedUserset: &openfgav1.ObjectRelation{
-															Relation: hashPermission("test.service.com/testresources.get"),
-														},
-													},
-												},
-											},
-											{
-												Userset: &openfgav1.Userset_TupleToUserset{
-													TupleToUserset: &openfgav1.TupleToUserset{
-														Tupleset: &openfgav1.ObjectRelation{
-															Relation: "iam.miloapis.com/RootBinding",
-														},
-														ComputedUserset: &openfgav1.ObjectRelation{
-															Relation: hashPermission("test.service.com/testresources.get"),
-														},
-													},
-												},
-											},
-										},
-									},
-								},
-							},
-							hashPermission("test.service.com/testresources.list"): {
-								Userset: &openfgav1.Userset_Union{
-									Union: &openfgav1.Usersets{
-										Child: []*openfgav1.Userset{
-											{
-												Userset: &openfgav1.Userset_TupleToUserset{
-													TupleToUserset: &openfgav1.TupleToUserset{
-														Tupleset: &openfgav1.ObjectRelation{
-															Relation: "iam.miloapis.com/RoleBinding",
-														},
-														ComputedUserset: &openfgav1.ObjectRelation{
-															Relation: hashPermission("test.service.com/testresources.list"),
-														},
-													},
-												},
-											},
-											{
-												Userset: &openfgav1.Userset_TupleToUserset{
-													TupleToUserset: &openfgav1.TupleToUserset{
-														Tupleset: &openfgav1.ObjectRelation{
-															Relation: "iam.miloapis.com/RootBinding",
-														},
-														ComputedUserset: &openfgav1.ObjectRelation{
-															Relation: hashPermission("test.service.com/testresources.list"),
-														},
-													},
-												},
-											},
-										},
-									},
-								},
-							},
-						},
-					},
+					buildExpectedResourceTypeDefinition("test.service.com/TestResource", []string{
+						"test.service.com/testresources.get",
+						"test.service.com/testresources.list",
+					}),
 				},
 			},
 			expectedWriteAuthorizationCalls: 0, // Should not call WriteAuthorizationModel
@@ -201,10 +121,11 @@ func TestAuthorizationModelReconciler_ReconcileAuthorizationModel(t *testing.T) 
 			expectedWriteAuthorizationCalls: 1, // Should call WriteAuthorizationModel once
 		},
 		{
-			name:                            "should write when no current model exists",
-			protectedResources:              []iamdatumapiscomv1alpha1.ProtectedResource{},
-			currentModel:                    &openfgav1.AuthorizationModel{}, // Empty model
-			expectedWriteAuthorizationCalls: 1,                               // Should call WriteAuthorizationModel once
+			name:               "should write when no current model exists",
+			protectedResources: []iamdatumapiscomv1alpha1.ProtectedResource{},
+			currentModel:       &openfgav1.AuthorizationModel{}, // Empty model
+			// Minimal model has InternalUser + InternalUserGroup = 2 types
+			expectedWriteAuthorizationCalls: 1, // Should call WriteAuthorizationModel once
 		},
 	}
 
@@ -275,7 +196,8 @@ func TestAuthorizationModelReconciler_ReconcileAuthorizationModel_NoCurrentModel
 			// Verify the request contains expected data
 			assert.Equal(t, "test-store", in.StoreId)
 			assert.Equal(t, "1.2", in.SchemaVersion)
-			assert.Len(t, in.TypeDefinitions, 4) // Minimal model has 4 type definitions
+			// Minimal model: InternalUser + InternalUserGroup = 2 type definitions
+			assert.Len(t, in.TypeDefinitions, 2)
 			return &openfgav1.WriteAuthorizationModelResponse{
 				AuthorizationModelId: "new-model-id",
 			}, nil
@@ -436,14 +358,14 @@ func TestAuthorizationModelsEqual_TypeDefinitionOrdering(t *testing.T) {
 		TypeDefinitions: []*openfgav1.TypeDefinition{
 			{Type: "iam.miloapis.com/InternalUser"},
 			{Type: "networking.miloapis.com/Network"},
-			{Type: "iam.miloapis.com/InternalRole"},
+			{Type: "iam.miloapis.com/InternalUserGroup"},
 		},
 	}
 
 	model2 := &openfgav1.AuthorizationModel{
 		SchemaVersion: "1.2",
 		TypeDefinitions: []*openfgav1.TypeDefinition{
-			{Type: "iam.miloapis.com/InternalRole"},
+			{Type: "iam.miloapis.com/InternalUserGroup"},
 			{Type: "iam.miloapis.com/InternalUser"},
 			{Type: "networking.miloapis.com/Network"},
 		},
@@ -466,29 +388,23 @@ func TestAuthorizationModelsEqual_TypeDefinitionOrdering(t *testing.T) {
 }
 
 func TestAuthorizationModelReconciler_MapOrderingOptimization(t *testing.T) {
-	// Create two identical models but with different map ordering
+	// Create two identical models but with different map ordering — these should
+	// be treated as equal by our comparison helper.
+	hashedGet := hashPermission("test.service.com/testresources.get")
+
 	model1 := &openfgav1.AuthorizationModel{
 		SchemaVersion: "1.2",
 		TypeDefinitions: []*openfgav1.TypeDefinition{
 			{
 				Type: "test.service.com/TestResource",
 				Relations: map[string]*openfgav1.Userset{
-					// Order: A, B, C
-					"iam.miloapis.com/RoleBinding":                       {Userset: &openfgav1.Userset_This{}},
-					"iam.miloapis.com/RootBinding":                       {Userset: &openfgav1.Userset_This{}},
-					hashPermission("test.service.com/testresources.get"): {Userset: &openfgav1.Userset_This{}},
+					hashedGet: {Userset: &openfgav1.Userset_This{}},
 				},
 				Metadata: &openfgav1.Metadata{
 					Relations: map[string]*openfgav1.RelationMetadata{
-						// Order: A, B, C
-						"iam.miloapis.com/RoleBinding": {
+						hashedGet: {
 							DirectlyRelatedUserTypes: []*openfgav1.RelationReference{
-								{Type: "iam.miloapis.com/RoleBinding"},
-							},
-						},
-						"iam.miloapis.com/RootBinding": {
-							DirectlyRelatedUserTypes: []*openfgav1.RelationReference{
-								{Type: "iam.miloapis.com/Root"},
+								{Type: TypeInternalUser},
 							},
 						},
 					},
@@ -503,22 +419,13 @@ func TestAuthorizationModelReconciler_MapOrderingOptimization(t *testing.T) {
 			{
 				Type: "test.service.com/TestResource",
 				Relations: map[string]*openfgav1.Userset{
-					// Order: C, B, A (reversed)
-					hashPermission("test.service.com/testresources.get"): {Userset: &openfgav1.Userset_This{}},
-					"iam.miloapis.com/RootBinding":                       {Userset: &openfgav1.Userset_This{}},
-					"iam.miloapis.com/RoleBinding":                       {Userset: &openfgav1.Userset_This{}},
+					hashedGet: {Userset: &openfgav1.Userset_This{}},
 				},
 				Metadata: &openfgav1.Metadata{
 					Relations: map[string]*openfgav1.RelationMetadata{
-						// Order: B, A (reversed)
-						"iam.miloapis.com/RootBinding": {
+						hashedGet: {
 							DirectlyRelatedUserTypes: []*openfgav1.RelationReference{
-								{Type: "iam.miloapis.com/Root"},
-							},
-						},
-						"iam.miloapis.com/RoleBinding": {
-							DirectlyRelatedUserTypes: []*openfgav1.RelationReference{
-								{Type: "iam.miloapis.com/RoleBinding"},
+								{Type: TypeInternalUser},
 							},
 						},
 					},
@@ -527,10 +434,6 @@ func TestAuthorizationModelReconciler_MapOrderingOptimization(t *testing.T) {
 		},
 	}
 
-	// Note: proto.Equal might not always detect differences due to map ordering
-	// The important thing is that our enhanced authorizationModelsEqual handles it correctly
-
-	// Verify that our enhanced authorizationModelsEqual handles map ordering correctly
 	assert.True(t, authorizationModelsEqual(model1, model2), "authorizationModelsEqual should handle map ordering differences")
 }
 
@@ -564,4 +467,101 @@ func TestAuthorizationModelsEqual_IdFieldIgnored(t *testing.T) {
 	// They should be considered equal despite the id difference
 	assert.True(t, authorizationModelsEqual(modelWithId, modelWithoutId))
 	assert.True(t, authorizationModelsEqual(modelWithoutId, modelWithId))
+}
+
+// TestDirectPermissionModel_ResourceTypeDefinition verifies that the generated
+// TypeDefinition for a resource under the direct-permission model:
+//   - Has no RoleBinding or RootBinding relations
+//   - Has one hashed-permission relation per permission
+//   - Each relation declares InternalUser and InternalUserGroup#member as
+//     directly-related user types
+func TestDirectPermissionModel_ResourceTypeDefinition(t *testing.T) {
+	permissions := []string{
+		"resourcemanager.miloapis.com/organizations.get",
+		"resourcemanager.miloapis.com/organizations.update",
+	}
+	node := &resourceGraphNode{
+		ResourceType:    "resourcemanager.miloapis.com/Organization",
+		ParentResources: []string{},
+	}
+
+	td := getResourceTypeDefinition(permissions, node)
+
+	// No legacy RoleBinding or RootBinding relations
+	assert.NotContains(t, td.Relations, RelationRoleBinding, "should not have RoleBinding relation")
+	assert.NotContains(t, td.Relations, RelationRootBinding, "should not have RootBinding relation")
+
+	// One hashed-permission relation per permission
+	for _, perm := range permissions {
+		hashed := hashPermission(perm)
+		assert.Contains(t, td.Relations, hashed, "should have hashed relation for %s", perm)
+
+		// The relation metadata should list InternalUser and InternalUserGroup#member
+		meta, ok := td.Metadata.Relations[hashed]
+		require.True(t, ok, "metadata missing for hashed relation %s", hashed)
+
+		types := make(map[string]bool)
+		for _, ref := range meta.DirectlyRelatedUserTypes {
+			if ref.GetRelation() != "" {
+				types[ref.Type+"#"+ref.GetRelation()] = true
+			} else {
+				types[ref.Type] = true
+			}
+		}
+		assert.True(t, types[TypeInternalUser], "InternalUser should be directly related")
+		assert.True(t, types[TypeInternalUserGroup+"#"+RelationMember], "InternalUserGroup#member should be directly related")
+	}
+}
+
+// TestDirectPermissionModel_ParentInheritance verifies that permission relations
+// on a child resource include a TupleToUserset branch that reads from the parent
+// relation when the resource has registered parents.
+func TestDirectPermissionModel_ParentInheritance(t *testing.T) {
+	permissions := []string{"compute.miloapis.com/workloads.get"}
+	node := &resourceGraphNode{
+		ResourceType:    "compute.miloapis.com/Workload",
+		ParentResources: []string{"resourcemanager.miloapis.com/Project"},
+	}
+
+	td := getResourceTypeDefinition(permissions, node)
+
+	// Parent relation should exist
+	assert.Contains(t, td.Relations, RelationParent, "should have parent relation")
+
+	hashed := hashPermission(permissions[0])
+	relation, ok := td.Relations[hashed]
+	require.True(t, ok, "hashed permission relation should exist")
+
+	union := relation.GetUnion()
+	require.NotNil(t, union, "permission relation should be a Union when there are parents")
+	assert.Len(t, union.Child, 2, "union should have 2 children: direct + parent-inherited")
+
+	// First child: direct assignment (This)
+	assert.NotNil(t, union.Child[0].GetThis(), "first child should be This (direct assignment)")
+
+	// Second child: inherited from parent (TupleToUserset via parent relation)
+	ttu := union.Child[1].GetTupleToUserset()
+	require.NotNil(t, ttu, "second child should be TupleToUserset")
+	assert.Equal(t, RelationParent, ttu.Tupleset.Relation)
+	assert.Equal(t, hashed, ttu.ComputedUserset.Relation)
+}
+
+// TestDirectPermissionModel_MinimalModel verifies that getMinimalAuthorizationModel
+// returns only InternalUser and InternalUserGroup — no RoleBinding, InternalRole,
+// or Root.
+func TestDirectPermissionModel_MinimalModel(t *testing.T) {
+	model := getMinimalAuthorizationModel()
+
+	require.Len(t, model.TypeDefinitions, 2, "minimal model should have exactly 2 types")
+
+	typeNames := make(map[string]bool)
+	for _, td := range model.TypeDefinitions {
+		typeNames[td.Type] = true
+	}
+
+	assert.True(t, typeNames[TypeInternalUser], "minimal model should contain InternalUser")
+	assert.True(t, typeNames[TypeInternalUserGroup], "minimal model should contain InternalUserGroup")
+	assert.False(t, typeNames[TypeRoleBinding], "minimal model should NOT contain RoleBinding")
+	assert.False(t, typeNames[TypeInternalRole], "minimal model should NOT contain InternalRole")
+	assert.False(t, typeNames[TypeRoot], "minimal model should NOT contain Root")
 }

@@ -1,56 +1,10 @@
 package webhook
 
-import (
-	"strings"
-
-	openfgav1 "github.com/openfga/api/proto/openfga/v1"
-	"k8s.io/apiserver/pkg/authorization/authorizer"
-)
-
-// buildGroupContextualTuples creates contextual tuples for user's group memberships
-func buildGroupContextualTuples(attributes authorizer.Attributes) []*openfgav1.TupleKey {
-	tuples := make([]*openfgav1.TupleKey, 0, len(attributes.GetUser().GetGroups()))
-
-	userUID := attributes.GetUser().GetUID()
-	for _, group := range attributes.GetUser().GetGroups() {
-		// Only add system and datum groups to contextual tuples
-		if !strings.HasPrefix(group, "system:") {
-			continue
-		}
-
-		// Escape colons in group names to match the format used in policy reconciler
-		escapedGroup := strings.ReplaceAll(group, ":", "_")
-		tuple := &openfgav1.TupleKey{
-			User:     "iam.miloapis.com/InternalUser:" + userUID,
-			Relation: "member",
-			Object:   "iam.miloapis.com/InternalUserGroup:" + escapedGroup,
-		}
-		tuples = append(tuples, tuple)
-	}
-
-	return tuples
-}
-
-// buildRootBindingContextualTuple creates a root binding contextual tuple
-func buildRootBindingContextualTuple(rootResourceType, targetResource string) *openfgav1.TupleKey {
-	return &openfgav1.TupleKey{
-		User:     "iam.miloapis.com/Root:" + rootResourceType,
-		Relation: "iam.miloapis.com/RootBinding",
-		Object:   targetResource,
-	}
-}
-
-// buildAllContextualTuples creates all contextual tuples (root binding + groups)
-func buildAllContextualTuples(attributes authorizer.Attributes, rootResourceType, targetResource string) []*openfgav1.TupleKey {
-	var contextualTuples []*openfgav1.TupleKey
-
-	// Add root binding contextual tuple
-	rootBindingTuple := buildRootBindingContextualTuple(rootResourceType, targetResource)
-	contextualTuples = append(contextualTuples, rootBindingTuple)
-
-	// Add group contextual tuples
-	groupTuples := buildGroupContextualTuples(attributes)
-	contextualTuples = append(contextualTuples, groupTuples...)
-
-	return contextualTuples
-}
+// contextual_tuples.go previously contained helpers that injected system group
+// memberships and RootBinding links as per-request contextual tuples on every
+// OpenFGA Check call. Under the direct-permission model all relationships are
+// stored tuples written at PolicyBinding / SystemGroupMaterializer
+// reconciliation time, so contextual tuples are no longer needed.
+//
+// The file is retained to document this decision and to serve as an extension
+// point if conditional / ephemeral tuple injection is ever needed in the future.

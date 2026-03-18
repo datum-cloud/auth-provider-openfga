@@ -18,10 +18,10 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/protobuf/types/known/wrapperspb"
 	"k8s.io/api/authentication/v1beta1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/discovery/cached/disk"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -137,6 +137,21 @@ func runWebhookServer(
 
 	fgaClient := openfgav1.NewOpenFGAServiceClient(conn)
 
+	// Read the latest authorization model ID so that CheckRequests can be
+	// pinned to it, eliminating one DB read per Check call inside OpenFGA.
+	// A failure here is non-fatal: the webhook will still function correctly
+	// by resolving the latest model on each request.
+	modelID := ""
+	if modelsResp, modelsErr := fgaClient.ReadAuthorizationModels(ctx, &openfgav1.ReadAuthorizationModelsRequest{
+		StoreId:  openfgaStoreID,
+		PageSize: wrapperspb.Int32(1),
+	}); modelsErr != nil {
+		entryLog.Error(modelsErr, "failed to read authorization models; CheckRequests will resolve model dynamically")
+	} else if len(modelsResp.AuthorizationModels) > 0 {
+		modelID = modelsResp.AuthorizationModels[0].Id
+		entryLog.Info("pinning CheckRequests to authorization model", "model_id", modelID)
+	}
+
 	// Setup Kubernetes client config
 	restConfig, err := config.GetConfig()
 	if err != nil {
@@ -152,12 +167,6 @@ func runWebhookServer(
 	}
 	if err := iamv1alpha1.AddToScheme(runtimeScheme); err != nil {
 		return fmt.Errorf("failed to add iamv1alpha1 to scheme: %w", err)
-	}
-
-	// Create Kubernetes client
-	k8sClient, err := client.New(restConfig, client.Options{Scheme: runtimeScheme})
-	if err != nil {
-		return fmt.Errorf("failed to create Kubernetes client: %w", err)
 	}
 
 	// Create temporary directory for discovery cache (will be cleaned up on process exit)
@@ -190,6 +199,14 @@ func runWebhookServer(
 		return fmt.Errorf("failed to setup manager: %w", err)
 	}
 
+	// Build the ProtectedResource informer cache. The cache is backed by the
+	// manager's informer and starts empty; it will be populated once the
+	// manager's cache syncs (i.e. after mgr.Start is called).
+	prCache, err := webhook.NewProtectedResourceCache(ctx, mgr)
+	if err != nil {
+		return fmt.Errorf("failed to create ProtectedResource cache: %w", err)
+	}
+
 	// Setup webhooks
 	entryLog.Info("setting up webhook server")
 	hookServer := mgr.GetWebhookServer()
@@ -197,10 +214,11 @@ func runWebhookServer(
 	entryLog.Info("registering webhooks to the webhook server")
 
 	webhook.RegisterSubjectAccessReviewWebhook(hookServer, webhook.Config{
-		FGAClient:       fgaClient,
-		FGAStoreID:      openfgaStoreID,
-		K8sClient:       k8sClient,
-		DiscoveryClient: discoveryClient,
+		FGAClient:              fgaClient,
+		FGAStoreID:             openfgaStoreID,
+		AuthorizationModelID:   modelID,
+		ProtectedResourceCache: prCache,
+		DiscoveryClient:        discoveryClient,
 	})
 
 	entryLog.Info("starting webhook server", "port", webhookPort, "metrics-port", metricsBindAddress)

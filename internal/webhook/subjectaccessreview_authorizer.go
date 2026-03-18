@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"slices"
 	"strconv"
-	"strings"
 	"time"
 
 	openfgav1 "github.com/openfga/api/proto/openfga/v1"
@@ -18,7 +17,6 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"k8s.io/apiserver/pkg/authorization/authorizer"
 	"k8s.io/client-go/discovery"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 const (
@@ -40,27 +38,34 @@ var serviceNameMapping = map[string]string{
 var _ authorizer.Authorizer = &SubjectAccessReviewAuthorizer{}
 
 type SubjectAccessReviewAuthorizer struct {
-	FGAClient       openfgav1.OpenFGAServiceClient
-	FGAStoreID      string
-	K8sClient       client.Client
-	DiscoveryClient discovery.DiscoveryInterface
+	FGAClient  openfgav1.OpenFGAServiceClient
+	FGAStoreID string
+	// AuthorizationModelID pins every CheckRequest to a specific authorization
+	// model. When set, OpenFGA skips its internal model lookup (one DB read
+	// saved per Check call). If empty, OpenFGA resolves the latest model on
+	// each call (safe but slower).
+	AuthorizationModelID   string
+	ProtectedResourceCache *ProtectedResourceCache
+	DiscoveryClient        discovery.DiscoveryInterface
 }
 
 // Config holds the configuration for creating a SubjectAccessReview webhook
 type Config struct {
-	FGAClient       openfgav1.OpenFGAServiceClient
-	FGAStoreID      string
-	K8sClient       client.Client
-	DiscoveryClient discovery.DiscoveryInterface
+	FGAClient              openfgav1.OpenFGAServiceClient
+	FGAStoreID             string
+	AuthorizationModelID   string
+	ProtectedResourceCache *ProtectedResourceCache
+	DiscoveryClient        discovery.DiscoveryInterface
 }
 
 // NewSubjectAccessReviewWebhook creates a new SubjectAccessReview authorization webhook
 func NewSubjectAccessReviewWebhook(config Config) *Webhook {
 	authorizer := &SubjectAccessReviewAuthorizer{
-		FGAClient:       config.FGAClient,
-		FGAStoreID:      config.FGAStoreID,
-		K8sClient:       config.K8sClient,
-		DiscoveryClient: config.DiscoveryClient,
+		FGAClient:              config.FGAClient,
+		FGAStoreID:             config.FGAStoreID,
+		AuthorizationModelID:   config.AuthorizationModelID,
+		ProtectedResourceCache: config.ProtectedResourceCache,
+		DiscoveryClient:        config.DiscoveryClient,
 	}
 	return NewAuthorizerWebhook(authorizer)
 }
@@ -185,7 +190,7 @@ func (o *SubjectAccessReviewAuthorizer) Authorize(ctx context.Context, attribute
 	scope := scopeLabel(authCtx)
 	span.SetAttributes(attribute.String("authz.scope", scope))
 
-	// Step 2: Validate organization namespace if organization-scoped
+	// Step 4: Validate organization namespace if organization-scoped
 	stepStart = time.Now()
 	ctx, validateNsSpan := tracer.Start(ctx, "validate_organization_namespace")
 	validateNsErr := o.validateOrganizationNamespace(ctx, authCtx, attributes)
@@ -201,7 +206,7 @@ func (o *SubjectAccessReviewAuthorizer) Authorize(ctx context.Context, attribute
 		return authorizer.DecisionDeny, "", validateNsErr
 	}
 
-	// Step 3: Validate permission exists
+	// Step 5: Validate permission exists
 	stepStart = time.Now()
 	ctx, validatePermSpan := tracer.Start(ctx, "validate_permission")
 	validatePermErr := o.validatePermission(ctx, attributes)
@@ -213,7 +218,7 @@ func (o *SubjectAccessReviewAuthorizer) Authorize(ctx context.Context, attribute
 		return authorizer.DecisionDeny, "", validatePermErr
 	}
 
-	// Step 4: Build OpenFGA check request
+	// Step 6: Build and execute OpenFGA check request
 	stepStart = time.Now()
 	ctx, buildReqSpan := tracer.Start(ctx, "build_openfga_request")
 	checkReq, err := o.buildOpenFGARequest(ctx, attributes, authCtx)
@@ -226,7 +231,7 @@ func (o *SubjectAccessReviewAuthorizer) Authorize(ctx context.Context, attribute
 		return authorizer.DecisionDeny, "", buildErr
 	}
 
-	// Step 5: Execute OpenFGA check
+	// Step 8: Execute OpenFGA check
 	stepStart = time.Now()
 	decision, reason, checkErr := o.executeOpenFGACheck(ctx, checkReq)
 	authzStepDuration.WithLabelValues("openfga_check").Observe(time.Since(stepStart).Seconds())
@@ -428,7 +433,6 @@ func (o *SubjectAccessReviewAuthorizer) executeOpenFGACheck(ctx context.Context,
 		slog.String("user", checkReq.TupleKey.User),
 		slog.String("resource", checkReq.TupleKey.Object),
 		slog.String("relation", checkReq.TupleKey.Relation),
-		slog.Any("contextual_tuples", checkReq.ContextualTuples),
 	)
 
 	resp, err := o.FGAClient.Check(ctx, checkReq)
@@ -452,82 +456,110 @@ func (o *SubjectAccessReviewAuthorizer) executeOpenFGACheck(ctx context.Context,
 	return authorizer.DecisionDeny, "", nil
 }
 
-// buildOpenFGARequest creates the appropriate OpenFGA check request based on the authorization context
+// buildOpenFGARequest creates the OpenFGA Check request for a given authorization
+// context.
+//
+// Under the direct-permission model all tuples are stored in OpenFGA at
+// PolicyBinding reconciliation time, so no contextual tuples are needed here.
+// The Check is simply:
+//
+//	Check(InternalUser:<uid>, hash(svc/resource.verb), <resource-object>)
 func (o *SubjectAccessReviewAuthorizer) buildOpenFGARequest(ctx context.Context, attributes authorizer.Attributes, authCtx *authorizationContext) (*openfgav1.CheckRequest, error) {
 	user := fmt.Sprintf("iam.miloapis.com/InternalUser:%s", authCtx.userUID)
 	relation := o.buildHashedPermissionRelation(attributes)
 
-	var resource string
-	var contextualTuples []*openfgav1.TupleKey
-
-	if authCtx.isProjectScope() {
-		// Project-scoped authorization: authorize against the project resource
-		resource = fmt.Sprintf("resourcemanager.miloapis.com/Project:%s", authCtx.getProjectName())
-		rootResourceType := "resourcemanager.miloapis.com/Project"
-		contextualTuples = buildAllContextualTuples(attributes, rootResourceType, resource)
-	} else {
-		// Regular authorization: build resource and contextual tuples based on request type
-		var err error
-		resource, contextualTuples, err = o.buildResourceAndContextualTuples(ctx, attributes)
-		if err != nil {
-			return nil, err
-		}
+	resource, err := o.buildResourceObject(ctx, attributes, authCtx)
+	if err != nil {
+		return nil, err
 	}
 
-	checkReq := &openfgav1.CheckRequest{
-		StoreId: o.FGAStoreID,
+	return &openfgav1.CheckRequest{
+		StoreId:              o.FGAStoreID,
+		AuthorizationModelId: o.AuthorizationModelID,
 		TupleKey: &openfgav1.CheckRequestTupleKey{
 			User:     user,
 			Relation: relation,
 			Object:   resource,
 		},
-	}
-
-	if len(contextualTuples) > 0 {
-		checkReq.ContextualTuples = &openfgav1.ContextualTupleKeys{
-			TupleKeys: contextualTuples,
-		}
-	}
-
-	return checkReq, nil
+		// No contextual tuples — all relationships are stored tuples written at
+		// PolicyBinding reconciliation time, making them eligible for OpenFGA's
+		// check query cache.
+	}, nil
 }
 
-// validatePermissionWithServiceDefaulting validates permissions with consistent service name defaulting
+// buildResourceObject determines the OpenFGA object string for the request.
+//
+// The lookup priority is:
+//  1. Project-scoped requests → authorize against the project object.
+//  2. Requests with a specific resource name → authorize against that instance.
+//  3. Collection operations with a parent context → authorize against the parent.
+//  4. Collection operations without a parent → authorize against the kind-level
+//     root object (TypeRoot:<apiGroup/Kind>).
+func (o *SubjectAccessReviewAuthorizer) buildResourceObject(ctx context.Context, attributes authorizer.Attributes, authCtx *authorizationContext) (string, error) {
+	// Project-scoped requests are resolved against the project.
+	if authCtx.isProjectScope() {
+		return fmt.Sprintf("resourcemanager.miloapis.com/Project:%s", authCtx.getProjectName()), nil
+	}
+
+	// Organization-scoped requests are resolved against the organization.
+	if authCtx.isOrganizationScope() {
+		return fmt.Sprintf("resourcemanager.miloapis.com/Organization:%s", authCtx.getOrganizationName()), nil
+	}
+
+	protectedResource, err := o.getProtectedResource(ctx, attributes)
+	if err != nil {
+		return "", fmt.Errorf("failed to get protected resource: %w", err)
+	}
+
+	// Specific resource operations — resolve to the named instance.
+	isCollectionOp := slices.Contains([]string{"list", "create", "watch"}, attributes.GetVerb()) || attributes.GetName() == ""
+	if !isCollectionOp {
+		return fmt.Sprintf("%s/%s:%s", protectedResource.Spec.ServiceRef.Name, protectedResource.Spec.Kind, attributes.GetName()), nil
+	}
+
+	// Collection operations — use parent if available, else kind-level root.
+	parentResource, err := o.buildParentResource(attributes)
+	if err == nil {
+		return parentResource, nil
+	}
+
+	// Fallback: kind-level root for ResourceKind policy bindings.
+	return o.buildRootResource(protectedResource), nil
+}
+
+// validatePermissionWithServiceDefaulting validates permissions with consistent service name defaulting.
+// It uses the in-memory ProtectedResourceCache for O(1) lookups instead of a K8s API List call.
 func (o *SubjectAccessReviewAuthorizer) validatePermissionWithServiceDefaulting(ctx context.Context, attributes authorizer.Attributes) (bool, error) {
 	tracer := otel.GetTracerProvider().Tracer("authz-webhook")
-	ctx, listSpan := tracer.Start(ctx, "k8s.list.ProtectedResources/validatePermission")
-	defer listSpan.End()
-
-	stepStart := time.Now()
-	protectedResourceList := &iamv1alpha1.ProtectedResourceList{}
-	err := o.K8sClient.List(ctx, protectedResourceList)
-	duration := time.Since(stepStart)
-
-	authzStepDuration.WithLabelValues("k8s_list_protectedresources").Observe(duration.Seconds())
-
-	slog.DebugContext(ctx, "k8s list ProtectedResources completed (validatePermission)",
-		slog.Duration("duration", duration),
-		slog.Bool("error", err != nil),
-	)
-
-	if err != nil {
-		authzK8sAPICallsTotal.WithLabelValues("protectedresources", "list", "error").Inc()
-		listSpan.RecordError(err)
-		listSpan.SetStatus(codes.Error, err.Error())
-		return false, fmt.Errorf("failed to list ProtectedResources: %w", err)
-	}
-	authzK8sAPICallsTotal.WithLabelValues("protectedresources", "list", "success").Inc()
+	ctx, cacheSpan := tracer.Start(ctx, "cache.get.ProtectedResource/validatePermission")
+	defer cacheSpan.End()
 
 	apiGroup := o.getEffectiveAPIGroup(attributes)
 	resource := attributes.GetResource()
 	verb := attributes.GetVerb()
 
-	for _, pr := range protectedResourceList.Items {
-		if pr.Spec.ServiceRef.Name == apiGroup && pr.Spec.Plural == resource {
-			return slices.Contains(pr.Spec.Permissions, verb), nil
-		}
+	stepStart := time.Now()
+	pr, ok := o.ProtectedResourceCache.GetByAPIGroupAndResource(apiGroup, resource)
+	duration := time.Since(stepStart)
+
+	authzStepDuration.WithLabelValues("protectedresource_cache_lookup").Observe(duration.Seconds())
+
+	if ok {
+		authzK8sAPICallsTotal.WithLabelValues("protectedresources", "cache_get", "hit").Inc()
+		slog.DebugContext(ctx, "protectedresource cache hit (validatePermission)",
+			slog.String("apiGroup", apiGroup),
+			slog.String("resource", resource),
+			slog.Duration("duration", duration),
+		)
+		return slices.Contains(pr.Spec.Permissions, verb), nil
 	}
 
+	authzK8sAPICallsTotal.WithLabelValues("protectedresources", "cache_get", "miss").Inc()
+	slog.DebugContext(ctx, "protectedresource cache miss (validatePermission)",
+		slog.String("apiGroup", apiGroup),
+		slog.String("resource", resource),
+		slog.Duration("duration", duration),
+	)
 	return false, nil
 }
 
@@ -578,91 +610,6 @@ func (o *SubjectAccessReviewAuthorizer) buildRootResource(protectedResource *iam
 	return fmt.Sprintf("iam.miloapis.com/Root:%s", resourceType)
 }
 
-func (o *SubjectAccessReviewAuthorizer) buildParentResourceType(attributes authorizer.Attributes) (string, error) {
-	// Extract parent resource type from the extra data
-	user := attributes.GetUser()
-	extra := user.GetExtra()
-
-	parentAPIGroup, ok := extra["iam.miloapis.com/parent-api-group"]
-	if !ok || len(parentAPIGroup) == 0 {
-		return "", fmt.Errorf("missing iam.miloapis.com/parent-api-group in extra data")
-	}
-
-	parentType, ok := extra["iam.miloapis.com/parent-type"]
-	if !ok || len(parentType) == 0 {
-		return "", fmt.Errorf("missing iam.miloapis.com/parent-type in extra data")
-	}
-
-	return fmt.Sprintf("%s/%s", parentAPIGroup[0], parentType[0]), nil
-}
-
-// buildResourceAndContextualTuples builds the resource identifier and contextual tuples for regular (non-project) authorization
-func (o *SubjectAccessReviewAuthorizer) buildResourceAndContextualTuples(ctx context.Context, attributes authorizer.Attributes) (string, []*openfgav1.TupleKey, error) {
-	// Get the ProtectedResource to understand the correct resource structure
-	protectedResource, err := o.getProtectedResource(ctx, attributes)
-	if err != nil {
-		return "", nil, fmt.Errorf("failed to get protected resource: %w", err)
-	}
-
-	// Handle collection operations (list, create, watch) or requests without specific resource name
-	if slices.Contains([]string{"list", "create", "watch"}, attributes.GetVerb()) || attributes.GetName() == "" {
-		return o.buildCollectionResourceAndTuples(attributes, protectedResource)
-	}
-
-	// Handle specific resource operations (get, update, delete, patch)
-	return o.buildSpecificResourceAndTuples(attributes, protectedResource)
-}
-
-// buildCollectionResourceAndTuples handles collection operations like list, create, watch
-func (o *SubjectAccessReviewAuthorizer) buildCollectionResourceAndTuples(attributes authorizer.Attributes, protectedResource *iamv1alpha1.ProtectedResource) (string, []*openfgav1.TupleKey, error) {
-	// Try to get parent resource from context first
-	parentResource, err := o.buildParentResource(attributes)
-	if err != nil {
-		// Fallback to using root resource for ResourceKind policy bindings
-		rootResource := o.buildRootResource(protectedResource)
-		groupTuples := buildGroupContextualTuples(attributes)
-		return rootResource, groupTuples, nil
-	}
-
-	// Using parent resource - build all contextual tuples
-	parentResourceType, err := o.buildParentResourceType(attributes)
-	if err != nil {
-		// If we can't determine parent type, use only group tuples
-		groupTuples := buildGroupContextualTuples(attributes)
-		return parentResource, groupTuples, nil
-	}
-
-	contextualTuples := buildAllContextualTuples(attributes, parentResourceType, parentResource)
-	return parentResource, contextualTuples, nil
-}
-
-// buildSpecificResourceAndTuples handles specific resource operations like get, update, delete
-func (o *SubjectAccessReviewAuthorizer) buildSpecificResourceAndTuples(attributes authorizer.Attributes, protectedResource *iamv1alpha1.ProtectedResource) (string, []*openfgav1.TupleKey, error) {
-	// Build the fully qualified resource identifier
-	resource := fmt.Sprintf("%s/%s:%s", protectedResource.Spec.ServiceRef.Name, protectedResource.Spec.Kind, attributes.GetName())
-
-	// Start with root binding and group tuples
-	rootResourceType := fmt.Sprintf("%s/%s", protectedResource.Spec.ServiceRef.Name, protectedResource.Spec.Kind)
-	rootBindingTuple := buildRootBindingContextualTuple(rootResourceType, resource)
-	groupTuples := buildGroupContextualTuples(attributes)
-
-	contextualTuples := []*openfgav1.TupleKey{rootBindingTuple}
-	contextualTuples = append(contextualTuples, groupTuples...)
-
-	// Add parent tuple if parent resource is registered
-	parentResource, err := o.buildParentResource(attributes)
-	if err == nil && o.isParentResourceRegistered(protectedResource, parentResource) {
-		parentTuple := &openfgav1.TupleKey{
-			User:     parentResource,
-			Relation: "parent",
-			Object:   resource,
-		}
-		contextualTuples = append(contextualTuples, parentTuple)
-	}
-
-	return resource, contextualTuples, nil
-}
-
 // buildHashedPermissionRelation builds a hashed permission relation for OpenFGA
 func (o *SubjectAccessReviewAuthorizer) buildHashedPermissionRelation(attributes authorizer.Attributes) string {
 	// Build permission in the format expected by OpenFGA: service/resource.verb
@@ -680,71 +627,37 @@ func (o *SubjectAccessReviewAuthorizer) buildHashedPermissionRelation(attributes
 	return hashedPermission
 }
 
-// getProtectedResource retrieves the ProtectedResource for the given attributes
+// getProtectedResource retrieves the ProtectedResource for the given attributes.
+// It uses the in-memory ProtectedResourceCache for O(1) lookups instead of a K8s API List call.
 func (o *SubjectAccessReviewAuthorizer) getProtectedResource(ctx context.Context, attributes authorizer.Attributes) (*iamv1alpha1.ProtectedResource, error) {
 	tracer := otel.GetTracerProvider().Tracer("authz-webhook")
-	ctx, listSpan := tracer.Start(ctx, "k8s.list.ProtectedResources/buildRequest")
-	defer listSpan.End()
-
-	stepStart := time.Now()
-	protectedResourceList := &iamv1alpha1.ProtectedResourceList{}
-	err := o.K8sClient.List(ctx, protectedResourceList)
-	duration := time.Since(stepStart)
-
-	authzStepDuration.WithLabelValues("k8s_list_protectedresources").Observe(duration.Seconds())
-
-	slog.DebugContext(ctx, "k8s list ProtectedResources completed (buildRequest)",
-		slog.Duration("duration", duration),
-		slog.Bool("error", err != nil),
-	)
-
-	if err != nil {
-		authzK8sAPICallsTotal.WithLabelValues("protectedresources", "list", "error").Inc()
-		listSpan.RecordError(err)
-		listSpan.SetStatus(codes.Error, err.Error())
-		return nil, fmt.Errorf("failed to list ProtectedResources: %w", err)
-	}
-	authzK8sAPICallsTotal.WithLabelValues("protectedresources", "list", "success").Inc()
+	ctx, cacheSpan := tracer.Start(ctx, "cache.get.ProtectedResource/buildRequest")
+	defer cacheSpan.End()
 
 	apiGroup := attributes.GetAPIGroup()
 	resource := attributes.GetResource()
 
-	for _, pr := range protectedResourceList.Items {
-		// Check if the APIGroup and Resource (Plural) match
-		if pr.Spec.ServiceRef.Name == apiGroup && pr.Spec.Plural == resource {
-			return &pr, nil
-		}
+	stepStart := time.Now()
+	pr, ok := o.ProtectedResourceCache.GetByAPIGroupAndResource(apiGroup, resource)
+	duration := time.Since(stepStart)
+
+	authzStepDuration.WithLabelValues("protectedresource_cache_lookup").Observe(duration.Seconds())
+
+	if ok {
+		authzK8sAPICallsTotal.WithLabelValues("protectedresources", "cache_get", "hit").Inc()
+		slog.DebugContext(ctx, "protectedresource cache hit (buildRequest)",
+			slog.String("apiGroup", apiGroup),
+			slog.String("resource", resource),
+			slog.Duration("duration", duration),
+		)
+		return pr, nil
 	}
 
+	authzK8sAPICallsTotal.WithLabelValues("protectedresources", "cache_get", "miss").Inc()
+	slog.DebugContext(ctx, "protectedresource cache miss (buildRequest)",
+		slog.String("apiGroup", apiGroup),
+		slog.String("resource", resource),
+		slog.Duration("duration", duration),
+	)
 	return nil, fmt.Errorf("no ProtectedResource found for APIGroup=%s, Resource=%s", apiGroup, resource)
-}
-
-// isParentResourceRegistered checks if the given parent resource type is registered
-// in the ProtectedResource's ParentResources list
-func (o *SubjectAccessReviewAuthorizer) isParentResourceRegistered(protectedResource *iamv1alpha1.ProtectedResource, parentResource string) bool {
-	// Extract the parent resource type from the parent resource string
-	// Parent resource format: "{APIGroup}/{Kind}:{Name}" (e.g., "resourcemanager.miloapis.com/Organization:org-123")
-	// We need to extract the "{APIGroup}/{Kind}" part
-	parts := strings.Split(parentResource, ":")
-	if len(parts) != 2 {
-		return false
-	}
-	parentResourceType := parts[0] // This is "{APIGroup}/{Kind}"
-
-	// Split the parent resource type into APIGroup and Kind
-	typeParts := strings.Split(parentResourceType, "/")
-	if len(typeParts) != 2 {
-		return false
-	}
-	parentAPIGroup := typeParts[0]
-	parentKind := typeParts[1]
-
-	// Check if this parent resource type is registered in the ProtectedResource
-	for _, parentRef := range protectedResource.Spec.ParentResources {
-		if parentRef.APIGroup == parentAPIGroup && parentRef.Kind == parentKind {
-			return true
-		}
-	}
-
-	return false
 }
