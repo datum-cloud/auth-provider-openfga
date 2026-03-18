@@ -382,7 +382,7 @@ tasks:
   # Performance Test Tasks
 
   test:perf:forward:
-    desc: Start background port-forwards for the authz webhook (and optionally Victoria Metrics)
+    desc: Start background port-forwards for the authz webhook and Victoria Metrics
     cmds:
       - |
         mkdir -p .tmp
@@ -397,17 +397,16 @@ tasks:
         echo $! > .tmp/perf-forward.pid
         sleep 2
 
-        # Optionally start Victoria Metrics port-forward for OTLP metrics ingestion
-        if [ "${PERF_METRICS:-false}" = "true" ]; then
-          if [ -f .tmp/perf-vm-forward.pid ] && kill -0 "$(cat .tmp/perf-vm-forward.pid)" 2>/dev/null; then
-            echo "Victoria Metrics port-forward already running (PID $(cat .tmp/perf-vm-forward.pid))"
-          else
-            echo "Starting Victoria Metrics port-forward (port 8428)..."
-            kubectl --kubeconfig .test-infra/kubeconfig port-forward -n telemetry-system \
-              svc/vmsingle-telemetry-system-vm-stack-victoria-metrics-k8s-stack 8428:8428 &
-            echo $! > .tmp/perf-vm-forward.pid
-            sleep 2
-          fi
+        # Always start Victoria Metrics port-forward so annotations are durable
+        # (perf_annotation metrics survive Grafana rebuilds by living in VM).
+        if [ -f .tmp/perf-vm-forward.pid ] && kill -0 "$(cat .tmp/perf-vm-forward.pid)" 2>/dev/null; then
+          echo "Victoria Metrics port-forward already running (PID $(cat .tmp/perf-vm-forward.pid))"
+        else
+          echo "Starting Victoria Metrics port-forward (port 8428)..."
+          kubectl --kubeconfig .test-infra/kubeconfig port-forward -n telemetry-system \
+            svc/vmsingle-telemetry-system-vm-stack-victoria-metrics-k8s-stack 8428:8428 &
+          echo $! > .tmp/perf-vm-forward.pid
+          sleep 2
         fi
 
   test:perf:forward:stop:
@@ -500,9 +499,9 @@ tasks:
         echo "Teardown complete."
 
   test:perf:annotate:
-    desc: "Create a Grafana annotation (usage: task test:perf:annotate -- tweak description)"
+    desc: "Write a perf annotation to Victoria Metrics (usage: task test:perf:annotate -- tweak description)"
     cmds:
-      - bash test/perf/annotate.sh {{.CLI_ARGS}}
+      - VM_URL=http://localhost:8428 bash test/perf/annotate.sh {{.CLI_ARGS}}
 
   test:perf:clean:
     desc: Remove k6 result files and port-forward PID files
@@ -659,7 +658,7 @@ tasks:
         PERF_DURATION_VAL="${PERF_DURATION:-60s}"
         PERF_RAMP_UP_VAL="${PERF_RAMP_UP:-10s}"
 
-        bash test/perf/annotate.sh scale-perf-test \
+        VM_URL=http://localhost:8428 bash test/perf/annotate.sh scale-perf-test \
           "Scale perf test ({{._PERF_SCALE}}): ${PERF_VUS_VAL} VUs, ${PERF_DURATION_VAL} sustained" \
           2>&1 || true
 
@@ -719,10 +718,10 @@ tasks:
           echo "Metrics will be forwarded via OpenTelemetry to ${K6_OTEL_EXPORTER_OTLP_ENDPOINT:-http://localhost:8428}"
         fi
 
-        # Annotate the start of the perf test run in Grafana
+        # Annotate the start of the perf test run in Victoria Metrics
         PERF_VUS_VAL="${PERF_VUS:-10}"
         PERF_DURATION_VAL="${PERF_DURATION:-30s}"
-        bash test/perf/annotate.sh perf-test "Perf test: ${PERF_VUS_VAL} VUs, ${PERF_DURATION_VAL} sustained" 2>&1 || true
+        VM_URL=http://localhost:8428 bash test/perf/annotate.sh perf-test "Perf test: ${PERF_VUS_VAL} VUs, ${PERF_DURATION_VAL} sustained" 2>&1 || true
 
         K6_OTEL_EXPORTER_OTLP_ENDPOINT="${K6_OTEL_EXPORTER_OTLP_ENDPOINT:-http://localhost:8428}" \
         K6_OTEL_EXPORTER_OTLP_PROTOCOL="${K6_OTEL_EXPORTER_OTLP_PROTOCOL:-http/protobuf}" \

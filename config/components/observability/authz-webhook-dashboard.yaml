@@ -32,20 +32,24 @@ spec:
             "type": "dashboard"
           },
           {
-            "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+            "datasource": { "type": "prometheus", "uid": "${datasource}" },
             "enable": true,
+            "expr": "perf_annotation{type=\"tweak\"}",
             "iconColor": "rgba(255, 152, 48, 1)",
             "name": "System Tweaks",
-            "filter": { "exclude": false, "ids": [], "value": "" },
-            "target": { "limit": 100, "matchAny": true, "tags": ["tweak"], "type": "tags" }
+            "titleFormat": "{{description}}",
+            "useValueForTime": false,
+            "step": "1s"
           },
           {
-            "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+            "datasource": { "type": "prometheus", "uid": "${datasource}" },
             "enable": true,
+            "expr": "perf_annotation{type=~\"perf-test|scale-perf-test\"}",
             "iconColor": "rgba(115, 191, 105, 1)",
             "name": "Perf Test Runs",
-            "filter": { "exclude": false, "ids": [], "value": "" },
-            "target": { "limit": 100, "matchAny": true, "tags": ["perf-test"], "type": "tags" }
+            "titleFormat": "{{description}}",
+            "useValueForTime": false,
+            "step": "1s"
           }
         ]
       },
