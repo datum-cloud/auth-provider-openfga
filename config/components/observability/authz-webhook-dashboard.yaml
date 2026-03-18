@@ -64,7 +64,7 @@ spec:
           "type": "row"
         },
         {
-          "datasource": { "type": "prometheus", "uid": "victoria-metrics-datasource" },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "fieldConfig": {
             "defaults": {
               "color": { "mode": "palette-classic" },
@@ -112,7 +112,7 @@ spec:
           },
           "targets": [
             {
-              "datasource": { "type": "prometheus", "uid": "victoria-metrics-datasource" },
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
               "expr": "sum by (decision) (rate(authz_decisions_total{namespace=~\"$namespace\"}[$__rate_interval]))",
               "legendFormat": "{{decision}}",
               "refId": "A"
@@ -122,7 +122,7 @@ spec:
           "type": "timeseries"
         },
         {
-          "datasource": { "type": "prometheus", "uid": "victoria-metrics-datasource" },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "fieldConfig": {
             "defaults": {
               "color": {
@@ -154,7 +154,7 @@ spec:
           },
           "targets": [
             {
-              "datasource": { "type": "prometheus", "uid": "victoria-metrics-datasource" },
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
               "expr": "100 * sum(rate(authz_decisions_total{namespace=~\"$namespace\", decision=\"error\"}[$__rate_interval])) / sum(rate(authz_decisions_total{namespace=~\"$namespace\"}[$__rate_interval]))",
               "legendFormat": "Error Rate",
               "refId": "A"
@@ -164,7 +164,7 @@ spec:
           "type": "stat"
         },
         {
-          "datasource": { "type": "prometheus", "uid": "victoria-metrics-datasource" },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "fieldConfig": {
             "defaults": {
               "color": { "mode": "thresholds" },
@@ -193,19 +193,19 @@ spec:
           },
           "targets": [
             {
-              "datasource": { "type": "prometheus", "uid": "victoria-metrics-datasource" },
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
               "expr": "histogram_quantile(0.50, sum by (le) (rate(authz_request_duration_seconds_bucket{namespace=~\"$namespace\"}[$__rate_interval])))",
               "legendFormat": "p50",
               "refId": "A"
             },
             {
-              "datasource": { "type": "prometheus", "uid": "victoria-metrics-datasource" },
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
               "expr": "histogram_quantile(0.95, sum by (le) (rate(authz_request_duration_seconds_bucket{namespace=~\"$namespace\"}[$__rate_interval])))",
               "legendFormat": "p95",
               "refId": "B"
             },
             {
-              "datasource": { "type": "prometheus", "uid": "victoria-metrics-datasource" },
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
               "expr": "histogram_quantile(0.99, sum by (le) (rate(authz_request_duration_seconds_bucket{namespace=~\"$namespace\"}[$__rate_interval])))",
               "legendFormat": "p99",
               "refId": "C"
@@ -215,7 +215,7 @@ spec:
           "type": "stat"
         },
         {
-          "datasource": { "type": "prometheus", "uid": "victoria-metrics-datasource" },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "fieldConfig": {
             "defaults": {
               "color": { "mode": "palette-classic" },
@@ -263,7 +263,7 @@ spec:
           },
           "targets": [
             {
-              "datasource": { "type": "prometheus", "uid": "victoria-metrics-datasource" },
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
               "expr": "sum by (decision, scope) (rate(authz_decisions_total{namespace=~\"$namespace\"}[$__rate_interval]))",
               "legendFormat": "{{decision}} / {{scope}}",
               "refId": "A"
@@ -280,7 +280,7 @@ spec:
           "type": "row"
         },
         {
-          "datasource": { "type": "prometheus", "uid": "victoria-metrics-datasource" },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "fieldConfig": {
             "defaults": {
               "color": { "mode": "scheme", "scheme": "Oranges" },
@@ -311,7 +311,7 @@ spec:
           "pluginVersion": "10.4.3",
           "targets": [
             {
-              "datasource": { "type": "prometheus", "uid": "victoria-metrics-datasource" },
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
               "expr": "sum by (le) (increase(authz_request_duration_seconds_bucket{namespace=~\"$namespace\"}[$__rate_interval]))",
               "format": "heatmap",
               "legendFormat": "{{le}}",
@@ -322,7 +322,7 @@ spec:
           "type": "heatmap"
         },
         {
-          "datasource": { "type": "prometheus", "uid": "victoria-metrics-datasource" },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "fieldConfig": {
             "defaults": {
               "color": { "mode": "palette-classic" },
@@ -357,19 +357,19 @@ spec:
           },
           "targets": [
             {
-              "datasource": { "type": "prometheus", "uid": "victoria-metrics-datasource" },
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
               "expr": "histogram_quantile(0.50, sum by (le) (rate(authz_request_duration_seconds_bucket{namespace=~\"$namespace\"}[$__rate_interval])))",
               "legendFormat": "p50",
               "refId": "A"
             },
             {
-              "datasource": { "type": "prometheus", "uid": "victoria-metrics-datasource" },
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
               "expr": "histogram_quantile(0.95, sum by (le) (rate(authz_request_duration_seconds_bucket{namespace=~\"$namespace\"}[$__rate_interval])))",
               "legendFormat": "p95",
               "refId": "B"
             },
             {
-              "datasource": { "type": "prometheus", "uid": "victoria-metrics-datasource" },
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
               "expr": "histogram_quantile(0.99, sum by (le) (rate(authz_request_duration_seconds_bucket{namespace=~\"$namespace\"}[$__rate_interval])))",
               "legendFormat": "p99",
               "refId": "C"
@@ -379,7 +379,7 @@ spec:
           "type": "timeseries"
         },
         {
-          "datasource": { "type": "prometheus", "uid": "victoria-metrics-datasource" },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "fieldConfig": {
             "defaults": {
               "color": { "mode": "palette-classic" },
@@ -427,13 +427,13 @@ spec:
           },
           "targets": [
             {
-              "datasource": { "type": "prometheus", "uid": "victoria-metrics-datasource" },
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
               "expr": "histogram_quantile(0.95, sum by (le, decision) (rate(authz_request_duration_seconds_bucket{namespace=~\"$namespace\"}[$__rate_interval])))",
               "legendFormat": "{{decision}} p95",
               "refId": "A"
             },
             {
-              "datasource": { "type": "prometheus", "uid": "victoria-metrics-datasource" },
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
               "expr": "histogram_quantile(0.50, sum by (le, decision) (rate(authz_request_duration_seconds_bucket{namespace=~\"$namespace\"}[$__rate_interval])))",
               "legendFormat": "{{decision}} p50",
               "refId": "B"
@@ -450,7 +450,7 @@ spec:
           "type": "row"
         },
         {
-          "datasource": { "type": "prometheus", "uid": "victoria-metrics-datasource" },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "fieldConfig": {
             "defaults": {
               "color": { "mode": "palette-classic" },
@@ -485,31 +485,31 @@ spec:
           },
           "targets": [
             {
-              "datasource": { "type": "prometheus", "uid": "victoria-metrics-datasource" },
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
               "expr": "sum by (step) (rate(authz_step_duration_seconds_sum{namespace=~\"$namespace\", step=\"build_context\"}[$__rate_interval])) / sum by (step) (rate(authz_step_duration_seconds_count{namespace=~\"$namespace\", step=\"build_context\"}[$__rate_interval]))",
               "legendFormat": "build_context",
               "refId": "A"
             },
             {
-              "datasource": { "type": "prometheus", "uid": "victoria-metrics-datasource" },
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
               "expr": "sum by (step) (rate(authz_step_duration_seconds_sum{namespace=~\"$namespace\", step=\"validate_namespace\"}[$__rate_interval])) / sum by (step) (rate(authz_step_duration_seconds_count{namespace=~\"$namespace\", step=\"validate_namespace\"}[$__rate_interval]))",
               "legendFormat": "validate_namespace",
               "refId": "B"
             },
             {
-              "datasource": { "type": "prometheus", "uid": "victoria-metrics-datasource" },
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
               "expr": "sum by (step) (rate(authz_step_duration_seconds_sum{namespace=~\"$namespace\", step=\"validate_permission\"}[$__rate_interval])) / sum by (step) (rate(authz_step_duration_seconds_count{namespace=~\"$namespace\", step=\"validate_permission\"}[$__rate_interval]))",
               "legendFormat": "validate_permission",
               "refId": "C"
             },
             {
-              "datasource": { "type": "prometheus", "uid": "victoria-metrics-datasource" },
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
               "expr": "sum by (step) (rate(authz_step_duration_seconds_sum{namespace=~\"$namespace\", step=\"build_openfga_request\"}[$__rate_interval])) / sum by (step) (rate(authz_step_duration_seconds_count{namespace=~\"$namespace\", step=\"build_openfga_request\"}[$__rate_interval]))",
               "legendFormat": "build_openfga_request",
               "refId": "D"
             },
             {
-              "datasource": { "type": "prometheus", "uid": "victoria-metrics-datasource" },
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
               "expr": "sum by (step) (rate(authz_step_duration_seconds_sum{namespace=~\"$namespace\", step=\"openfga_check\"}[$__rate_interval])) / sum by (step) (rate(authz_step_duration_seconds_count{namespace=~\"$namespace\", step=\"openfga_check\"}[$__rate_interval]))",
               "legendFormat": "openfga_check",
               "refId": "E"
@@ -519,7 +519,7 @@ spec:
           "type": "timeseries"
         },
         {
-          "datasource": { "type": "prometheus", "uid": "victoria-metrics-datasource" },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "fieldConfig": {
             "defaults": {
               "color": { "mode": "thresholds" },
@@ -556,21 +556,21 @@ spec:
           "pluginVersion": "10.4.3",
           "targets": [
             {
-              "datasource": { "type": "prometheus", "uid": "victoria-metrics-datasource" },
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
               "expr": "histogram_quantile(0.50, sum by (le, step) (rate(authz_step_duration_seconds_bucket{namespace=~\"$namespace\"}[$__rate_interval])))",
               "instant": true,
               "legendFormat": "{{step}}",
               "refId": "A"
             },
             {
-              "datasource": { "type": "prometheus", "uid": "victoria-metrics-datasource" },
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
               "expr": "histogram_quantile(0.95, sum by (le, step) (rate(authz_step_duration_seconds_bucket{namespace=~\"$namespace\"}[$__rate_interval])))",
               "instant": true,
               "legendFormat": "{{step}}",
               "refId": "B"
             },
             {
-              "datasource": { "type": "prometheus", "uid": "victoria-metrics-datasource" },
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
               "expr": "histogram_quantile(0.99, sum by (le, step) (rate(authz_step_duration_seconds_bucket{namespace=~\"$namespace\"}[$__rate_interval])))",
               "instant": true,
               "legendFormat": "{{step}}",
@@ -609,7 +609,7 @@ spec:
           "type": "row"
         },
         {
-          "datasource": { "type": "prometheus", "uid": "victoria-metrics-datasource" },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "fieldConfig": {
             "defaults": {
               "color": { "mode": "scheme", "scheme": "Purples" },
@@ -640,7 +640,7 @@ spec:
           "pluginVersion": "10.4.3",
           "targets": [
             {
-              "datasource": { "type": "prometheus", "uid": "victoria-metrics-datasource" },
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
               "expr": "sum by (le) (increase(authz_step_duration_seconds_bucket{step=\"openfga_check\", namespace=~\"$namespace\"}[$__rate_interval]))",
               "format": "heatmap",
               "legendFormat": "{{le}}",
@@ -651,7 +651,7 @@ spec:
           "type": "heatmap"
         },
         {
-          "datasource": { "type": "prometheus", "uid": "victoria-metrics-datasource" },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "fieldConfig": {
             "defaults": {
               "color": { "mode": "scheme", "scheme": "Blues" },
@@ -682,7 +682,7 @@ spec:
           "pluginVersion": "10.4.3",
           "targets": [
             {
-              "datasource": { "type": "prometheus", "uid": "victoria-metrics-datasource" },
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
               "expr": "sum by (le) (increase(authz_step_duration_seconds_bucket{step=\"k8s_list_protectedresources\", namespace=~\"$namespace\"}[$__rate_interval]))",
               "format": "heatmap",
               "legendFormat": "{{le}}",
@@ -693,7 +693,7 @@ spec:
           "type": "heatmap"
         },
         {
-          "datasource": { "type": "prometheus", "uid": "victoria-metrics-datasource" },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "fieldConfig": {
             "defaults": {
               "color": { "mode": "palette-classic" },
@@ -728,13 +728,13 @@ spec:
           },
           "targets": [
             {
-              "datasource": { "type": "prometheus", "uid": "victoria-metrics-datasource" },
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
               "expr": "sum(rate(authz_step_duration_seconds_count{step=\"openfga_check\", namespace=~\"$namespace\"}[$__rate_interval]))",
               "legendFormat": "OpenFGA check rate",
               "refId": "A"
             },
             {
-              "datasource": { "type": "prometheus", "uid": "victoria-metrics-datasource" },
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
               "expr": "sum(rate(authz_step_duration_seconds_count{step=\"k8s_list_protectedresources\", namespace=~\"$namespace\"}[$__rate_interval]))",
               "legendFormat": "ProtectedResource list rate",
               "refId": "B"
@@ -751,7 +751,7 @@ spec:
           "type": "row"
         },
         {
-          "datasource": { "type": "prometheus", "uid": "victoria-metrics-datasource" },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "fieldConfig": {
             "defaults": {
               "color": { "mode": "palette-classic" },
@@ -786,7 +786,7 @@ spec:
           },
           "targets": [
             {
-              "datasource": { "type": "prometheus", "uid": "victoria-metrics-datasource" },
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
               "expr": "sum by (verb) (rate(rest_client_requests_total{namespace=~\"$namespace\", job=~\".*authz-webhook.*\"}[$__rate_interval]))",
               "legendFormat": "{{verb}}",
               "refId": "A"
@@ -796,7 +796,7 @@ spec:
           "type": "timeseries"
         },
         {
-          "datasource": { "type": "prometheus", "uid": "victoria-metrics-datasource" },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "fieldConfig": {
             "defaults": {
               "color": { "mode": "palette-classic" },
@@ -831,13 +831,13 @@ spec:
           },
           "targets": [
             {
-              "datasource": { "type": "prometheus", "uid": "victoria-metrics-datasource" },
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
               "expr": "histogram_quantile(0.50, sum by (le, verb) (rate(rest_client_request_duration_seconds_bucket{namespace=~\"$namespace\", job=~\".*authz-webhook.*\"}[$__rate_interval])))",
               "legendFormat": "{{verb}} p50",
               "refId": "A"
             },
             {
-              "datasource": { "type": "prometheus", "uid": "victoria-metrics-datasource" },
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
               "expr": "histogram_quantile(0.95, sum by (le, verb) (rate(rest_client_request_duration_seconds_bucket{namespace=~\"$namespace\", job=~\".*authz-webhook.*\"}[$__rate_interval])))",
               "legendFormat": "{{verb}} p95",
               "refId": "B"
@@ -854,7 +854,7 @@ spec:
           "type": "row"
         },
         {
-          "datasource": { "type": "prometheus", "uid": "victoria-metrics-datasource" },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "fieldConfig": {
             "defaults": {
               "color": { "mode": "palette-classic" },
@@ -889,7 +889,7 @@ spec:
           },
           "targets": [
             {
-              "datasource": { "type": "prometheus", "uid": "victoria-metrics-datasource" },
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
               "expr": "sum by (pod) (rate(container_cpu_usage_seconds_total{namespace=~\"$namespace\", container=\"authz-webhook\"}[$__rate_interval]))",
               "legendFormat": "{{pod}}",
               "refId": "A"
@@ -899,7 +899,7 @@ spec:
           "type": "timeseries"
         },
         {
-          "datasource": { "type": "prometheus", "uid": "victoria-metrics-datasource" },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "fieldConfig": {
             "defaults": {
               "color": { "mode": "palette-classic" },
@@ -934,7 +934,7 @@ spec:
           },
           "targets": [
             {
-              "datasource": { "type": "prometheus", "uid": "victoria-metrics-datasource" },
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
               "expr": "sum by (pod) (container_memory_working_set_bytes{namespace=~\"$namespace\", container=\"authz-webhook\"})",
               "legendFormat": "{{pod}}",
               "refId": "A"
@@ -944,7 +944,7 @@ spec:
           "type": "timeseries"
         },
         {
-          "datasource": { "type": "prometheus", "uid": "victoria-metrics-datasource" },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "fieldConfig": {
             "defaults": {
               "color": { "mode": "palette-classic" },
@@ -979,7 +979,7 @@ spec:
           },
           "targets": [
             {
-              "datasource": { "type": "prometheus", "uid": "victoria-metrics-datasource" },
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
               "expr": "sum by (pod) (kube_pod_container_status_restarts_total{namespace=~\"$namespace\", container=\"authz-webhook\"})",
               "legendFormat": "{{pod}}",
               "refId": "A"
@@ -995,12 +995,26 @@ spec:
       "templating": {
         "list": [
           {
+            "current": {},
+            "hide": 0,
+            "includeAll": false,
+            "multi": false,
+            "name": "datasource",
+            "options": [],
+            "query": "prometheus",
+            "queryValue": "",
+            "refresh": 1,
+            "regex": "",
+            "type": "datasource",
+            "label": "Datasource"
+          },
+          {
             "current": {
-              "selected": false,
+              "selected": true,
               "text": "auth-provider-openfga-system",
               "value": "auth-provider-openfga-system"
             },
-            "datasource": { "type": "prometheus", "uid": "victoria-metrics-datasource" },
+            "datasource": { "type": "prometheus", "uid": "${datasource}" },
             "definition": "label_values(authz_decisions_total, namespace)",
             "hide": 0,
             "includeAll": false,
