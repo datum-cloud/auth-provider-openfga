@@ -60,19 +60,12 @@ rules:
   - iam.miloapis.com
   resources:
   - protectedresources
+  - users
   verbs:
   - get
   - list
   - patch
   - update
-  - watch
-- apiGroups:
-  - iam.miloapis.com
-  resources:
-  - users
-  verbs:
-  - get
-  - list
   - watch
 - apiGroups:
   - resourcemanager.miloapis.com

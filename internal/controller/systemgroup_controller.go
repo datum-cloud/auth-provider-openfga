@@ -37,7 +37,7 @@ type SystemGroupReconciler struct {
 	FGAStoreID string
 }
 
-// +kubebuilder:rbac:groups=iam.miloapis.com,resources=users,verbs=get;list;watch
+// +kubebuilder:rbac:groups=iam.miloapis.com,resources=users,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=iam.miloapis.com,resources=users/finalizers,verbs=update
 
 // Reconcile ensures the system:authenticated group membership tuple exists in
