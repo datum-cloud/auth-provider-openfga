@@ -1,19 +1,31 @@
 // generate-fixtures is a standalone Go program that populates an OpenFGA store
-// with scale-test fixtures. It writes OpenFGA tuples directly, bypassing the
-// Kubernetes controller reconciliation flow, so it can generate millions of
-// tuples without creating corresponding Kubernetes objects for organizations
-// and projects.
+// with scale-test fixtures. It supports two modes controlled by the PERF_MODE
+// environment variable:
 //
-// ProtectedResource CRDs are still created as actual Kubernetes objects because
+//   - PERF_MODE=direct (default) — writes OpenFGA tuples directly, bypassing
+//     Kubernetes controller reconciliation. Fast but does not exercise the full
+//     control plane.
+//
+//   - PERF_MODE=reconcile — creates actual Kubernetes CRDs (User, Role,
+//     Organization, PolicyBinding) and waits for the controllers to reconcile
+//     them into OpenFGA. Exercises the full control plane: CRD creation →
+//     controller reconciliation → OpenFGA tuple writes → authorization checks.
+//
+// ProtectedResource CRDs are always created as actual Kubernetes objects because
 // the webhook's ProtectedResourceCache validates permissions against them before
 // building the OpenFGA check request.
 //
 // Usage:
 //
 //	OPENFGA_STORE_ID=<id> go run ./test/perf/cmd/generate-fixtures/
+//	PERF_MODE=reconcile go run ./test/perf/cmd/generate-fixtures/
 //
 // All scale parameters are configured via environment variables. See the Config
 // struct for the full list.
+//
+// Cleanup:
+//
+//	PERF_CLEANUP=true go run ./test/perf/cmd/generate-fixtures/
 package main
 
 import (
@@ -39,9 +51,22 @@ import (
 // OpenFGA hard limit on tuples per Write request.
 const maxBatchSize = 100
 
+// crdBatchSize is the number of Kubernetes resources to apply per kubectl call
+// in reconcile mode.
+const crdBatchSize = 50
+
 // Config holds all scale parameters read from environment variables.
 type Config struct {
-	// OpenFGA connection
+	// Mode controls whether the generator writes tuples directly ("direct") or
+	// creates Kubernetes CRDs and waits for controller reconciliation
+	// ("reconcile").
+	Mode string
+
+	// Cleanup, when true, deletes all CRDs with the perf-test=scale label
+	// instead of generating fixtures.
+	Cleanup bool
+
+	// OpenFGA connection (used in direct mode and Phase 2 model wait)
 	OpenFGAAPIURL string
 	StoreID       string
 
@@ -54,7 +79,7 @@ type Config struct {
 	MembershipsPerUser int
 	NumPRTypes         int
 
-	// Concurrency
+	// Concurrency (direct mode only)
 	Workers int
 
 	// Tool paths
@@ -93,12 +118,14 @@ type ManifestParams struct {
 func main() {
 	cfg := loadConfig()
 
-	if cfg.StoreID == "" {
-		fmt.Fprintln(os.Stderr, "ERROR: OPENFGA_STORE_ID is required")
-		os.Exit(1)
+	// Cleanup mode: delete all resources labelled perf-test=scale.
+	if cfg.Cleanup {
+		runCleanup(cfg)
+		return
 	}
 
 	fmt.Fprintf(os.Stderr, "Scale parameters:\n")
+	fmt.Fprintf(os.Stderr, "  Mode:               %s\n", cfg.Mode)
 	fmt.Fprintf(os.Stderr, "  NumOrgs:            %d\n", cfg.NumOrgs)
 	fmt.Fprintf(os.Stderr, "  NumProjectsPerOrg:  %d\n", cfg.NumProjectsPerOrg)
 	fmt.Fprintf(os.Stderr, "  NumUsers:           %d\n", cfg.NumUsers)
@@ -110,6 +137,111 @@ func main() {
 	fmt.Fprintf(os.Stderr, "  StoreID:            %s\n", cfg.StoreID)
 	fmt.Fprintf(os.Stderr, "  ManifestPath:       %s\n", cfg.ManifestPath)
 
+	ctx := context.Background()
+
+	switch cfg.Mode {
+	case "reconcile":
+		runReconcileMode(ctx, cfg)
+	default:
+		runDirectMode(ctx, cfg)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Config loading
+// ---------------------------------------------------------------------------
+
+// loadConfig reads scale parameters from environment variables.
+func loadConfig() Config {
+	cfg := Config{
+		Mode:               envOrDefault("PERF_MODE", "direct"),
+		Cleanup:            os.Getenv("PERF_CLEANUP") == "true",
+		OpenFGAAPIURL:      envOrDefault("OPENFGA_API_URL", "localhost:8081"),
+		StoreID:            os.Getenv("OPENFGA_STORE_ID"),
+		NumOrgs:            envIntOrDefault("PERF_NUM_ORGS", 100),
+		NumProjectsPerOrg:  envIntOrDefault("PERF_NUM_PROJECTS_PER_ORG", 10),
+		NumUsers:           envIntOrDefault("PERF_NUM_USERS", 500),
+		NumRoles:           envIntOrDefault("PERF_NUM_ROLES", 5),
+		PermissionsPerRole: envIntOrDefault("PERF_PERMISSIONS_PER_ROLE", 10),
+		MembershipsPerUser: envIntOrDefault("PERF_MEMBERSHIPS_PER_USER", 2),
+		NumPRTypes:         envIntOrDefault("PERF_NUM_PR_TYPES", 1),
+		Workers:            envIntOrDefault("PERF_WORKERS", 20),
+		Kubectl:            envOrDefault("KUBECTL", "kubectl"),
+		ManifestPath:       envOrDefault("PERF_MANIFEST_PATH", "test/perf/fixtures/scale-manifest.json"),
+	}
+
+	// MembershipsPerUser cannot exceed NumOrgs.
+	if cfg.MembershipsPerUser > cfg.NumOrgs {
+		cfg.MembershipsPerUser = cfg.NumOrgs
+	}
+
+	return cfg
+}
+
+func envOrDefault(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+
+func envIntOrDefault(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		n, err := strconv.Atoi(v)
+		if err == nil {
+			return n
+		}
+		fmt.Fprintf(os.Stderr, "WARNING: invalid value for %s=%q, using default %d\n", key, v, def)
+	}
+	return def
+}
+
+// ---------------------------------------------------------------------------
+// Cleanup mode
+// ---------------------------------------------------------------------------
+
+// runCleanup deletes all Kubernetes resources created in reconcile mode. It
+// selects resources by the perf-test=scale label applied during generation.
+func runCleanup(cfg Config) {
+	fmt.Fprintln(os.Stderr, "Cleanup mode: deleting all resources with label perf-test=scale")
+
+	resources := []string{
+		"policybinding.iam.miloapis.com",
+		"organization.resourcemanager.miloapis.com",
+		"user.iam.miloapis.com",
+		"role.iam.miloapis.com",
+		"protectedresource.iam.miloapis.com",
+	}
+
+	ctx := context.Background()
+	for _, resource := range resources {
+		fmt.Fprintf(os.Stderr, "  Deleting %s resources...\n", resource)
+		//nolint:gosec // cfg.Kubectl is a controlled value
+		cmd := exec.CommandContext(ctx, cfg.Kubectl, "delete", resource,
+			"--selector=perf-test=scale",
+			"--ignore-not-found",
+			"--wait=false",
+		)
+		cmd.Stdout = os.Stderr
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			fmt.Fprintf(os.Stderr, "  WARNING: failed to delete %s: %v\n", resource, err)
+		}
+	}
+
+	fmt.Fprintln(os.Stderr, "Cleanup complete.")
+}
+
+// ---------------------------------------------------------------------------
+// Direct mode (original behavior)
+// ---------------------------------------------------------------------------
+
+func runDirectMode(ctx context.Context, cfg Config) {
+	if cfg.StoreID == "" {
+		fmt.Fprintln(os.Stderr, "ERROR: OPENFGA_STORE_ID is required in direct mode")
+		os.Exit(1)
+	}
+
 	// Estimate tuple count so the operator knows what to expect.
 	bindingTuples := int64(cfg.NumUsers) * int64(cfg.MembershipsPerUser) * 3
 	roleTuples := int64(cfg.NumRoles) * int64(cfg.PermissionsPerRole)
@@ -117,8 +249,6 @@ func main() {
 	projTuples := int64(cfg.NumOrgs) * int64(cfg.NumProjectsPerOrg) * 2
 	estimate := bindingTuples + roleTuples + orgRootBindings + projTuples
 	fmt.Fprintf(os.Stderr, "\nEstimated tuple count: %d\n\n", estimate)
-
-	ctx := context.Background()
 
 	// Connect to OpenFGA via gRPC.
 	conn, err := grpc.NewClient(cfg.OpenFGAAPIURL, grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -183,6 +313,8 @@ func main() {
 	}
 	fmt.Fprintf(os.Stderr, "  Wrote %d project tuples\n", len(projectTuples))
 
+	membershipMap = buildMembershipMap(cfg)
+
 	// Phase 7: Write the fixture manifest.
 	fmt.Fprintln(os.Stderr, "Phase 7: Writing scale manifest...")
 	manifest := buildManifest(cfg, membershipMap, totalWritten.Load())
@@ -195,51 +327,109 @@ func main() {
 	fmt.Fprintf(os.Stderr, "Manifest written to: %s\n", cfg.ManifestPath)
 }
 
-// loadConfig reads scale parameters from environment variables.
-func loadConfig() Config {
-	cfg := Config{
-		OpenFGAAPIURL:      envOrDefault("OPENFGA_API_URL", "localhost:8081"),
-		StoreID:            os.Getenv("OPENFGA_STORE_ID"),
-		NumOrgs:            envIntOrDefault("PERF_NUM_ORGS", 100),
-		NumProjectsPerOrg:  envIntOrDefault("PERF_NUM_PROJECTS_PER_ORG", 10),
-		NumUsers:           envIntOrDefault("PERF_NUM_USERS", 500),
-		NumRoles:           envIntOrDefault("PERF_NUM_ROLES", 5),
-		PermissionsPerRole: envIntOrDefault("PERF_PERMISSIONS_PER_ROLE", 10),
-		MembershipsPerUser: envIntOrDefault("PERF_MEMBERSHIPS_PER_USER", 2),
-		NumPRTypes:         envIntOrDefault("PERF_NUM_PR_TYPES", 1),
-		Workers:            envIntOrDefault("PERF_WORKERS", 20),
-		Kubectl:            envOrDefault("KUBECTL", "kubectl"),
-		ManifestPath:       envOrDefault("PERF_MANIFEST_PATH", "test/perf/fixtures/scale-manifest.json"),
+// ---------------------------------------------------------------------------
+// Reconcile mode
+// ---------------------------------------------------------------------------
+
+// runReconcileMode creates Kubernetes CRDs and waits for the controllers to
+// reconcile them into OpenFGA. This exercises the full control plane.
+func runReconcileMode(ctx context.Context, cfg Config) {
+	// Phase 1: Generate ProtectedResource CRDs.
+	fmt.Fprintln(os.Stderr, "Phase 1: Generating ProtectedResource CRDs...")
+	if err := generateProtectedResources(ctx, cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "ERROR: Phase 1 failed: %v\n", err)
+		os.Exit(1)
 	}
 
-	// MembershipsPerUser cannot exceed NumOrgs.
-	if cfg.MembershipsPerUser > cfg.NumOrgs {
-		cfg.MembershipsPerUser = cfg.NumOrgs
-	}
-
-	return cfg
-}
-
-func envOrDefault(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return def
-}
-
-func envIntOrDefault(key string, def int) int {
-	if v := os.Getenv(key); v != "" {
-		n, err := strconv.Atoi(v)
-		if err == nil {
-			return n
+	// Phase 2: Wait for the authorization model to stabilize. This confirms the
+	// ProtectedResource controllers have run. We only need this when an OpenFGA
+	// URL is configured; skip if the operator hasn't set one.
+	if cfg.StoreID != "" {
+		conn, err := grpc.NewClient(cfg.OpenFGAAPIURL, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "ERROR: failed to connect to OpenFGA at %s: %v\n", cfg.OpenFGAAPIURL, err)
+			os.Exit(1)
 		}
-		fmt.Fprintf(os.Stderr, "WARNING: invalid value for %s=%q, using default %d\n", key, v, def)
+		defer func() { _ = conn.Close() }()
+		client := openfgav1.NewOpenFGAServiceClient(conn)
+
+		fmt.Fprintln(os.Stderr, "Phase 2: Waiting for authorization model to stabilize...")
+		if err := waitForAuthorizationModel(ctx, client, cfg); err != nil {
+			fmt.Fprintf(os.Stderr, "ERROR: Phase 2 failed: %v\n", err)
+			os.Exit(1)
+		}
+	} else {
+		fmt.Fprintln(os.Stderr, "Phase 2: Skipping authorization model wait (OPENFGA_STORE_ID not set)")
 	}
-	return def
+
+	// Phase 3: Create User CRDs.
+	fmt.Fprintf(os.Stderr, "Phase 3: Creating %d User CRDs...\n", cfg.NumUsers)
+	if err := createUserCRDs(ctx, cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "ERROR: Phase 3 failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Phase 4: Create Role CRDs and wait for them to be Ready.
+	fmt.Fprintf(os.Stderr, "Phase 4: Creating %d Role CRDs...\n", cfg.NumRoles)
+	if err := createRoleCRDs(ctx, cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "ERROR: Phase 4 failed: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Fprintln(os.Stderr, "Phase 4: Waiting for Roles to reach Ready...")
+	if err := waitForRolesReady(ctx, cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "ERROR: Phase 4 wait failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Phase 5: Create Organization CRDs.
+	fmt.Fprintf(os.Stderr, "Phase 5: Creating %d Organization CRDs...\n", cfg.NumOrgs)
+	if err := createOrganizationCRDs(ctx, cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "ERROR: Phase 5 failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Read UIDs for Users and Organizations — PolicyBinding requires them.
+	fmt.Fprintln(os.Stderr, "Phase 5: Reading User and Organization UIDs...")
+	userUIDs, err := readResourceUIDs(ctx, cfg, "user.iam.miloapis.com", cfg.NumUsers, "scale-user-%d")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ERROR: failed to read User UIDs: %v\n", err)
+		os.Exit(1)
+	}
+	orgUIDs, err := readResourceUIDs(ctx, cfg, "organization.resourcemanager.miloapis.com", cfg.NumOrgs, "scale-org-%d")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ERROR: failed to read Organization UIDs: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Phase 6: Create PolicyBinding CRDs and wait for reconciliation.
+	membershipMap := buildMembershipMap(cfg)
+	totalBindings := cfg.NumUsers * cfg.MembershipsPerUser
+	fmt.Fprintf(os.Stderr, "Phase 6: Creating %d PolicyBinding CRDs...\n", totalBindings)
+	if err := createPolicyBindingCRDs(ctx, cfg, membershipMap, userUIDs, orgUIDs); err != nil {
+		fmt.Fprintf(os.Stderr, "ERROR: Phase 6 failed: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Fprintln(os.Stderr, "Phase 6: Waiting for PolicyBindings to reach Ready...")
+	if err := waitForPolicyBindingsReady(ctx, cfg, totalBindings); err != nil {
+		fmt.Fprintf(os.Stderr, "ERROR: Phase 6 wait failed: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Fprintf(os.Stderr, "Phase 6: %d/%d PolicyBindings Ready\n", totalBindings, totalBindings)
+
+	// Phase 7: Write the fixture manifest.
+	fmt.Fprintln(os.Stderr, "Phase 7: Writing scale manifest...")
+	manifest := buildManifest(cfg, membershipMap, 0)
+	if err := writeManifest(manifest, cfg.ManifestPath); err != nil {
+		fmt.Fprintf(os.Stderr, "ERROR: Phase 7 failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Fprintln(os.Stderr, "\nDone. All CRDs reconciled and manifest written.")
+	fmt.Fprintf(os.Stderr, "Manifest written to: %s\n", cfg.ManifestPath)
 }
 
 // ---------------------------------------------------------------------------
-// Phase 1: ProtectedResource CRD generation
+// Phase 1: ProtectedResource CRD generation (shared by both modes)
 // ---------------------------------------------------------------------------
 
 // protectedResourceTemplate generates ProtectedResource YAML for a single
@@ -250,6 +440,8 @@ apiVersion: iam.miloapis.com/v1alpha1
 kind: ProtectedResource
 metadata:
   name: perf-service-{{.ServiceIdx}}-resource-{{.ResourceIdx}}
+  labels:
+    perf-test: scale
 spec:
   serviceRef:
     name: "perf-{{.ServiceIdx}}.miloapis.com"
@@ -311,7 +503,7 @@ func generateProtectedResources(ctx context.Context, cfg Config) error {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 2: Wait for authorization model
+// Phase 2: Wait for authorization model (shared by both modes when StoreID set)
 // ---------------------------------------------------------------------------
 
 func waitForAuthorizationModel(ctx context.Context, client openfgav1.OpenFGAServiceClient, cfg Config) error {
@@ -355,19 +547,402 @@ func waitForAuthorizationModel(ctx context.Context, client openfgav1.OpenFGAServ
 }
 
 // ---------------------------------------------------------------------------
-// Phase 3: InternalRole permission tuples
+// Reconcile mode: Phase 3 — User CRDs
+// ---------------------------------------------------------------------------
+
+func createUserCRDs(ctx context.Context, cfg Config) error {
+	numBatches := (cfg.NumUsers + crdBatchSize - 1) / crdBatchSize
+	for b := 0; b < numBatches; b++ {
+		start := b * crdBatchSize
+		end := start + crdBatchSize
+		if end > cfg.NumUsers {
+			end = cfg.NumUsers
+		}
+		fmt.Fprintf(os.Stderr, "  Phase 3: Creating %d User CRDs... (batch %d/%d)\n", cfg.NumUsers, b+1, numBatches)
+
+		var buf bytes.Buffer
+		for i := start; i < end; i++ {
+			fmt.Fprintf(&buf, `---
+apiVersion: iam.miloapis.com/v1alpha1
+kind: User
+metadata:
+  name: scale-user-%d
+  labels:
+    perf-test: scale
+spec:
+  email: scale-user-%d@datum.net
+`, i, i)
+		}
+
+		if err := kubectlApplyBuf(ctx, cfg, buf.Bytes()); err != nil {
+			return fmt.Errorf("batch %d: %w", b+1, err)
+		}
+	}
+	fmt.Fprintf(os.Stderr, "  Applied %d User CRDs\n", cfg.NumUsers)
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Reconcile mode: Phase 4 — Role CRDs
+// ---------------------------------------------------------------------------
+
+func createRoleCRDs(ctx context.Context, cfg Config) error {
+	numBatches := (cfg.NumRoles + crdBatchSize - 1) / crdBatchSize
+	for b := 0; b < numBatches; b++ {
+		start := b * crdBatchSize
+		end := start + crdBatchSize
+		if end > cfg.NumRoles {
+			end = cfg.NumRoles
+		}
+		fmt.Fprintf(os.Stderr, "  Phase 4: Creating %d Role CRDs... (batch %d/%d)\n", cfg.NumRoles, b+1, numBatches)
+
+		var buf bytes.Buffer
+		for r := start; r < end; r++ {
+			fmt.Fprintf(&buf, "---\napiVersion: iam.miloapis.com/v1alpha1\nkind: Role\nmetadata:\n  name: scale-role-%d\n  labels:\n    perf-test: scale\nspec:\n  launchStage: Beta\n  includedPermissions:\n", r)
+			for p := 0; p < cfg.PermissionsPerRole; p++ {
+				fmt.Fprintf(&buf, "    - %s\n", buildPermissionString(r, p))
+			}
+		}
+
+		if err := kubectlApplyBuf(ctx, cfg, buf.Bytes()); err != nil {
+			return fmt.Errorf("batch %d: %w", b+1, err)
+		}
+	}
+	fmt.Fprintf(os.Stderr, "  Applied %d Role CRDs\n", cfg.NumRoles)
+	return nil
+}
+
+// waitForRolesReady waits until all scale Roles have reached the Ready condition.
+func waitForRolesReady(ctx context.Context, cfg Config) error {
+	//nolint:gosec // cfg.Kubectl is a controlled value
+	cmd := exec.CommandContext(ctx, cfg.Kubectl, "wait",
+		"--for=condition=Ready",
+		"role.iam.miloapis.com",
+		"--selector=perf-test=scale",
+		"--timeout=5m",
+	)
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("kubectl wait for Roles failed: %w", err)
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Reconcile mode: Phase 5 — Organization CRDs
+// ---------------------------------------------------------------------------
+
+func createOrganizationCRDs(ctx context.Context, cfg Config) error {
+	numBatches := (cfg.NumOrgs + crdBatchSize - 1) / crdBatchSize
+	for b := 0; b < numBatches; b++ {
+		start := b * crdBatchSize
+		end := start + crdBatchSize
+		if end > cfg.NumOrgs {
+			end = cfg.NumOrgs
+		}
+		fmt.Fprintf(os.Stderr, "  Phase 5: Creating %d Organization CRDs... (batch %d/%d)\n", cfg.NumOrgs, b+1, numBatches)
+
+		var buf bytes.Buffer
+		for o := start; o < end; o++ {
+			fmt.Fprintf(&buf, `---
+apiVersion: resourcemanager.miloapis.com/v1alpha1
+kind: Organization
+metadata:
+  name: scale-org-%d
+  labels:
+    perf-test: scale
+spec:
+  type: Standard
+`, o)
+		}
+
+		if err := kubectlApplyBuf(ctx, cfg, buf.Bytes()); err != nil {
+			return fmt.Errorf("batch %d: %w", b+1, err)
+		}
+	}
+	fmt.Fprintf(os.Stderr, "  Applied %d Organization CRDs\n", cfg.NumOrgs)
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Reconcile mode: UID reading
+// ---------------------------------------------------------------------------
+
+// readResourceUIDs reads the metadata.uid for each generated resource by
+// executing a single kubectl get with jsonpath output. The namePattern is a
+// fmt.Sprintf pattern accepting a single integer index, e.g. "scale-user-%d".
+// It polls until all UIDs are non-empty, waiting up to 2 minutes.
+func readResourceUIDs(ctx context.Context, cfg Config, resourceType string, count int, namePattern string) (map[int]string, error) {
+	uids := make(map[int]string, count)
+	deadline := time.Now().Add(2 * time.Minute)
+
+	for time.Now().Before(deadline) {
+		missing := 0
+		// Read in batches to avoid an argument list that is too long.
+		for b := 0; b < count; b += crdBatchSize {
+			end := b + crdBatchSize
+			if end > count {
+				end = count
+			}
+
+			// Build the list of names for this batch.
+			names := make([]string, 0, end-b)
+			for i := b; i < end; i++ {
+				if _, ok := uids[i]; !ok {
+					names = append(names, fmt.Sprintf(namePattern, i))
+				}
+			}
+			if len(names) == 0 {
+				continue
+			}
+
+			// kubectl get <type> <name1> <name2> ... -o jsonpath
+			args := []string{"get", resourceType}
+			args = append(args, names...)
+			args = append(args, "-o", `jsonpath={range .items[*]}{.metadata.name}={.metadata.uid}{"\n"}{end}`)
+
+			//nolint:gosec // cfg.Kubectl is a controlled value
+			cmd := exec.CommandContext(ctx, cfg.Kubectl, args...)
+			out, err := cmd.Output()
+			if err != nil {
+				// Transient error — will retry on next iteration.
+				break
+			}
+
+			for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+				if line == "" {
+					continue
+				}
+				parts := strings.SplitN(line, "=", 2)
+				if len(parts) != 2 || parts[1] == "" {
+					missing++
+					continue
+				}
+				// Reverse-map name to index.
+				for i := b; i < end; i++ {
+					if fmt.Sprintf(namePattern, i) == parts[0] {
+						uids[i] = parts[1]
+						break
+					}
+				}
+			}
+		}
+
+		// Count how many are still missing.
+		missing = 0
+		for i := 0; i < count; i++ {
+			if uids[i] == "" {
+				missing++
+			}
+		}
+		if missing == 0 {
+			return uids, nil
+		}
+
+		fmt.Fprintf(os.Stderr, "  Waiting for %d/%d %s UIDs to be assigned...\n", count-missing, count, resourceType)
+		time.Sleep(2 * time.Second)
+	}
+
+	// Count final missing.
+	missing := 0
+	for i := 0; i < count; i++ {
+		if uids[i] == "" {
+			missing++
+		}
+	}
+	if missing > 0 {
+		return nil, fmt.Errorf("%d out of %d %s resources did not receive UIDs within 2 minutes", missing, count, resourceType)
+	}
+	return uids, nil
+}
+
+// ---------------------------------------------------------------------------
+// Reconcile mode: Phase 6 — PolicyBinding CRDs
+// ---------------------------------------------------------------------------
+
+func createPolicyBindingCRDs(
+	ctx context.Context,
+	cfg Config,
+	membershipMap map[int][]int,
+	userUIDs map[int]string,
+	orgUIDs map[int]string,
+) error {
+	// Flatten memberships into an ordered slice so we can batch them.
+	type binding struct {
+		userIdx int
+		orgIdx  int
+	}
+	var bindings []binding
+	for u := 0; u < cfg.NumUsers; u++ {
+		for _, o := range membershipMap[u] {
+			bindings = append(bindings, binding{userIdx: u, orgIdx: o})
+		}
+	}
+
+	total := len(bindings)
+	numBatches := (total + crdBatchSize - 1) / crdBatchSize
+
+	for b := 0; b < numBatches; b++ {
+		start := b * crdBatchSize
+		end := start + crdBatchSize
+		if end > total {
+			end = total
+		}
+		fmt.Fprintf(os.Stderr, "  Phase 6: Creating %d PolicyBindings... (batch %d/%d)\n", total, b+1, numBatches)
+
+		var buf bytes.Buffer
+		for _, bind := range bindings[start:end] {
+			u := bind.userIdx
+			o := bind.orgIdx
+			roleIdx := u % cfg.NumRoles
+			userUID := userUIDs[u]
+			orgUID := orgUIDs[o]
+
+			fmt.Fprintf(&buf, `---
+apiVersion: iam.miloapis.com/v1alpha1
+kind: PolicyBinding
+metadata:
+  name: scale-binding-%d-%d
+  labels:
+    perf-test: scale
+spec:
+  roleRef:
+    name: scale-role-%d
+    namespace: default
+  subjects:
+    - kind: User
+      name: scale-user-%d
+      uid: "%s"
+  resourceSelector:
+    resourceRef:
+      apiGroup: resourcemanager.miloapis.com
+      kind: Organization
+      name: scale-org-%d
+      uid: "%s"
+`, u, o, roleIdx, u, userUID, o, orgUID)
+		}
+
+		if err := kubectlApplyBuf(ctx, cfg, buf.Bytes()); err != nil {
+			return fmt.Errorf("batch %d: %w", b+1, err)
+		}
+	}
+	fmt.Fprintf(os.Stderr, "  Applied %d PolicyBinding CRDs\n", total)
+	return nil
+}
+
+// waitForPolicyBindingsReady polls kubectl wait until all policy bindings with
+// the perf-test=scale label reach the Ready condition.
+func waitForPolicyBindingsReady(ctx context.Context, cfg Config, totalBindings int) error {
+	// kubectl wait reports progress implicitly; additionally poll the count so
+	// we can emit progress messages to the operator.
+	done := make(chan error, 1)
+	go func() {
+		//nolint:gosec // cfg.Kubectl is a controlled value
+		cmd := exec.CommandContext(ctx, cfg.Kubectl, "wait",
+			"--for=condition=Ready",
+			"policybinding.iam.miloapis.com",
+			"--selector=perf-test=scale",
+			"--timeout=5m",
+		)
+		cmd.Stdout = os.Stderr
+		cmd.Stderr = os.Stderr
+		done <- cmd.Run()
+	}()
+
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case err := <-done:
+			if err != nil {
+				return fmt.Errorf("kubectl wait for PolicyBindings failed: %w", err)
+			}
+			return nil
+		case <-ticker.C:
+			ready := countReadyPolicyBindings(ctx, cfg)
+			fmt.Fprintf(os.Stderr, "Phase 6: %d/%d PolicyBindings Ready...\n", ready, totalBindings)
+		}
+	}
+}
+
+// countReadyPolicyBindings returns the number of PolicyBindings with
+// perf-test=scale that currently have Ready=True.
+func countReadyPolicyBindings(ctx context.Context, cfg Config) int {
+	//nolint:gosec // cfg.Kubectl is a controlled value
+	cmd := exec.CommandContext(ctx, cfg.Kubectl, "get",
+		"policybinding.iam.miloapis.com",
+		"--selector=perf-test=scale",
+		"-o", `jsonpath={range .items[?(@.status.conditions[?(@.type=="Ready")].status=="True")]}{.metadata.name}{"\n"}{end}`,
+	)
+	out, err := cmd.Output()
+	if err != nil {
+		return 0
+	}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	count := 0
+	for _, l := range lines {
+		if l != "" {
+			count++
+		}
+	}
+	return count
+}
+
+// ---------------------------------------------------------------------------
+// Shared kubectl helper
+// ---------------------------------------------------------------------------
+
+// kubectlApplyBuf writes buf to a temporary file and applies it with
+// kubectl apply --server-side. The temp file is removed after the call.
+func kubectlApplyBuf(ctx context.Context, cfg Config, buf []byte) error {
+	tmp, err := os.CreateTemp("", "perf-crd-batch-*.yaml")
+	if err != nil {
+		return fmt.Errorf("failed to create temp file: %w", err)
+	}
+	defer func() { _ = os.Remove(tmp.Name()) }()
+
+	if _, err := tmp.Write(buf); err != nil {
+		return fmt.Errorf("failed to write temp file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("failed to close temp file: %w", err)
+	}
+
+	//nolint:gosec // cfg.Kubectl and tmp.Name() are controlled values
+	cmd := exec.CommandContext(ctx, cfg.Kubectl, "apply", "--server-side", "-f", tmp.Name())
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("kubectl apply failed: %w", err)
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Direct mode: Phase 3 — InternalRole permission tuples
 // ---------------------------------------------------------------------------
 
 // buildPermissionString returns the full permission string for a perf resource
 // using the same format as getAllPermissions in authorization_model_reconciler.go:
 // "<serviceAPIGroup>/<plural>.<verb>"
-func buildPermissionString(roleIdx, permIdx int) string {
-	// Use the first perf service's permissions as the source for all roles.
-	// Each permission index maps to one of the 8 standard verbs.
-	verbs := []string{"get", "list", "create", "update", "delete", "watch", "patch", "use"}
-	verb := verbs[permIdx%len(verbs)]
-	serviceIdx := permIdx / len(verbs)
-	return fmt.Sprintf("perf-%d.miloapis.com/resource%ds.%s", serviceIdx, serviceIdx, verb)
+func buildPermissionString(_ int, permIdx int) string {
+	// Use permissions from real ProtectedResources that exist in the authorization
+	// model. These must match what the authorization model reconciler creates.
+	permissions := []string{
+		"resourcemanager.miloapis.com/organizations.get",
+		"resourcemanager.miloapis.com/organizations.list",
+		"resourcemanager.miloapis.com/organizations.create",
+		"resourcemanager.miloapis.com/organizations.update",
+		"resourcemanager.miloapis.com/organizations.delete",
+		"resourcemanager.miloapis.com/projects.get",
+		"resourcemanager.miloapis.com/projects.list",
+		"resourcemanager.miloapis.com/projects.create",
+		"resourcemanager.miloapis.com/projects.update",
+		"resourcemanager.miloapis.com/projects.delete",
+	}
+	return permissions[permIdx%len(permissions)]
 }
 
 func buildInternalRoleTuples(cfg Config) []*openfgav1.TupleKey {
@@ -388,7 +963,7 @@ func buildInternalRoleTuples(cfg Config) []*openfgav1.TupleKey {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 4: Organization binding tuples
+// Direct mode: Phase 4 — Organization binding tuples
 // ---------------------------------------------------------------------------
 
 // buildMembershipMap returns a map of userIdx -> []orgIdx using a deterministic
@@ -441,7 +1016,7 @@ func buildOrgBindingTuples(cfg Config, membershipMap map[int][]int) []*openfgav1
 }
 
 // ---------------------------------------------------------------------------
-// Phase 5: Organization RootBinding tuples
+// Direct mode: Phase 5 — Organization RootBinding tuples
 // ---------------------------------------------------------------------------
 
 func buildOrgRootBindingTuples(cfg Config) []*openfgav1.TupleKey {
@@ -457,7 +1032,7 @@ func buildOrgRootBindingTuples(cfg Config) []*openfgav1.TupleKey {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 6: Project tuples
+// Direct mode: Phase 6 — Project tuples
 // ---------------------------------------------------------------------------
 
 func buildProjectTuples(cfg Config) []*openfgav1.TupleKey {
@@ -487,7 +1062,7 @@ func buildProjectTuples(cfg Config) []*openfgav1.TupleKey {
 }
 
 // ---------------------------------------------------------------------------
-// Batched concurrent tuple writer
+// Direct mode: batched concurrent tuple writer
 // ---------------------------------------------------------------------------
 
 // writeTuplesBatched chunks tuples into batches of maxBatchSize and writes them
@@ -577,7 +1152,7 @@ func writeBatch(ctx context.Context, client openfgav1.OpenFGAServiceClient, stor
 }
 
 // ---------------------------------------------------------------------------
-// Phase 7: Manifest
+// Manifest (shared by both modes)
 // ---------------------------------------------------------------------------
 
 func buildManifest(cfg Config, membershipMap map[int][]int, tupleCount int64) ScaleManifest {
@@ -651,8 +1226,8 @@ func buildManifest(cfg Config, membershipMap map[int][]int, tupleCount int64) Sc
 
 func writeManifest(manifest ScaleManifest, path string) error {
 	// Ensure the directory exists.
-	dir := path[:strings.LastIndex(path, "/")]
-	if dir != "" {
+	if idx := strings.LastIndex(path, "/"); idx > 0 {
+		dir := path[:idx]
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return fmt.Errorf("failed to create manifest directory %s: %w", dir, err)
 		}
