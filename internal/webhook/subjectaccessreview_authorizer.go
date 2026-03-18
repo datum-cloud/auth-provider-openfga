@@ -18,7 +18,6 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"k8s.io/apiserver/pkg/authorization/authorizer"
 	"k8s.io/client-go/discovery"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 const (
@@ -40,27 +39,27 @@ var serviceNameMapping = map[string]string{
 var _ authorizer.Authorizer = &SubjectAccessReviewAuthorizer{}
 
 type SubjectAccessReviewAuthorizer struct {
-	FGAClient       openfgav1.OpenFGAServiceClient
-	FGAStoreID      string
-	K8sClient       client.Client
-	DiscoveryClient discovery.DiscoveryInterface
+	FGAClient              openfgav1.OpenFGAServiceClient
+	FGAStoreID             string
+	ProtectedResourceCache *ProtectedResourceCache
+	DiscoveryClient        discovery.DiscoveryInterface
 }
 
 // Config holds the configuration for creating a SubjectAccessReview webhook
 type Config struct {
-	FGAClient       openfgav1.OpenFGAServiceClient
-	FGAStoreID      string
-	K8sClient       client.Client
-	DiscoveryClient discovery.DiscoveryInterface
+	FGAClient              openfgav1.OpenFGAServiceClient
+	FGAStoreID             string
+	ProtectedResourceCache *ProtectedResourceCache
+	DiscoveryClient        discovery.DiscoveryInterface
 }
 
 // NewSubjectAccessReviewWebhook creates a new SubjectAccessReview authorization webhook
 func NewSubjectAccessReviewWebhook(config Config) *Webhook {
 	authorizer := &SubjectAccessReviewAuthorizer{
-		FGAClient:       config.FGAClient,
-		FGAStoreID:      config.FGAStoreID,
-		K8sClient:       config.K8sClient,
-		DiscoveryClient: config.DiscoveryClient,
+		FGAClient:              config.FGAClient,
+		FGAStoreID:             config.FGAStoreID,
+		ProtectedResourceCache: config.ProtectedResourceCache,
+		DiscoveryClient:        config.DiscoveryClient,
 	}
 	return NewAuthorizerWebhook(authorizer)
 }
@@ -492,42 +491,39 @@ func (o *SubjectAccessReviewAuthorizer) buildOpenFGARequest(ctx context.Context,
 	return checkReq, nil
 }
 
-// validatePermissionWithServiceDefaulting validates permissions with consistent service name defaulting
+// validatePermissionWithServiceDefaulting validates permissions with consistent service name defaulting.
+// It uses the in-memory ProtectedResourceCache for O(1) lookups instead of a K8s API List call.
 func (o *SubjectAccessReviewAuthorizer) validatePermissionWithServiceDefaulting(ctx context.Context, attributes authorizer.Attributes) (bool, error) {
 	tracer := otel.GetTracerProvider().Tracer("authz-webhook")
-	ctx, listSpan := tracer.Start(ctx, "k8s.list.ProtectedResources/validatePermission")
-	defer listSpan.End()
-
-	stepStart := time.Now()
-	protectedResourceList := &iamv1alpha1.ProtectedResourceList{}
-	err := o.K8sClient.List(ctx, protectedResourceList)
-	duration := time.Since(stepStart)
-
-	authzStepDuration.WithLabelValues("k8s_list_protectedresources").Observe(duration.Seconds())
-
-	slog.DebugContext(ctx, "k8s list ProtectedResources completed (validatePermission)",
-		slog.Duration("duration", duration),
-		slog.Bool("error", err != nil),
-	)
-
-	if err != nil {
-		authzK8sAPICallsTotal.WithLabelValues("protectedresources", "list", "error").Inc()
-		listSpan.RecordError(err)
-		listSpan.SetStatus(codes.Error, err.Error())
-		return false, fmt.Errorf("failed to list ProtectedResources: %w", err)
-	}
-	authzK8sAPICallsTotal.WithLabelValues("protectedresources", "list", "success").Inc()
+	ctx, cacheSpan := tracer.Start(ctx, "cache.get.ProtectedResource/validatePermission")
+	defer cacheSpan.End()
 
 	apiGroup := o.getEffectiveAPIGroup(attributes)
 	resource := attributes.GetResource()
 	verb := attributes.GetVerb()
 
-	for _, pr := range protectedResourceList.Items {
-		if pr.Spec.ServiceRef.Name == apiGroup && pr.Spec.Plural == resource {
-			return slices.Contains(pr.Spec.Permissions, verb), nil
-		}
+	stepStart := time.Now()
+	pr, ok := o.ProtectedResourceCache.GetByAPIGroupAndResource(apiGroup, resource)
+	duration := time.Since(stepStart)
+
+	authzStepDuration.WithLabelValues("protectedresource_cache_lookup").Observe(duration.Seconds())
+
+	if ok {
+		authzK8sAPICallsTotal.WithLabelValues("protectedresources", "cache_get", "hit").Inc()
+		slog.DebugContext(ctx, "protectedresource cache hit (validatePermission)",
+			slog.String("apiGroup", apiGroup),
+			slog.String("resource", resource),
+			slog.Duration("duration", duration),
+		)
+		return slices.Contains(pr.Spec.Permissions, verb), nil
 	}
 
+	authzK8sAPICallsTotal.WithLabelValues("protectedresources", "cache_get", "miss").Inc()
+	slog.DebugContext(ctx, "protectedresource cache miss (validatePermission)",
+		slog.String("apiGroup", apiGroup),
+		slog.String("resource", resource),
+		slog.Duration("duration", duration),
+	)
 	return false, nil
 }
 
@@ -680,42 +676,38 @@ func (o *SubjectAccessReviewAuthorizer) buildHashedPermissionRelation(attributes
 	return hashedPermission
 }
 
-// getProtectedResource retrieves the ProtectedResource for the given attributes
+// getProtectedResource retrieves the ProtectedResource for the given attributes.
+// It uses the in-memory ProtectedResourceCache for O(1) lookups instead of a K8s API List call.
 func (o *SubjectAccessReviewAuthorizer) getProtectedResource(ctx context.Context, attributes authorizer.Attributes) (*iamv1alpha1.ProtectedResource, error) {
 	tracer := otel.GetTracerProvider().Tracer("authz-webhook")
-	ctx, listSpan := tracer.Start(ctx, "k8s.list.ProtectedResources/buildRequest")
-	defer listSpan.End()
-
-	stepStart := time.Now()
-	protectedResourceList := &iamv1alpha1.ProtectedResourceList{}
-	err := o.K8sClient.List(ctx, protectedResourceList)
-	duration := time.Since(stepStart)
-
-	authzStepDuration.WithLabelValues("k8s_list_protectedresources").Observe(duration.Seconds())
-
-	slog.DebugContext(ctx, "k8s list ProtectedResources completed (buildRequest)",
-		slog.Duration("duration", duration),
-		slog.Bool("error", err != nil),
-	)
-
-	if err != nil {
-		authzK8sAPICallsTotal.WithLabelValues("protectedresources", "list", "error").Inc()
-		listSpan.RecordError(err)
-		listSpan.SetStatus(codes.Error, err.Error())
-		return nil, fmt.Errorf("failed to list ProtectedResources: %w", err)
-	}
-	authzK8sAPICallsTotal.WithLabelValues("protectedresources", "list", "success").Inc()
+	ctx, cacheSpan := tracer.Start(ctx, "cache.get.ProtectedResource/buildRequest")
+	defer cacheSpan.End()
 
 	apiGroup := attributes.GetAPIGroup()
 	resource := attributes.GetResource()
 
-	for _, pr := range protectedResourceList.Items {
-		// Check if the APIGroup and Resource (Plural) match
-		if pr.Spec.ServiceRef.Name == apiGroup && pr.Spec.Plural == resource {
-			return &pr, nil
-		}
+	stepStart := time.Now()
+	pr, ok := o.ProtectedResourceCache.GetByAPIGroupAndResource(apiGroup, resource)
+	duration := time.Since(stepStart)
+
+	authzStepDuration.WithLabelValues("protectedresource_cache_lookup").Observe(duration.Seconds())
+
+	if ok {
+		authzK8sAPICallsTotal.WithLabelValues("protectedresources", "cache_get", "hit").Inc()
+		slog.DebugContext(ctx, "protectedresource cache hit (buildRequest)",
+			slog.String("apiGroup", apiGroup),
+			slog.String("resource", resource),
+			slog.Duration("duration", duration),
+		)
+		return pr, nil
 	}
 
+	authzK8sAPICallsTotal.WithLabelValues("protectedresources", "cache_get", "miss").Inc()
+	slog.DebugContext(ctx, "protectedresource cache miss (buildRequest)",
+		slog.String("apiGroup", apiGroup),
+		slog.String("resource", resource),
+		slog.Duration("duration", duration),
+	)
 	return nil, fmt.Errorf("no ProtectedResource found for APIGroup=%s, Resource=%s", apiGroup, resource)
 }
 

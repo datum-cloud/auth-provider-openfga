@@ -21,7 +21,6 @@ import (
 	"k8s.io/api/authentication/v1beta1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/discovery/cached/disk"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -154,12 +153,6 @@ func runWebhookServer(
 		return fmt.Errorf("failed to add iamv1alpha1 to scheme: %w", err)
 	}
 
-	// Create Kubernetes client
-	k8sClient, err := client.New(restConfig, client.Options{Scheme: runtimeScheme})
-	if err != nil {
-		return fmt.Errorf("failed to create Kubernetes client: %w", err)
-	}
-
 	// Create temporary directory for discovery cache (will be cleaned up on process exit)
 	tempDir, err := os.MkdirTemp("", "auth-provider-discovery-cache-")
 	if err != nil {
@@ -190,6 +183,14 @@ func runWebhookServer(
 		return fmt.Errorf("failed to setup manager: %w", err)
 	}
 
+	// Build the ProtectedResource informer cache. The cache is backed by the
+	// manager's informer and starts empty; it will be populated once the
+	// manager's cache syncs (i.e. after mgr.Start is called).
+	prCache, err := webhook.NewProtectedResourceCache(ctx, mgr)
+	if err != nil {
+		return fmt.Errorf("failed to create ProtectedResource cache: %w", err)
+	}
+
 	// Setup webhooks
 	entryLog.Info("setting up webhook server")
 	hookServer := mgr.GetWebhookServer()
@@ -197,10 +198,10 @@ func runWebhookServer(
 	entryLog.Info("registering webhooks to the webhook server")
 
 	webhook.RegisterSubjectAccessReviewWebhook(hookServer, webhook.Config{
-		FGAClient:       fgaClient,
-		FGAStoreID:      openfgaStoreID,
-		K8sClient:       k8sClient,
-		DiscoveryClient: discoveryClient,
+		FGAClient:              fgaClient,
+		FGAStoreID:             openfgaStoreID,
+		ProtectedResourceCache: prCache,
+		DiscoveryClient:        discoveryClient,
 	})
 
 	entryLog.Info("starting webhook server", "port", webhookPort, "metrics-port", metricsBindAddress)
