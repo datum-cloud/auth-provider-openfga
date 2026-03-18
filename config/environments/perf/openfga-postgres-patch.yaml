@@ -6,15 +6,15 @@ metadata:
 spec:
   dependsOn:
     - name: openfga-database
-  timeout: 1m
+  timeout: 5m
   install:
-    timeout: 1m
+    timeout: 5m
     remediation:
-      retries: 30
+      retries: 10
   upgrade:
-    timeout: 1m
+    timeout: 5m
     remediation:
-      retries: 30
+      retries: 10
   values:
     datastore:
       engine: postgres

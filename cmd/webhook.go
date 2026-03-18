@@ -207,6 +207,15 @@ func runWebhookServer(
 		return fmt.Errorf("failed to create ProtectedResource cache: %w", err)
 	}
 
+	// Build the Project → Organization informer cache. This allows the webhook
+	// to fan out project-scoped authorization checks into two parallel OpenFGA
+	// calls instead of relying on OpenFGA's sequential graph traversal through
+	// the project → org parent tuple chain.
+	projectOrgCache, err := webhook.NewProjectOrganizationCache(ctx, mgr)
+	if err != nil {
+		return fmt.Errorf("failed to create ProjectOrganization cache: %w", err)
+	}
+
 	// Setup webhooks
 	entryLog.Info("setting up webhook server")
 	hookServer := mgr.GetWebhookServer()
@@ -218,6 +227,7 @@ func runWebhookServer(
 		FGAStoreID:             openfgaStoreID,
 		AuthorizationModelID:   modelID,
 		ProtectedResourceCache: prCache,
+		ProjectOrgCache:        projectOrgCache,
 		DiscoveryClient:        discoveryClient,
 	})
 
