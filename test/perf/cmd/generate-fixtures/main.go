@@ -92,8 +92,11 @@ type Config struct {
 // ScaleManifest is written to ManifestPath after generation and read by the
 // k6 scale test to select valid (user, org, project) targets.
 type ScaleManifest struct {
-	GeneratedAt        string              `json:"generated_at"`
-	Params             ManifestParams      `json:"params"`
+	GeneratedAt string         `json:"generated_at"`
+	Params      ManifestParams `json:"params"`
+	// NumProjectsPerOrg is a top-level convenience field for k6 scripts that
+	// access manifest.num_projects_per_org directly without going through params.
+	NumProjectsPerOrg  int                 `json:"num_projects_per_org"`
 	Users              []string            `json:"users"`
 	Organizations      []string            `json:"organizations"`
 	Projects           []string            `json:"projects"`
@@ -207,6 +210,7 @@ func runCleanup(cfg Config) {
 
 	resources := []string{
 		"policybinding.iam.miloapis.com",
+		"project.resourcemanager.miloapis.com",
 		"organization.resourcemanager.miloapis.com",
 		"user.iam.miloapis.com",
 		"role.iam.miloapis.com",
@@ -388,8 +392,19 @@ func runReconcileMode(ctx context.Context, cfg Config) {
 		os.Exit(1)
 	}
 
+	// Phase 5b: Create Project CRDs. Projects must exist so the
+	// ProjectOrganizationCache can map each project to its parent org when
+	// the authorization webhook fans out project-scoped checks.
+	totalProjects := cfg.NumOrgs * cfg.NumProjectsPerOrg
+	fmt.Fprintf(os.Stderr, "Phase 5b: Creating %d Project CRDs (%d orgs × %d projects/org)...\n",
+		totalProjects, cfg.NumOrgs, cfg.NumProjectsPerOrg)
+	if err := createProjectCRDs(ctx, cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "ERROR: Phase 5b failed: %v\n", err)
+		os.Exit(1)
+	}
+
 	// Read UIDs for Users and Organizations — PolicyBinding requires them.
-	fmt.Fprintln(os.Stderr, "Phase 5: Reading User and Organization UIDs...")
+	fmt.Fprintln(os.Stderr, "Phase 5c: Reading User and Organization UIDs...")
 	userUIDs, err := readResourceUIDs(ctx, cfg, "user.iam.miloapis.com", cfg.NumUsers, "scale-user-%d")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ERROR: failed to read User UIDs: %v\n", err)
@@ -662,6 +677,62 @@ spec:
 		}
 	}
 	fmt.Fprintf(os.Stderr, "  Applied %d Organization CRDs\n", cfg.NumOrgs)
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Reconcile mode: Phase 5b — Project CRDs
+// ---------------------------------------------------------------------------
+
+// createProjectCRDs creates Project CRDs for each (org, project) pair. The
+// ownerRef.name field links each project to its parent organization so the
+// ProjectOrganizationCache can build the project → org index that the webhook
+// uses for parallel project/org authorization checks.
+func createProjectCRDs(ctx context.Context, cfg Config) error {
+	total := cfg.NumOrgs * cfg.NumProjectsPerOrg
+	numBatches := (total + crdBatchSize - 1) / crdBatchSize
+
+	// Flatten (orgIdx, projIdx) pairs into a slice so we can batch uniformly.
+	type projectEntry struct {
+		orgIdx  int
+		projIdx int
+	}
+	entries := make([]projectEntry, 0, total)
+	for o := 0; o < cfg.NumOrgs; o++ {
+		for p := 0; p < cfg.NumProjectsPerOrg; p++ {
+			entries = append(entries, projectEntry{orgIdx: o, projIdx: p})
+		}
+	}
+
+	for b := 0; b < numBatches; b++ {
+		start := b * crdBatchSize
+		end := start + crdBatchSize
+		if end > total {
+			end = total
+		}
+		fmt.Fprintf(os.Stderr, "  Phase 5b: Creating %d Project CRDs... (batch %d/%d)\n", total, b+1, numBatches)
+
+		var buf bytes.Buffer
+		for _, e := range entries[start:end] {
+			fmt.Fprintf(&buf, `---
+apiVersion: resourcemanager.miloapis.com/v1alpha1
+kind: Project
+metadata:
+  name: scale-proj-%d-%d
+  labels:
+    perf-test: scale
+spec:
+  ownerRef:
+    kind: Organization
+    name: scale-org-%d
+`, e.orgIdx, e.projIdx, e.orgIdx)
+		}
+
+		if err := kubectlApplyBuf(ctx, cfg, buf.Bytes()); err != nil {
+			return fmt.Errorf("batch %d: %w", b+1, err)
+		}
+	}
+	fmt.Fprintf(os.Stderr, "  Applied %d Project CRDs\n", total)
 	return nil
 }
 
@@ -1211,6 +1282,7 @@ func buildManifest(cfg Config, membershipMap map[int][]int, tupleCount int64) Sc
 			PermissionsPerRole: cfg.PermissionsPerRole,
 			OrgsPerUser:        cfg.MembershipsPerUser,
 		},
+		NumProjectsPerOrg:  cfg.NumProjectsPerOrg,
 		Users:              users,
 		Organizations:      orgs,
 		Projects:           projects,
