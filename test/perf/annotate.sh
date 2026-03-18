@@ -1,45 +1,43 @@
 #!/usr/bin/env bash
-# annotate.sh — Create a Grafana annotation to mark system tweaks or perf test runs.
+# annotate.sh — Write a perf annotation metric to Victoria Metrics.
+#
+# Annotations are stored as metric data points in Victoria Metrics so they
+# survive Grafana instance rebuilds. The Grafana dashboard queries them via
+# a Prometheus datasource annotation using the perf_annotation metric.
 #
 # Usage:
 #   ./test/perf/annotate.sh tweak "Cached ProtectedResource lookups with informer"
 #   ./test/perf/annotate.sh perf-test "Baseline: 50 VUs, 5min, postgres-backed OpenFGA"
 #
 # Environment variables:
-#   GRAFANA_URL   Grafana base URL (default: http://localhost:30000)
-#   GRAFANA_USER  Grafana username (default: admin)
-#   GRAFANA_PASS  Grafana password (default: datum123)
+#   VM_URL   Victoria Metrics base URL (default: http://localhost:8428)
 
 set -euo pipefail
 
-TAG="${1:?Usage: annotate.sh <tag> <text>  (tag: tweak|perf-test)}"
+TAG="${1:?Usage: annotate.sh <tag> <text>  (tag: tweak|perf-test|scale-perf-test)}"
 TEXT="${2:?Usage: annotate.sh <tag> <text>}"
 
-GRAFANA_URL="${GRAFANA_URL:-http://localhost:30000}"
-GRAFANA_USER="${GRAFANA_USER:-admin}"
-GRAFANA_PASS="${GRAFANA_PASS:-datum123}"
+VM_URL="${VM_URL:-http://localhost:8428}"
 
-# Epoch milliseconds
-TIME_MS=$(date +%s)000
+# Epoch milliseconds — Victoria Metrics import/prometheus expects milliseconds
+TIMESTAMP_MS=$(date +%s)000
 
-echo "Creating annotation: [${TAG}] ${TEXT}" >&2
+# Escape the description for use as a label value: replace \ with \\, then " with \"
+ESCAPED_TEXT=$(printf '%s' "${TEXT}" | sed 's/\\/\\\\/g; s/"/\\"/g')
 
-RESPONSE=$(curl -s -w "\n%{http_code}" \
-  -X POST "${GRAFANA_URL}/api/annotations" \
-  -H "Content-Type: application/json" \
-  -u "${GRAFANA_USER}:${GRAFANA_PASS}" \
-  -d "{
-    \"time\": ${TIME_MS},
-    \"tags\": [\"${TAG}\"],
-    \"text\": \"${TEXT}\"
-  }")
+METRIC="perf_annotation{type=\"${TAG}\",description=\"${ESCAPED_TEXT}\"} 1 ${TIMESTAMP_MS}"
 
-HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-BODY=$(echo "$RESPONSE" | head -1)
+echo "Writing annotation to Victoria Metrics: [${TAG}] ${TEXT}" >&2
 
-if [ "$HTTP_CODE" = "200" ]; then
-  echo "Annotation created successfully." >&2
+HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+  -X POST "${VM_URL}/api/v1/import/prometheus" \
+  --data-binary "${METRIC}")
+
+if [ "${HTTP_CODE}" = "204" ] || [ "${HTTP_CODE}" = "200" ]; then
+  echo "Annotation written successfully (HTTP ${HTTP_CODE})." >&2
 else
-  echo "ERROR: Failed to create annotation (HTTP ${HTTP_CODE}): ${BODY}" >&2
+  echo "ERROR: Failed to write annotation to Victoria Metrics (HTTP ${HTTP_CODE})." >&2
+  echo "  URL: ${VM_URL}/api/v1/import/prometheus" >&2
+  echo "  Metric: ${METRIC}" >&2
   exit 1
 fi

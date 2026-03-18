@@ -382,7 +382,7 @@ tasks:
   # Performance Test Tasks
 
   test:perf:forward:
-    desc: Start background port-forwards for the authz webhook (and optionally Victoria Metrics)
+    desc: Start background port-forwards for the authz webhook and Victoria Metrics
     cmds:
       - |
         mkdir -p .tmp
@@ -397,17 +397,16 @@ tasks:
         echo $! > .tmp/perf-forward.pid
         sleep 2
 
-        # Optionally start Victoria Metrics port-forward for OTLP metrics ingestion
-        if [ "${PERF_METRICS:-false}" = "true" ]; then
-          if [ -f .tmp/perf-vm-forward.pid ] && kill -0 "$(cat .tmp/perf-vm-forward.pid)" 2>/dev/null; then
-            echo "Victoria Metrics port-forward already running (PID $(cat .tmp/perf-vm-forward.pid))"
-          else
-            echo "Starting Victoria Metrics port-forward (port 8428)..."
-            kubectl --kubeconfig .test-infra/kubeconfig port-forward -n telemetry-system \
-              svc/vmsingle-telemetry-system-vm-stack-victoria-metrics-k8s-stack 8428:8428 &
-            echo $! > .tmp/perf-vm-forward.pid
-            sleep 2
-          fi
+        # Always start Victoria Metrics port-forward so annotations are durable
+        # (perf_annotation metrics survive Grafana rebuilds by living in VM).
+        if [ -f .tmp/perf-vm-forward.pid ] && kill -0 "$(cat .tmp/perf-vm-forward.pid)" 2>/dev/null; then
+          echo "Victoria Metrics port-forward already running (PID $(cat .tmp/perf-vm-forward.pid))"
+        else
+          echo "Starting Victoria Metrics port-forward (port 8428)..."
+          kubectl --kubeconfig .test-infra/kubeconfig port-forward -n telemetry-system \
+            svc/vmsingle-telemetry-system-vm-stack-victoria-metrics-k8s-stack 8428:8428 &
+          echo $! > .tmp/perf-vm-forward.pid
+          sleep 2
         fi
 
   test:perf:forward:stop:
@@ -500,9 +499,9 @@ tasks:
         echo "Teardown complete."
 
   test:perf:annotate:
-    desc: "Create a Grafana annotation (usage: task test:perf:annotate -- tweak description)"
+    desc: "Write a perf annotation to Victoria Metrics (usage: task test:perf:annotate -- tweak description)"
     cmds:
-      - bash test/perf/annotate.sh {{.CLI_ARGS}}
+      - VM_URL=http://localhost:8428 bash test/perf/annotate.sh {{.CLI_ARGS}}
 
   test:perf:clean:
     desc: Remove k6 result files and port-forward PID files
@@ -512,6 +511,175 @@ tasks:
         rm -f .tmp/perf-forward.pid
         rm -f .tmp/perf-vm-forward.pid
         echo "Cleaned perf results and PID files."
+
+  test:perf:openfga:forward:
+    desc: Port-forward OpenFGA gRPC port (8081) to localhost for the fixture generator
+    cmds:
+      - |
+        mkdir -p .tmp
+        if [ -f .tmp/perf-openfga-forward.pid ] && kill -0 "$(cat .tmp/perf-openfga-forward.pid)" 2>/dev/null; then
+          echo "OpenFGA port-forward already running (PID $(cat .tmp/perf-openfga-forward.pid))"
+          exit 0
+        fi
+        kubectl --kubeconfig .test-infra/kubeconfig port-forward -n openfga-system \
+          svc/openfga 8081:8080 &
+        echo $! > .tmp/perf-openfga-forward.pid
+        sleep 2
+
+  test:perf:openfga:forward:stop:
+    desc: Stop the OpenFGA gRPC port-forward started by test:perf:openfga:forward
+    cmds:
+      - |
+        if [ -f .tmp/perf-openfga-forward.pid ]; then
+          kill "$(cat .tmp/perf-openfga-forward.pid)" 2>/dev/null || true
+          rm -f .tmp/perf-openfga-forward.pid
+        fi
+
+  test:perf:generate:
+    desc: Generate scale test fixtures by writing tuples directly to OpenFGA
+    vars:
+      # Scale presets — set PERF_SCALE=small|medium|large|xlarge to override all
+      # scale parameters at once. Individual env vars take precedence over the preset.
+      _PERF_SCALE: '{{default "small" .PERF_SCALE}}'
+    cmds:
+      - |
+        set -e
+
+        # Verify go is available
+        if ! command -v go >/dev/null 2>&1; then
+          echo "ERROR: go not found. Install Go: https://go.dev/doc/install"
+          exit 1
+        fi
+
+        # Apply scale presets. Individual PERF_* env vars (already exported) take precedence.
+        SCALE="{{._PERF_SCALE}}"
+        case "${SCALE}" in
+          small)
+            export PERF_NUM_ORGS="${PERF_NUM_ORGS:-100}"
+            export PERF_NUM_PROJECTS_PER_ORG="${PERF_NUM_PROJECTS_PER_ORG:-10}"
+            export PERF_NUM_USERS="${PERF_NUM_USERS:-100}"
+            export PERF_NUM_ROLES="${PERF_NUM_ROLES:-5}"
+            export PERF_PERMISSIONS_PER_ROLE="${PERF_PERMISSIONS_PER_ROLE:-10}"
+            export PERF_MEMBERSHIPS_PER_USER="${PERF_MEMBERSHIPS_PER_USER:-100}"
+            ;;
+          medium)
+            export PERF_NUM_ORGS="${PERF_NUM_ORGS:-1000}"
+            export PERF_NUM_PROJECTS_PER_ORG="${PERF_NUM_PROJECTS_PER_ORG:-10}"
+            export PERF_NUM_USERS="${PERF_NUM_USERS:-1000}"
+            export PERF_NUM_ROLES="${PERF_NUM_ROLES:-5}"
+            export PERF_PERMISSIONS_PER_ROLE="${PERF_PERMISSIONS_PER_ROLE:-10}"
+            export PERF_MEMBERSHIPS_PER_USER="${PERF_MEMBERSHIPS_PER_USER:-10}"
+            ;;
+          large)
+            export PERF_NUM_ORGS="${PERF_NUM_ORGS:-10000}"
+            export PERF_NUM_PROJECTS_PER_ORG="${PERF_NUM_PROJECTS_PER_ORG:-5}"
+            export PERF_NUM_USERS="${PERF_NUM_USERS:-5000}"
+            export PERF_NUM_ROLES="${PERF_NUM_ROLES:-5}"
+            export PERF_PERMISSIONS_PER_ROLE="${PERF_PERMISSIONS_PER_ROLE:-10}"
+            export PERF_MEMBERSHIPS_PER_USER="${PERF_MEMBERSHIPS_PER_USER:-10}"
+            ;;
+          xlarge)
+            if [ "${PERF_CONFIRM_LARGE:-false}" != "true" ]; then
+              echo "ERROR: PERF_SCALE=xlarge requires PERF_CONFIRM_LARGE=true."
+              echo "This scale will write ~3 million tuples and may saturate the Kind cluster's PostgreSQL."
+              echo "Set PERF_CONFIRM_LARGE=true to proceed."
+              exit 1
+            fi
+            export PERF_NUM_ORGS="${PERF_NUM_ORGS:-100000}"
+            export PERF_NUM_PROJECTS_PER_ORG="${PERF_NUM_PROJECTS_PER_ORG:-5}"
+            export PERF_NUM_USERS="${PERF_NUM_USERS:-10000}"
+            export PERF_NUM_ROLES="${PERF_NUM_ROLES:-5}"
+            export PERF_PERMISSIONS_PER_ROLE="${PERF_PERMISSIONS_PER_ROLE:-10}"
+            export PERF_MEMBERSHIPS_PER_USER="${PERF_MEMBERSHIPS_PER_USER:-10}"
+            ;;
+          *)
+            echo "WARNING: unknown PERF_SCALE value '${SCALE}', using environment variables as-is"
+            ;;
+        esac
+
+        # Get the OpenFGA store ID from the cluster.
+        STORE_ID=$(task test-infra:kubectl -- get configmap openfga-store-id \
+          -n openfga-system -o jsonpath='{.data.store-id}' 2>/dev/null || true)
+        if [ -z "${STORE_ID}" ]; then
+          echo "ERROR: Could not retrieve OpenFGA store ID from configmap openfga-store-id in openfga-system."
+          echo "Run 'task test:perf:setup' first to initialize the store."
+          exit 1
+        fi
+        echo "Using OpenFGA store ID: ${STORE_ID}"
+
+        # Start OpenFGA port-forward.
+        task test:perf:openfga:forward
+        trap "task test:perf:openfga:forward:stop" EXIT
+
+        # Run the fixture generator.
+        OPENFGA_STORE_ID="${STORE_ID}" \
+        OPENFGA_API_URL="${OPENFGA_API_URL:-localhost:8081}" \
+        KUBECTL="kubectl --kubeconfig .test-infra/kubeconfig" \
+          go run ./test/perf/cmd/generate-fixtures/
+
+        echo "Scale fixture generation complete."
+
+  test:perf:scale:
+    desc: Run the multi-scenario k6 scale test using the generated fixture manifest
+    vars:
+      _PERF_SCALE: '{{default "small" .PERF_SCALE}}'
+    cmds:
+      - |
+        set -e
+
+        # Verify k6 is available before proceeding.
+        if ! command -v {{.K6}} >/dev/null 2>&1; then
+          echo "ERROR: k6 not found (looked for '{{.K6}}')."
+          echo "Install k6: https://grafana.com/docs/k6/latest/set-up/install-k6/"
+          exit 1
+        fi
+
+        MANIFEST_PATH="${PERF_FIXTURE_MANIFEST:-test/perf/fixtures/scale-manifest.json}"
+
+        if [ ! -f "${MANIFEST_PATH}" ]; then
+          echo "ERROR: fixture manifest not found at ${MANIFEST_PATH}."
+          echo "Run 'task test:perf:generate' first."
+          exit 1
+        fi
+
+        # Start webhook port-forward.
+        task test:perf:forward
+        trap "task test:perf:forward:stop" EXIT
+
+        mkdir -p test/perf/results
+        RESULT_FILE="test/perf/results/scale-result-$(date +%Y%m%d-%H%M%S).json"
+
+        K6_OUTPUTS="--out json=${RESULT_FILE}"
+        if [ "${PERF_METRICS:-false}" = "true" ]; then
+          K6_OUTPUTS="${K6_OUTPUTS} --out experimental-opentelemetry"
+        fi
+
+        PERF_VUS_VAL="${PERF_VUS:-20}"
+        PERF_DURATION_VAL="${PERF_DURATION:-60s}"
+        PERF_RAMP_UP_VAL="${PERF_RAMP_UP:-10s}"
+
+        VM_URL=http://localhost:8428 bash test/perf/annotate.sh scale-perf-test \
+          "Scale perf test ({{._PERF_SCALE}}): ${PERF_VUS_VAL} VUs, ${PERF_DURATION_VAL} sustained" \
+          2>&1 || true
+
+        K6_OTEL_EXPORTER_OTLP_ENDPOINT="${K6_OTEL_EXPORTER_OTLP_ENDPOINT:-http://localhost:8428}" \
+        K6_OTEL_EXPORTER_OTLP_PROTOCOL="${K6_OTEL_EXPORTER_OTLP_PROTOCOL:-http/protobuf}" \
+        K6_OTEL_METRIC_PREFIX="${K6_OTEL_METRIC_PREFIX:-k6_}" \
+        {{.K6}} run \
+          ${K6_OUTPUTS} \
+          -e PERF_FIXTURE_MANIFEST="${MANIFEST_PATH}" \
+          -e WEBHOOK_URL="${WEBHOOK_URL:-https://localhost:8090/apis/authorization.k8s.io/v1/subjectaccessreviews}" \
+          -e AUTH_TOKEN="${AUTH_TOKEN:-}" \
+          -e TLS_SKIP_VERIFY="${TLS_SKIP_VERIFY:-true}" \
+          -e PERF_VUS="${PERF_VUS_VAL}" \
+          -e PERF_DURATION="${PERF_DURATION_VAL}" \
+          -e PERF_RAMP_UP="${PERF_RAMP_UP_VAL}" \
+          -e PERF_SCENARIOS="${PERF_SCENARIOS:-random,hotspot,denied,project}" \
+          -e ENVIRONMENT="${ENVIRONMENT:-kind-local}" \
+          test/perf/sar-scale-test.js
+
+        echo ""
+        echo "Scale test results written to: ${RESULT_FILE}"
 
   test:perf:
     desc: Run the full SubjectAccessReview performance test against the local Kind cluster
@@ -550,10 +718,10 @@ tasks:
           echo "Metrics will be forwarded via OpenTelemetry to ${K6_OTEL_EXPORTER_OTLP_ENDPOINT:-http://localhost:8428}"
         fi
 
-        # Annotate the start of the perf test run in Grafana
+        # Annotate the start of the perf test run in Victoria Metrics
         PERF_VUS_VAL="${PERF_VUS:-10}"
         PERF_DURATION_VAL="${PERF_DURATION:-30s}"
-        bash test/perf/annotate.sh perf-test "Perf test: ${PERF_VUS_VAL} VUs, ${PERF_DURATION_VAL} sustained" 2>&1 || true
+        VM_URL=http://localhost:8428 bash test/perf/annotate.sh perf-test "Perf test: ${PERF_VUS_VAL} VUs, ${PERF_DURATION_VAL} sustained" 2>&1 || true
 
         K6_OTEL_EXPORTER_OTLP_ENDPOINT="${K6_OTEL_EXPORTER_OTLP_ENDPOINT:-http://localhost:8428}" \
         K6_OTEL_EXPORTER_OTLP_PROTOCOL="${K6_OTEL_EXPORTER_OTLP_PROTOCOL:-http/protobuf}" \

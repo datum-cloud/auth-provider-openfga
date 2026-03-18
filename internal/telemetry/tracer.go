@@ -47,8 +47,7 @@ func SetupTracer(ctx context.Context, serviceName, serviceVersion, otlpEndpoint 
 	}
 
 	exporter, err := otlptracehttp.New(ctx,
-		otlptracehttp.WithEndpoint(otlpEndpoint),
-		otlptracehttp.WithInsecure(),
+		otlptracehttp.WithEndpointURL(otlpEndpoint),
 	)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create OTLP HTTP exporter: %w", err)
