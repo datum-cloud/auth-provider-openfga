@@ -4,6 +4,3 @@ resources:
   - authz-webhook-dashboard.yaml
   - authz-webhook-scrape.yaml
   - controller-manager-scrape.yaml
-
-components:
-  - otel-collector
