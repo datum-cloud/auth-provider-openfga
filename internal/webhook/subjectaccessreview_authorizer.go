@@ -48,11 +48,6 @@ type SubjectAccessReviewAuthorizer struct {
 	AuthorizationModelID   string
 	ProtectedResourceCache *ProtectedResourceCache
 	DiscoveryClient        discovery.DiscoveryInterface
-	// SystemGroupMaterializer persists system group membership tuples to OpenFGA
-	// on first encounter so that OpenFGA's check query cache can resolve them.
-	// If nil, system group tuples are not written (useful in tests that do not
-	// exercise this path).
-	SystemGroupMaterializer *SystemGroupMaterializer
 }
 
 // Config holds the configuration for creating a SubjectAccessReview webhook
@@ -69,12 +64,11 @@ type Config struct {
 // NewSubjectAccessReviewWebhook creates a new SubjectAccessReview authorization webhook
 func NewSubjectAccessReviewWebhook(config Config) *Webhook {
 	authorizer := &SubjectAccessReviewAuthorizer{
-		FGAClient:               config.FGAClient,
-		FGAStoreID:              config.FGAStoreID,
-		AuthorizationModelID:    config.AuthorizationModelID,
-		ProtectedResourceCache:  config.ProtectedResourceCache,
-		DiscoveryClient:         config.DiscoveryClient,
-		SystemGroupMaterializer: NewSystemGroupMaterializer(config.FGAClient, config.FGAStoreID),
+		FGAClient:              config.FGAClient,
+		FGAStoreID:             config.FGAStoreID,
+		AuthorizationModelID:   config.AuthorizationModelID,
+		ProtectedResourceCache: config.ProtectedResourceCache,
+		DiscoveryClient:        config.DiscoveryClient,
 	}
 	return NewAuthorizerWebhook(authorizer)
 }
@@ -198,23 +192,6 @@ func (o *SubjectAccessReviewAuthorizer) Authorize(ctx context.Context, attribute
 
 	scope := scopeLabel(authCtx)
 	span.SetAttributes(attribute.String("authz.scope", scope))
-
-	// Step 2: Materialize system group memberships as stored tuples so that
-	// OpenFGA's check query cache can resolve them. This is a best-effort
-	// optimization; a write failure is logged but does not block the request.
-	if o.SystemGroupMaterializer != nil {
-		if materializeErr := o.SystemGroupMaterializer.EnsureMaterialized(
-			ctx,
-			authCtx.userUID,
-			attributes.GetUser().GetGroups(),
-		); materializeErr != nil {
-			slog.WarnContext(ctx, "failed to materialize system group memberships; proceeding without stored tuples",
-				slog.String("user_uid", authCtx.userUID),
-				slog.String("error", materializeErr.Error()),
-				slog.String("request_id", requestID),
-			)
-		}
-	}
 
 	// Step 4: Validate organization namespace if organization-scoped
 	stepStart = time.Now()

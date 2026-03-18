@@ -46,13 +46,13 @@ type Config struct {
 	StoreID       string
 
 	// Scale parameters
-	NumOrgs             int
-	NumProjectsPerOrg   int
-	NumUsers            int
-	NumRoles            int
-	PermissionsPerRole  int
-	MembershipsPerUser  int
-	NumPRTypes          int
+	NumOrgs            int
+	NumProjectsPerOrg  int
+	NumUsers           int
+	NumRoles           int
+	PermissionsPerRole int
+	MembershipsPerUser int
+	NumPRTypes         int
 
 	// Concurrency
 	Workers int
@@ -126,7 +126,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "ERROR: failed to connect to OpenFGA at %s: %v\n", cfg.OpenFGAAPIURL, err)
 		os.Exit(1)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	client := openfgav1.NewOpenFGAServiceClient(conn)
 
@@ -198,12 +198,12 @@ func main() {
 // loadConfig reads scale parameters from environment variables.
 func loadConfig() Config {
 	cfg := Config{
-		OpenFGAAPIURL:     envOrDefault("OPENFGA_API_URL", "localhost:8081"),
-		StoreID:           os.Getenv("OPENFGA_STORE_ID"),
-		NumOrgs:           envIntOrDefault("PERF_NUM_ORGS", 100),
-		NumProjectsPerOrg: envIntOrDefault("PERF_NUM_PROJECTS_PER_ORG", 10),
-		NumUsers:          envIntOrDefault("PERF_NUM_USERS", 500),
-		NumRoles:          envIntOrDefault("PERF_NUM_ROLES", 5),
+		OpenFGAAPIURL:      envOrDefault("OPENFGA_API_URL", "localhost:8081"),
+		StoreID:            os.Getenv("OPENFGA_STORE_ID"),
+		NumOrgs:            envIntOrDefault("PERF_NUM_ORGS", 100),
+		NumProjectsPerOrg:  envIntOrDefault("PERF_NUM_PROJECTS_PER_ORG", 10),
+		NumUsers:           envIntOrDefault("PERF_NUM_USERS", 500),
+		NumRoles:           envIntOrDefault("PERF_NUM_ROLES", 5),
 		PermissionsPerRole: envIntOrDefault("PERF_PERMISSIONS_PER_ROLE", 10),
 		MembershipsPerUser: envIntOrDefault("PERF_MEMBERSHIPS_PER_USER", 2),
 		NumPRTypes:         envIntOrDefault("PERF_NUM_PR_TYPES", 1),
@@ -288,7 +288,7 @@ func generateProtectedResources(ctx context.Context, cfg Config) error {
 	if err != nil {
 		return fmt.Errorf("failed to create temp file: %w", err)
 	}
-	defer os.Remove(tmp.Name())
+	defer func() { _ = os.Remove(tmp.Name()) }()
 
 	if _, err := tmp.Write(buf.Bytes()); err != nil {
 		return fmt.Errorf("failed to write temp file: %w", err)

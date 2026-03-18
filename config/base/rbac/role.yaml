@@ -42,6 +42,7 @@ rules:
   - policybindings/finalizers
   - protectedresources/finalizers
   - roles/finalizers
+  - users/finalizers
   verbs:
   - update
 - apiGroups:
@@ -64,6 +65,14 @@ rules:
   - list
   - patch
   - update
+  - watch
+- apiGroups:
+  - iam.miloapis.com
+  resources:
+  - users
+  verbs:
+  - get
+  - list
   - watch
 - apiGroups:
   - resourcemanager.miloapis.com
