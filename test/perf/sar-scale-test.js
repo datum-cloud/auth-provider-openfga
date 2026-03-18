@@ -96,24 +96,27 @@ const requestParams = { headers: requestHeaders };
 // Build the scenarios object, skipping any that were excluded via PERF_SCENARIOS.
 function buildScenarios() {
   const all = {
+    // Realistic traffic split matching production access patterns:
+    // - Project-scoped dominates (users managing workloads, networks, etc.)
+    // - Org-scoped is administrative (managing members, projects, settings)
+    // - Hotspot simulates popular resources with high cache hit rates
+    // - Denied is rare (~5% of real traffic)
     random: {
       executor: 'ramping-vus',
       exec: 'random',
       startTime: '0s',
       stages: [
-        { duration: PERF_RAMP_UP, target: Math.floor(PERF_VUS * 0.4) },
-        { duration: PERF_DURATION, target: Math.floor(PERF_VUS * 0.4) },
+        { duration: PERF_RAMP_UP, target: Math.floor(PERF_VUS * 0.15) },
+        { duration: PERF_DURATION, target: Math.floor(PERF_VUS * 0.15) },
       ],
     },
     hotspot: {
       executor: 'ramping-vus',
       exec: 'hotspot',
-      // Offset start so scenarios ramp up sequentially and avoid thundering-herd
-      // at t=0. Each scenario starts after the previous ramp-up finishes.
       startTime: PERF_RAMP_UP,
       stages: [
-        { duration: PERF_RAMP_UP, target: Math.floor(PERF_VUS * 0.2) },
-        { duration: PERF_DURATION, target: Math.floor(PERF_VUS * 0.2) },
+        { duration: PERF_RAMP_UP, target: Math.floor(PERF_VUS * 0.10) },
+        { duration: PERF_DURATION, target: Math.floor(PERF_VUS * 0.10) },
       ],
     },
     denied: {
@@ -121,8 +124,8 @@ function buildScenarios() {
       exec: 'denied',
       startTime: PERF_RAMP_UP,
       stages: [
-        { duration: PERF_RAMP_UP, target: Math.floor(PERF_VUS * 0.2) },
-        { duration: PERF_DURATION, target: Math.floor(PERF_VUS * 0.2) },
+        { duration: PERF_RAMP_UP, target: Math.max(1, Math.floor(PERF_VUS * 0.05)) },
+        { duration: PERF_DURATION, target: Math.max(1, Math.floor(PERF_VUS * 0.05)) },
       ],
     },
     project_scoped: {
@@ -130,8 +133,8 @@ function buildScenarios() {
       exec: 'projectScoped',
       startTime: PERF_RAMP_UP,
       stages: [
-        { duration: PERF_RAMP_UP, target: Math.floor(PERF_VUS * 0.2) },
-        { duration: PERF_DURATION, target: Math.floor(PERF_VUS * 0.2) },
+        { duration: PERF_RAMP_UP, target: Math.floor(PERF_VUS * 0.70) },
+        { duration: PERF_DURATION, target: Math.floor(PERF_VUS * 0.70) },
       ],
     },
   };
@@ -276,25 +279,31 @@ export function projectScoped() {
   const userOrgs = manifest.user_org_memberships[user];
   const org      = userOrgs[Math.floor(Math.random() * userOrgs.length)];
 
-  // Pick any project (the org membership grant propagates via the parent tuple
-  // written by the generator, so any project under any org is accessible to
-  // users who have bindings on that org).
-  const project = manifest.projects[Math.floor(Math.random() * manifest.projects.length)];
+  // Pick a project that belongs to the user's org. Project names follow the
+  // convention "scale-proj-{orgIdx}-{projIdx}". Extract the org index from the
+  // org name and select a random project under it.
+  const orgIdx = parseInt(org.replace('scale-org-', ''), 10);
+  const numProjectsPerOrg = (manifest.params && manifest.params.num_projects_per_org) || manifest.num_projects_per_org || 5;
+  const projIdx = Math.floor(Math.random() * numProjectsPerOrg);
+  const project = `scale-proj-${orgIdx}-${projIdx}`;
 
   const payload = buildProjectSAR(user, org, project);
   const body = sendSAR(payload);
-  // Project-scoped checks use the parent tuple to inherit from the org.
-  // We cannot assert allowed=true here without knowing which org the project
-  // belongs to, since the project is selected randomly. Track counts only.
+  // The user has an org-level binding that inherits to all projects in that org,
+  // so this check should be allowed.
   if (body !== null) {
     if (body.status && body.status.allowed === true) {
       sarAllowedTotal.add(1, { scenario: 'project_scoped' });
     } else {
       sarDeniedTotal.add(1, { scenario: 'project_scoped' });
     }
-    check(body, {
-      'project_scoped: response kind is SubjectAccessReview': (b) => b.kind === 'SubjectAccessReview',
+    const passed = check(body, {
+      'project_scoped: request was allowed': (b) =>
+        b.status !== undefined && b.status.allowed === true,
     });
+    if (!passed) {
+      sarCheckFailures.add(1);
+    }
   }
 }
 
@@ -344,10 +353,11 @@ function buildProjectSAR(user, org, project) {
       uid: user,
       groups: ['system:authenticated'],
       extra: {
-        // Provide the org context so the webhook can resolve the org binding,
-        // and the project context so it can check the project resource.
-        'resourcemanager.miloapis.com/organization-id': [org],
-        'resourcemanager.miloapis.com/project-id': [project],
+        // Parent context fields tell the webhook this is a project-scoped check.
+        // The webhook's extractParentContext reads these to determine scope.
+        'iam.miloapis.com/parent-api-group': ['resourcemanager.miloapis.com'],
+        'iam.miloapis.com/parent-kind': ['Project'],
+        'iam.miloapis.com/parent-name': [project],
       },
       resourceAttributes: {
         group: 'resourcemanager.miloapis.com',
