@@ -1,56 +1,27 @@
 package webhook
 
 import (
-	"strings"
-
 	openfgav1 "github.com/openfga/api/proto/openfga/v1"
 	"k8s.io/apiserver/pkg/authorization/authorizer"
 )
 
-// buildGroupContextualTuples creates contextual tuples for user's group memberships
-func buildGroupContextualTuples(attributes authorizer.Attributes) []*openfgav1.TupleKey {
-	tuples := make([]*openfgav1.TupleKey, 0, len(attributes.GetUser().GetGroups()))
-
-	userUID := attributes.GetUser().GetUID()
-	for _, group := range attributes.GetUser().GetGroups() {
-		// Only add system and datum groups to contextual tuples
-		if !strings.HasPrefix(group, "system:") {
-			continue
-		}
-
-		// Escape colons in group names to match the format used in policy reconciler
-		escapedGroup := strings.ReplaceAll(group, ":", "_")
-		tuple := &openfgav1.TupleKey{
-			User:     "iam.miloapis.com/InternalUser:" + userUID,
-			Relation: "member",
-			Object:   "iam.miloapis.com/InternalUserGroup:" + escapedGroup,
-		}
-		tuples = append(tuples, tuple)
-	}
-
-	return tuples
+// buildGroupContextualTuples previously injected system group membership tuples
+// as contextual tuples on every Check request. System groups are now persisted
+// to OpenFGA as stored tuples by SystemGroupMaterializer so that OpenFGA's
+// check query cache can resolve them. This function returns an empty slice and
+// is kept only to avoid changing every call site at once.
+//
+// Non-system groups handled by the GroupMembership controller are already stored
+// tuples and do not need to appear as contextual tuples either.
+func buildGroupContextualTuples(_ authorizer.Attributes) []*openfgav1.TupleKey {
+	return nil
 }
 
-// buildRootBindingContextualTuple creates a root binding contextual tuple
-func buildRootBindingContextualTuple(rootResourceType, targetResource string) *openfgav1.TupleKey {
-	return &openfgav1.TupleKey{
-		User:     "iam.miloapis.com/Root:" + rootResourceType,
-		Relation: "iam.miloapis.com/RootBinding",
-		Object:   targetResource,
-	}
-}
-
-// buildAllContextualTuples creates all contextual tuples (root binding + groups)
-func buildAllContextualTuples(attributes authorizer.Attributes, rootResourceType, targetResource string) []*openfgav1.TupleKey {
-	var contextualTuples []*openfgav1.TupleKey
-
-	// Add root binding contextual tuple
-	rootBindingTuple := buildRootBindingContextualTuple(rootResourceType, targetResource)
-	contextualTuples = append(contextualTuples, rootBindingTuple)
-
-	// Add group contextual tuples
-	groupTuples := buildGroupContextualTuples(attributes)
-	contextualTuples = append(contextualTuples, groupTuples...)
-
-	return contextualTuples
+// buildAllContextualTuples creates all contextual tuples (group memberships).
+//
+// RootBinding tuples are no longer injected as contextual tuples because the
+// PolicyBinding reconciler writes them as stored tuples. Stored tuples are
+// eligible for OpenFGA's check query cache; contextual tuples are not.
+func buildAllContextualTuples(attributes authorizer.Attributes, _, _ string) []*openfgav1.TupleKey {
+	return buildGroupContextualTuples(attributes)
 }

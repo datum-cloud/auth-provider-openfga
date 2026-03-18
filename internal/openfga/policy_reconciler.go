@@ -94,6 +94,25 @@ func (r *PolicyReconciler) ReconcilePolicy(ctx context.Context, binding iamdatum
 		})
 	}
 
+	// For ResourceRef bindings, also write the RootBinding tuple so that it is
+	// stored in OpenFGA rather than injected as a per-request contextual tuple.
+	// Contextual tuples bypass OpenFGA's check query cache; storing the tuple
+	// allows OpenFGA to cache the resolution path and reduces cache-miss latency.
+	if binding.Spec.ResourceSelector.ResourceRef != nil {
+		ref := binding.Spec.ResourceSelector.ResourceRef
+		apiGroup := ref.APIGroup
+		kind := ref.Kind
+		resourceName := ref.Name
+		rootBindingTuple := &openfgav1.TupleKey{
+			User:     fmt.Sprintf("%s:%s/%s", TypeRoot, apiGroup, kind),
+			Relation: RelationRootBinding,
+			Object:   fmt.Sprintf("%s/%s:%s", apiGroup, kind, resourceName),
+		}
+		if ensureErr := r.ensureRootBindingTuple(ctx, rootBindingTuple); ensureErr != nil {
+			return fmt.Errorf("failed to ensure root binding tuple: %w", ensureErr)
+		}
+	}
+
 	added, removed := diffTuples(existingTuples, tuples)
 
 	writeReq := &openfgav1.WriteRequest{
@@ -121,6 +140,35 @@ func (r *PolicyReconciler) ReconcilePolicy(ctx context.Context, binding iamdatum
 		return fmt.Errorf("failed to write policy tuples: %w", err)
 	}
 
+	return nil
+}
+
+// ensureRootBindingTuple writes a RootBinding tuple to OpenFGA if it does not
+// already exist. This avoids duplicate-write errors on re-reconciliation while
+// ensuring the tuple is present so that it can be cached by OpenFGA.
+func (r *PolicyReconciler) ensureRootBindingTuple(ctx context.Context, rootTuple *openfgav1.TupleKey) error {
+	existing, err := getTupleKeys(ctx, r.StoreID, r.Client, &openfgav1.ReadRequestTupleKey{
+		User:     rootTuple.User,
+		Relation: rootTuple.Relation,
+		Object:   rootTuple.Object,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to check for existing root binding tuple: %w", err)
+	}
+	if len(existing) > 0 {
+		// Already present — nothing to do.
+		return nil
+	}
+
+	_, err = r.Client.Write(ctx, &openfgav1.WriteRequest{
+		StoreId: r.StoreID,
+		Writes: &openfgav1.WriteRequestWrites{
+			TupleKeys: []*openfgav1.TupleKey{rootTuple},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("failed to write root binding tuple: %w", err)
+	}
 	return nil
 }
 

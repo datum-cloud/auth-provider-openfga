@@ -670,13 +670,10 @@ func (o *SubjectAccessReviewAuthorizer) buildSpecificResourceAndTuples(attribute
 	// Build the fully qualified resource identifier
 	resource := fmt.Sprintf("%s/%s:%s", protectedResource.Spec.ServiceRef.Name, protectedResource.Spec.Kind, attributes.GetName())
 
-	// Start with root binding and group tuples
-	rootResourceType := fmt.Sprintf("%s/%s", protectedResource.Spec.ServiceRef.Name, protectedResource.Spec.Kind)
-	rootBindingTuple := buildRootBindingContextualTuple(rootResourceType, resource)
-	groupTuples := buildGroupContextualTuples(attributes)
-
-	contextualTuples := []*openfgav1.TupleKey{rootBindingTuple}
-	contextualTuples = append(contextualTuples, groupTuples...)
+	// RootBinding tuples are now stored in OpenFGA by the PolicyBinding reconciler
+	// and no longer need to be injected as contextual tuples. Stored tuples are
+	// eligible for OpenFGA's check query cache; contextual tuples bypass it.
+	var contextualTuples []*openfgav1.TupleKey
 
 	// Add parent tuple if parent resource is registered
 	parentResource, err := o.buildParentResource(attributes)
