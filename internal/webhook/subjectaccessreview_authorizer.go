@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"slices"
 	"strconv"
-	"strings"
 	"time"
 
 	openfgav1 "github.com/openfga/api/proto/openfga/v1"
@@ -487,7 +486,6 @@ func (o *SubjectAccessReviewAuthorizer) executeOpenFGACheck(ctx context.Context,
 		slog.String("user", checkReq.TupleKey.User),
 		slog.String("resource", checkReq.TupleKey.Object),
 		slog.String("relation", checkReq.TupleKey.Relation),
-		slog.Any("contextual_tuples", checkReq.ContextualTuples),
 	)
 
 	resp, err := o.FGAClient.Check(ctx, checkReq)
@@ -511,29 +509,24 @@ func (o *SubjectAccessReviewAuthorizer) executeOpenFGACheck(ctx context.Context,
 	return authorizer.DecisionDeny, "", nil
 }
 
-// buildOpenFGARequest creates the appropriate OpenFGA check request based on the authorization context
+// buildOpenFGARequest creates the OpenFGA Check request for a given authorization
+// context.
+//
+// Under the direct-permission model all tuples are stored in OpenFGA at
+// PolicyBinding reconciliation time, so no contextual tuples are needed here.
+// The Check is simply:
+//
+//	Check(InternalUser:<uid>, hash(svc/resource.verb), <resource-object>)
 func (o *SubjectAccessReviewAuthorizer) buildOpenFGARequest(ctx context.Context, attributes authorizer.Attributes, authCtx *authorizationContext) (*openfgav1.CheckRequest, error) {
 	user := fmt.Sprintf("iam.miloapis.com/InternalUser:%s", authCtx.userUID)
 	relation := o.buildHashedPermissionRelation(attributes)
 
-	var resource string
-	var contextualTuples []*openfgav1.TupleKey
-
-	if authCtx.isProjectScope() {
-		// Project-scoped authorization: authorize against the project resource
-		resource = fmt.Sprintf("resourcemanager.miloapis.com/Project:%s", authCtx.getProjectName())
-		rootResourceType := "resourcemanager.miloapis.com/Project"
-		contextualTuples = buildAllContextualTuples(attributes, rootResourceType, resource)
-	} else {
-		// Regular authorization: build resource and contextual tuples based on request type
-		var err error
-		resource, contextualTuples, err = o.buildResourceAndContextualTuples(ctx, attributes)
-		if err != nil {
-			return nil, err
-		}
+	resource, err := o.buildResourceObject(ctx, attributes, authCtx)
+	if err != nil {
+		return nil, err
 	}
 
-	checkReq := &openfgav1.CheckRequest{
+	return &openfgav1.CheckRequest{
 		StoreId:              o.FGAStoreID,
 		AuthorizationModelId: o.AuthorizationModelID,
 		TupleKey: &openfgav1.CheckRequestTupleKey{
@@ -541,15 +534,50 @@ func (o *SubjectAccessReviewAuthorizer) buildOpenFGARequest(ctx context.Context,
 			Relation: relation,
 			Object:   resource,
 		},
+		// No contextual tuples — all relationships are stored tuples written at
+		// PolicyBinding reconciliation time, making them eligible for OpenFGA's
+		// check query cache.
+	}, nil
+}
+
+// buildResourceObject determines the OpenFGA object string for the request.
+//
+// The lookup priority is:
+//  1. Project-scoped requests → authorize against the project object.
+//  2. Requests with a specific resource name → authorize against that instance.
+//  3. Collection operations with a parent context → authorize against the parent.
+//  4. Collection operations without a parent → authorize against the kind-level
+//     root object (TypeRoot:<apiGroup/Kind>).
+func (o *SubjectAccessReviewAuthorizer) buildResourceObject(ctx context.Context, attributes authorizer.Attributes, authCtx *authorizationContext) (string, error) {
+	// Project-scoped requests are resolved against the project.
+	if authCtx.isProjectScope() {
+		return fmt.Sprintf("resourcemanager.miloapis.com/Project:%s", authCtx.getProjectName()), nil
 	}
 
-	if len(contextualTuples) > 0 {
-		checkReq.ContextualTuples = &openfgav1.ContextualTupleKeys{
-			TupleKeys: contextualTuples,
-		}
+	// Organization-scoped requests are resolved against the organization.
+	if authCtx.isOrganizationScope() {
+		return fmt.Sprintf("resourcemanager.miloapis.com/Organization:%s", authCtx.getOrganizationName()), nil
 	}
 
-	return checkReq, nil
+	protectedResource, err := o.getProtectedResource(ctx, attributes)
+	if err != nil {
+		return "", fmt.Errorf("failed to get protected resource: %w", err)
+	}
+
+	// Specific resource operations — resolve to the named instance.
+	isCollectionOp := slices.Contains([]string{"list", "create", "watch"}, attributes.GetVerb()) || attributes.GetName() == ""
+	if !isCollectionOp {
+		return fmt.Sprintf("%s/%s:%s", protectedResource.Spec.ServiceRef.Name, protectedResource.Spec.Kind, attributes.GetName()), nil
+	}
+
+	// Collection operations — use parent if available, else kind-level root.
+	parentResource, err := o.buildParentResource(attributes)
+	if err == nil {
+		return parentResource, nil
+	}
+
+	// Fallback: kind-level root for ResourceKind policy bindings.
+	return o.buildRootResource(protectedResource), nil
 }
 
 // validatePermissionWithServiceDefaulting validates permissions with consistent service name defaulting.
@@ -633,88 +661,6 @@ func (o *SubjectAccessReviewAuthorizer) buildRootResource(protectedResource *iam
 	// where resource_type is "{APIGroup}/{Kind}" format used by the authorization model
 	resourceType := fmt.Sprintf("%s/%s", protectedResource.Spec.ServiceRef.Name, protectedResource.Spec.Kind)
 	return fmt.Sprintf("iam.miloapis.com/Root:%s", resourceType)
-}
-
-func (o *SubjectAccessReviewAuthorizer) buildParentResourceType(attributes authorizer.Attributes) (string, error) {
-	// Extract parent resource type from the extra data
-	user := attributes.GetUser()
-	extra := user.GetExtra()
-
-	parentAPIGroup, ok := extra["iam.miloapis.com/parent-api-group"]
-	if !ok || len(parentAPIGroup) == 0 {
-		return "", fmt.Errorf("missing iam.miloapis.com/parent-api-group in extra data")
-	}
-
-	parentType, ok := extra["iam.miloapis.com/parent-type"]
-	if !ok || len(parentType) == 0 {
-		return "", fmt.Errorf("missing iam.miloapis.com/parent-type in extra data")
-	}
-
-	return fmt.Sprintf("%s/%s", parentAPIGroup[0], parentType[0]), nil
-}
-
-// buildResourceAndContextualTuples builds the resource identifier and contextual tuples for regular (non-project) authorization
-func (o *SubjectAccessReviewAuthorizer) buildResourceAndContextualTuples(ctx context.Context, attributes authorizer.Attributes) (string, []*openfgav1.TupleKey, error) {
-	// Get the ProtectedResource to understand the correct resource structure
-	protectedResource, err := o.getProtectedResource(ctx, attributes)
-	if err != nil {
-		return "", nil, fmt.Errorf("failed to get protected resource: %w", err)
-	}
-
-	// Handle collection operations (list, create, watch) or requests without specific resource name
-	if slices.Contains([]string{"list", "create", "watch"}, attributes.GetVerb()) || attributes.GetName() == "" {
-		return o.buildCollectionResourceAndTuples(attributes, protectedResource)
-	}
-
-	// Handle specific resource operations (get, update, delete, patch)
-	return o.buildSpecificResourceAndTuples(attributes, protectedResource)
-}
-
-// buildCollectionResourceAndTuples handles collection operations like list, create, watch
-func (o *SubjectAccessReviewAuthorizer) buildCollectionResourceAndTuples(attributes authorizer.Attributes, protectedResource *iamv1alpha1.ProtectedResource) (string, []*openfgav1.TupleKey, error) {
-	// Try to get parent resource from context first
-	parentResource, err := o.buildParentResource(attributes)
-	if err != nil {
-		// Fallback to using root resource for ResourceKind policy bindings
-		rootResource := o.buildRootResource(protectedResource)
-		groupTuples := buildGroupContextualTuples(attributes)
-		return rootResource, groupTuples, nil
-	}
-
-	// Using parent resource - build all contextual tuples
-	parentResourceType, err := o.buildParentResourceType(attributes)
-	if err != nil {
-		// If we can't determine parent type, use only group tuples
-		groupTuples := buildGroupContextualTuples(attributes)
-		return parentResource, groupTuples, nil
-	}
-
-	contextualTuples := buildAllContextualTuples(attributes, parentResourceType, parentResource)
-	return parentResource, contextualTuples, nil
-}
-
-// buildSpecificResourceAndTuples handles specific resource operations like get, update, delete
-func (o *SubjectAccessReviewAuthorizer) buildSpecificResourceAndTuples(attributes authorizer.Attributes, protectedResource *iamv1alpha1.ProtectedResource) (string, []*openfgav1.TupleKey, error) {
-	// Build the fully qualified resource identifier
-	resource := fmt.Sprintf("%s/%s:%s", protectedResource.Spec.ServiceRef.Name, protectedResource.Spec.Kind, attributes.GetName())
-
-	// RootBinding tuples are now stored in OpenFGA by the PolicyBinding reconciler
-	// and no longer need to be injected as contextual tuples. Stored tuples are
-	// eligible for OpenFGA's check query cache; contextual tuples bypass it.
-	var contextualTuples []*openfgav1.TupleKey
-
-	// Add parent tuple if parent resource is registered
-	parentResource, err := o.buildParentResource(attributes)
-	if err == nil && o.isParentResourceRegistered(protectedResource, parentResource) {
-		parentTuple := &openfgav1.TupleKey{
-			User:     parentResource,
-			Relation: "parent",
-			Object:   resource,
-		}
-		contextualTuples = append(contextualTuples, parentTuple)
-	}
-
-	return resource, contextualTuples, nil
 }
 
 // buildHashedPermissionRelation builds a hashed permission relation for OpenFGA
@@ -888,34 +834,4 @@ func (o *SubjectAccessReviewAuthorizer) executeParallelProjectCheck(
 
 	span.SetAttributes(attribute.Bool("openfga.allowed", false))
 	return authorizer.DecisionDeny, "", nil
-}
-
-// isParentResourceRegistered checks if the given parent resource type is registered
-// in the ProtectedResource's ParentResources list
-func (o *SubjectAccessReviewAuthorizer) isParentResourceRegistered(protectedResource *iamv1alpha1.ProtectedResource, parentResource string) bool {
-	// Extract the parent resource type from the parent resource string
-	// Parent resource format: "{APIGroup}/{Kind}:{Name}" (e.g., "resourcemanager.miloapis.com/Organization:org-123")
-	// We need to extract the "{APIGroup}/{Kind}" part
-	parts := strings.Split(parentResource, ":")
-	if len(parts) != 2 {
-		return false
-	}
-	parentResourceType := parts[0] // This is "{APIGroup}/{Kind}"
-
-	// Split the parent resource type into APIGroup and Kind
-	typeParts := strings.Split(parentResourceType, "/")
-	if len(typeParts) != 2 {
-		return false
-	}
-	parentAPIGroup := typeParts[0]
-	parentKind := typeParts[1]
-
-	// Check if this parent resource type is registered in the ProtectedResource
-	for _, parentRef := range protectedResource.Spec.ParentResources {
-		if parentRef.APIGroup == parentAPIGroup && parentRef.Kind == parentKind {
-			return true
-		}
-	}
-
-	return false
 }

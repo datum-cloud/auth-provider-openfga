@@ -10,128 +10,38 @@ import (
 	openfgav1 "github.com/openfga/api/proto/openfga/v1"
 )
 
+// RoleReconciler manages the OpenFGA representation of Roles.
+//
+// Under the direct-permission model, permissions are written as individual
+// tuples at PolicyBinding reconciliation time (see PolicyReconciler). A Role no
+// longer has its own OpenFGA object; its permissions are "inlined" into each
+// binding tuple.
+//
+// ReconcileRole is therefore a no-op for OpenFGA writes. The struct is retained
+// so that the controller layer can still call DeleteRole during finalization to
+// clean up any legacy InternalRole tuples that may exist from a previous model
+// version.
 type RoleReconciler struct {
 	StoreID      string
 	OpenFGA      openfgav1.OpenFGAServiceClient
 	ControlPlane client.Client
 }
 
-func (r *RoleReconciler) getAllPermissions(ctx context.Context, role *iamdatumapiscomv1alpha1.Role, visited map[string]struct{}) ([]string, error) {
-	if visited == nil {
-		visited = make(map[string]struct{})
-	}
-
-	roleIdentifier := role.Namespace + "/" + role.Name // Ensure uniqueness for visited roles across namespaces
-	if _, ok := visited[roleIdentifier]; ok {
-		return nil, nil // Prevent cycles
-	}
-	visited[roleIdentifier] = struct{}{}
-
-	// Use a set to ensure permissions are unique
-	permissionSet := make(map[string]struct{})
-	for _, p := range role.Spec.IncludedPermissions {
-		permissionSet[p] = struct{}{}
-	}
-
-	for _, inheritedRoleRef := range role.Spec.InheritedRoles {
-
-		inheritedRole := &iamdatumapiscomv1alpha1.Role{}
-		// Determine the namespace for the inherited role.
-		// Default to the current role's namespace if not specified.
-		namespace := role.Namespace
-		if inheritedRoleRef.Namespace != "" {
-			namespace = inheritedRoleRef.Namespace
-		}
-
-		err := r.ControlPlane.Get(ctx, client.ObjectKey{
-			Namespace: namespace,
-			Name:      inheritedRoleRef.Name,
-		}, inheritedRole)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get inherited role %s/%s: %w", namespace, inheritedRoleRef.Name, err)
-		}
-
-		inheritedPerms, err := r.getAllPermissions(ctx, inheritedRole, visited)
-		if err != nil {
-			return nil, err
-		}
-
-		// Add inherited permissions to the set to ensure uniqueness
-		for _, p := range inheritedPerms {
-			permissionSet[p] = struct{}{}
-		}
-	}
-
-	// Convert set back to slice
-	permissions := make([]string, 0, len(permissionSet))
-	for p := range permissionSet {
-		permissions = append(permissions, p)
-	}
-
-	return permissions, nil
-}
-
-func (r *RoleReconciler) ReconcileRole(ctx context.Context, role *iamdatumapiscomv1alpha1.Role) error {
-	// Use Role UID for the object identifier
-	roleObjectIdentifier := TypeInternalRole + ":" + string(role.UID)
-
-	existingTupleKeys, err := getTupleKeys(ctx, r.StoreID, r.OpenFGA, &openfgav1.ReadRequestTupleKey{
-		Object: roleObjectIdentifier,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to get existing tuples: %w", err)
-	}
-
-	allPermissions, err := r.getAllPermissions(ctx, role, nil)
-	if err != nil {
-		return fmt.Errorf("failed to collect permissions: %w", err)
-	}
-
-	expectedTuples := make([]*openfgav1.TupleKey, 0, len(allPermissions))
-	for _, permission := range allPermissions {
-		expectedTuples = append(
-			expectedTuples,
-			&openfgav1.TupleKey{
-				User:     TypeInternalUser + ":*",
-				Relation: hashPermission(permission),
-				Object:   roleObjectIdentifier,
-			},
-		)
-	}
-
-	added, removed := diffTuples(existingTupleKeys, expectedTuples)
-
-	// Don't do anything if there's no changes to make.
-	if len(added) == 0 && len(removed) == 0 {
-		return nil
-	}
-
-	req := &openfgav1.WriteRequest{
-		StoreId: r.StoreID,
-	}
-
-	if len(removed) > 0 {
-		req.Deletes = &openfgav1.WriteRequestDeletes{
-			TupleKeys: convertTuplesForDelete(removed),
-		}
-	}
-
-	if len(added) > 0 {
-		req.Writes = &openfgav1.WriteRequestWrites{
-			TupleKeys: added,
-		}
-	}
-
-	_, err = r.OpenFGA.Write(ctx, req)
-	if err != nil {
-		return fmt.Errorf("failed to reconcile roles: %w", err)
-	}
-
+// ReconcileRole is a no-op under the direct-permission model. Previously this
+// wrote wildcard InternalUser:* permission tuples on an InternalRole object so
+// that the RoleBinding intersection could resolve them. Those tuples are no
+// longer needed because permissions are inlined into PolicyBinding tuples.
+//
+// Keeping this method allows the controller layer to remain unchanged.
+func (r *RoleReconciler) ReconcileRole(_ context.Context, _ *iamdatumapiscomv1alpha1.Role) error {
 	return nil
 }
 
+// DeleteRole removes any legacy InternalRole permission tuples that may have
+// been written by a previous version of this reconciler. In a fresh deployment
+// with the direct-permission model there will be nothing to delete.
 func (r *RoleReconciler) DeleteRole(ctx context.Context, role iamdatumapiscomv1alpha1.Role) error {
-	// Use Role UID for the object identifier
+	// Use Role UID for the legacy object identifier
 	roleObjectIdentifier := TypeInternalRole + ":" + string(role.UID)
 
 	existingTupleKeys, err := getTupleKeys(ctx, r.StoreID, r.OpenFGA, &openfgav1.ReadRequestTupleKey{
