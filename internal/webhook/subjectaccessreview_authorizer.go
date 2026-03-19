@@ -10,12 +10,14 @@ import (
 	"time"
 
 	openfgav1 "github.com/openfga/api/proto/openfga/v1"
+	"go.miloapis.com/auth-provider-openfga/internal/features"
 	"go.miloapis.com/auth-provider-openfga/internal/openfga"
 	iamv1alpha1 "go.miloapis.com/milo/pkg/apis/iam/v1alpha1"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"k8s.io/apiserver/pkg/authorization/authorizer"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/client-go/discovery"
 )
 
@@ -473,15 +475,30 @@ func (o *SubjectAccessReviewAuthorizer) executeOpenFGACheck(ctx context.Context,
 	return authorizer.DecisionDeny, "", nil
 }
 
-// buildOpenFGARequest creates the OpenFGA Check request for a given authorization
-// context.
+// buildOpenFGARequest creates the OpenFGA Check request for a given
+// authorization context.
 //
-// Under the direct-permission model all tuples are stored in OpenFGA at
-// PolicyBinding reconciliation time, so no contextual tuples are needed here.
-// The Check is simply:
+// The request shape depends on which feature gates are active:
 //
-//	Check(InternalUser:<uid>, hash(svc/resource.verb), <resource-object>)
+//   - DirectPermissionTuples=true (default): all relationships are stored as
+//     persistent tuples written at PolicyBinding reconciliation time, so no
+//     contextual tuples are needed. The Check is simply:
+//     Check(InternalUser:<uid>, hash(svc/resource.verb), <resource-object>)
+//
+//   - DirectPermissionTuples=false, LegacyRoleBindingModel=true: the old
+//     model requires contextual tuples to inject the root-binding link and
+//     group memberships on each request.
 func (o *SubjectAccessReviewAuthorizer) buildOpenFGARequest(ctx context.Context, attributes authorizer.Attributes, authCtx *authorizationContext) (*openfgav1.CheckRequest, error) {
+	if utilfeature.DefaultFeatureGate.Enabled(features.DirectPermissionTuples) {
+		return o.buildDirectPermissionCheckRequest(ctx, attributes, authCtx)
+	}
+	return o.buildLegacyCheckRequest(ctx, attributes, authCtx)
+}
+
+// buildDirectPermissionCheckRequest builds a Check request for the
+// direct-permission model. No contextual tuples are needed because all
+// relationships are stored at reconciliation time.
+func (o *SubjectAccessReviewAuthorizer) buildDirectPermissionCheckRequest(ctx context.Context, attributes authorizer.Attributes, authCtx *authorizationContext) (*openfgav1.CheckRequest, error) {
 	user := fmt.Sprintf("iam.miloapis.com/InternalUser:%s", authCtx.userUID)
 	relation := o.buildHashedPermissionRelation(attributes)
 
@@ -507,6 +524,144 @@ func (o *SubjectAccessReviewAuthorizer) buildOpenFGARequest(ctx context.Context,
 		// PolicyBinding reconciliation time, making them eligible for OpenFGA's
 		// check query cache.
 	}, nil
+}
+
+// buildLegacyCheckRequest builds a Check request for the legacy RoleBinding
+// model. It injects contextual tuples for the root-binding link and for the
+// user's system group memberships on every request.
+func (o *SubjectAccessReviewAuthorizer) buildLegacyCheckRequest(ctx context.Context, attributes authorizer.Attributes, authCtx *authorizationContext) (*openfgav1.CheckRequest, error) {
+	user := fmt.Sprintf("iam.miloapis.com/InternalUser:%s", authCtx.userUID)
+	relation := o.buildHashedPermissionRelation(attributes)
+
+	var resource string
+	var contextualTuples []*openfgav1.TupleKey
+
+	if authCtx.isProjectScope() {
+		resource = fmt.Sprintf("resourcemanager.miloapis.com/Project:%s", authCtx.getProjectName())
+		rootResourceType := "resourcemanager.miloapis.com/Project"
+		contextualTuples = buildAllContextualTuples(attributes, rootResourceType, resource)
+	} else {
+		var err error
+		resource, contextualTuples, err = o.buildLegacyResourceAndContextualTuples(ctx, attributes)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	var modelID string
+	if o.ModelIDWatcher != nil {
+		modelID = o.ModelIDWatcher.GetModelID()
+	}
+
+	checkReq := &openfgav1.CheckRequest{
+		StoreId:              o.FGAStoreID,
+		AuthorizationModelId: modelID,
+		TupleKey: &openfgav1.CheckRequestTupleKey{
+			User:     user,
+			Relation: relation,
+			Object:   resource,
+		},
+	}
+
+	if len(contextualTuples) > 0 {
+		checkReq.ContextualTuples = &openfgav1.ContextualTupleKeys{
+			TupleKeys: contextualTuples,
+		}
+	}
+
+	return checkReq, nil
+}
+
+// buildLegacyResourceAndContextualTuples builds the resource identifier and
+// contextual tuples for a non-project-scoped request under the legacy model.
+func (o *SubjectAccessReviewAuthorizer) buildLegacyResourceAndContextualTuples(ctx context.Context, attributes authorizer.Attributes) (string, []*openfgav1.TupleKey, error) {
+	protectedResource, err := o.getProtectedResource(ctx, attributes)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to get protected resource: %w", err)
+	}
+
+	isCollectionOp := slices.Contains([]string{"list", "create", "watch"}, attributes.GetVerb()) || attributes.GetName() == ""
+	if isCollectionOp {
+		return o.buildLegacyCollectionResourceAndTuples(attributes, protectedResource)
+	}
+	return o.buildLegacySpecificResourceAndTuples(attributes, protectedResource)
+}
+
+// buildLegacyCollectionResourceAndTuples handles list/create/watch under the
+// legacy model.
+func (o *SubjectAccessReviewAuthorizer) buildLegacyCollectionResourceAndTuples(attributes authorizer.Attributes, protectedResource *iamv1alpha1.ProtectedResource) (string, []*openfgav1.TupleKey, error) {
+	parentResource, err := o.buildParentResource(attributes)
+	if err != nil {
+		// Fall back to the root resource for ResourceKind policy bindings.
+		rootResource := o.buildRootResource(protectedResource)
+		groupTuples := buildGroupContextualTuples(attributes)
+		return rootResource, groupTuples, nil
+	}
+
+	parentResourceType, err := o.buildLegacyParentResourceType(attributes)
+	if err != nil {
+		groupTuples := buildGroupContextualTuples(attributes)
+		return parentResource, groupTuples, nil
+	}
+
+	contextualTuples := buildAllContextualTuples(attributes, parentResourceType, parentResource)
+	return parentResource, contextualTuples, nil
+}
+
+// buildLegacySpecificResourceAndTuples handles get/update/delete/patch under
+// the legacy model.
+func (o *SubjectAccessReviewAuthorizer) buildLegacySpecificResourceAndTuples(attributes authorizer.Attributes, protectedResource *iamv1alpha1.ProtectedResource) (string, []*openfgav1.TupleKey, error) {
+	resource := fmt.Sprintf("%s/%s:%s", protectedResource.Spec.ServiceRef.Name, protectedResource.Spec.Kind, attributes.GetName())
+
+	rootResourceType := fmt.Sprintf("%s/%s", protectedResource.Spec.ServiceRef.Name, protectedResource.Spec.Kind)
+	rootBindingTuple := buildRootBindingContextualTuple(rootResourceType, resource)
+	groupTuples := buildGroupContextualTuples(attributes)
+
+	contextualTuples := []*openfgav1.TupleKey{rootBindingTuple}
+	contextualTuples = append(contextualTuples, groupTuples...)
+
+	// Add parent tuple if parent resource is specified and matches the
+	// protected resource's parent list.
+	parentResource, err := o.buildParentResource(attributes)
+	if err == nil && o.isLegacyParentResourceRegistered(protectedResource, parentResource) {
+		contextualTuples = append(contextualTuples, &openfgav1.TupleKey{
+			User:     parentResource,
+			Relation: "parent",
+			Object:   resource,
+		})
+	}
+
+	return resource, contextualTuples, nil
+}
+
+// buildLegacyParentResourceType extracts the parent resource type string from
+// extra data using the legacy extra keys.
+func (o *SubjectAccessReviewAuthorizer) buildLegacyParentResourceType(attributes authorizer.Attributes) (string, error) {
+	extra := attributes.GetUser().GetExtra()
+
+	parentAPIGroup, ok := extra["iam.miloapis.com/parent-api-group"]
+	if !ok || len(parentAPIGroup) == 0 {
+		return "", fmt.Errorf("missing iam.miloapis.com/parent-api-group in extra data")
+	}
+
+	parentType, ok := extra["iam.miloapis.com/parent-type"]
+	if !ok || len(parentType) == 0 {
+		return "", fmt.Errorf("missing iam.miloapis.com/parent-type in extra data")
+	}
+
+	return fmt.Sprintf("%s/%s", parentAPIGroup[0], parentType[0]), nil
+}
+
+// isLegacyParentResourceRegistered checks whether the given parent resource
+// string matches one of the parent types registered on the ProtectedResource.
+func (o *SubjectAccessReviewAuthorizer) isLegacyParentResourceRegistered(pr *iamv1alpha1.ProtectedResource, parentResource string) bool {
+	for _, parent := range pr.Spec.ParentResources {
+		parentType := fmt.Sprintf("%s/%s", parent.APIGroup, parent.Kind)
+		if len(parentResource) >= len(parentType) && parentResource[:len(parentType)] == parentType {
+			return true
+		}
+	}
+	return false
 }
 
 // buildResourceObject determines the OpenFGA object string for the request.

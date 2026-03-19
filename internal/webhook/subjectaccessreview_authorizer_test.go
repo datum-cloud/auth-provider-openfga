@@ -9,13 +9,16 @@ import (
 	openfgav1 "github.com/openfga/api/proto/openfga/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.miloapis.com/auth-provider-openfga/internal/features"
 	"go.miloapis.com/auth-provider-openfga/internal/webhook"
 	iamv1alpha1 "go.miloapis.com/milo/pkg/apis/iam/v1alpha1"
 	"google.golang.org/grpc"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apiserver/pkg/authentication/user"
 	"k8s.io/apiserver/pkg/authorization/authorizer"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/client-go/discovery"
+	featuregatetesting "k8s.io/component-base/featuregate/testing"
 )
 
 // mockAttributes is a simple mock for authorizer.Attributes
@@ -74,6 +77,9 @@ func (m *mockDiscoveryClient) ServerResourcesForGroupVersion(groupVersion string
 }
 
 func TestSubjectAccessReviewAuthorizer_Authorize_Integration(t *testing.T) {
+	// Enable the direct permission tuple model for these tests.
+	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.DirectPermissionTuples, true)
+	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.LegacyRoleBindingModel, false)
 	testCases := []struct {
 		name               string
 		attributes         authorizer.Attributes

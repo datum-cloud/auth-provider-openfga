@@ -10,6 +10,7 @@ import (
 
 	openfgav1 "github.com/openfga/api/proto/openfga/v1"
 	"github.com/spf13/cobra"
+	_ "go.miloapis.com/auth-provider-openfga/internal/features" // register feature gates
 	"go.miloapis.com/auth-provider-openfga/internal/telemetry"
 	"go.miloapis.com/auth-provider-openfga/internal/webhook"
 	iamv1alpha1 "go.miloapis.com/milo/pkg/apis/iam/v1alpha1"
@@ -21,6 +22,7 @@ import (
 	"k8s.io/api/authentication/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/client-go/discovery/cached/disk"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -82,6 +84,8 @@ func createWebhookCommand() *cobra.Command {
 		"Namespace to watch for the authorization model ConfigMap. Defaults to the POD_NAMESPACE environment variable.")
 	cmd.Flags().StringVar(&configmapName, "configmap-name", "openfga-authorization-model",
 		"Name of the ConfigMap that stores the current authorization model ID.")
+
+	utilfeature.DefaultMutableFeatureGate.AddFlag(cmd.Flags())
 
 	// Mark required flags
 	if err := cmd.MarkFlagRequired("openfga-api-url"); err != nil {
