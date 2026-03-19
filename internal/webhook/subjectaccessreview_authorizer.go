@@ -480,16 +480,20 @@ func (o *SubjectAccessReviewAuthorizer) executeOpenFGACheck(ctx context.Context,
 //
 // The request shape depends on which feature gates are active:
 //
-//   - DirectPermissionTuples=true (default): all relationships are stored as
-//     persistent tuples written at PolicyBinding reconciliation time, so no
-//     contextual tuples are needed. The Check is simply:
+//   - DirectPermissionTuples=true AND LegacyRoleBindingModel=false: all
+//     relationships are stored as persistent tuples written at PolicyBinding
+//     reconciliation time, so no contextual tuples are needed. The Check is:
 //     Check(InternalUser:<uid>, hash(svc/resource.verb), <resource-object>)
 //
-//   - DirectPermissionTuples=false, LegacyRoleBindingModel=true: the old
-//     model requires contextual tuples to inject the root-binding link and
-//     group memberships on each request.
+//   - LegacyRoleBindingModel=true (regardless of DirectPermissionTuples): the
+//     old model is used for checks, which requires contextual tuples to inject
+//     the root-binding link and group memberships on each request. This ensures
+//     safe dual-write migration: the controller writes both tuple formats, but
+//     checks continue using the proven legacy path until the legacy model is
+//     fully disabled.
 func (o *SubjectAccessReviewAuthorizer) buildOpenFGARequest(ctx context.Context, attributes authorizer.Attributes, authCtx *authorizationContext) (*openfgav1.CheckRequest, error) {
-	if utilfeature.DefaultFeatureGate.Enabled(features.DirectPermissionTuples) {
+	if utilfeature.DefaultFeatureGate.Enabled(features.DirectPermissionTuples) &&
+		!utilfeature.DefaultFeatureGate.Enabled(features.LegacyRoleBindingModel) {
 		return o.buildDirectPermissionCheckRequest(ctx, attributes, authCtx)
 	}
 	return o.buildLegacyCheckRequest(ctx, attributes, authCtx)

@@ -5,9 +5,15 @@ import (
 	"fmt"
 	"log/slog"
 	"sync/atomic"
+	"time"
 
 	"go.miloapis.com/auth-provider-openfga/internal/openfga"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/client-go/informers"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	toolscache "k8s.io/client-go/tools/cache"
 	ctrl "sigs.k8s.io/controller-runtime"
 )
@@ -16,10 +22,10 @@ import (
 // and keeps an up-to-date copy of the model ID in memory. The stored value is
 // updated atomically so reads on the authorization hot-path never block.
 //
-// The watcher is backed by a controller-runtime informer scoped to the
-// ConfigMap with the configured name in the given
-// namespace. When the ConfigMap is created or updated the new model ID is
-// stored immediately; the previous value is discarded.
+// The watcher is backed by a Kubernetes informer scoped to the ConfigMap with
+// the configured name in the given namespace. When the ConfigMap is created or
+// updated the new model ID is stored immediately; the previous value is
+// discarded.
 type AuthorizationModelIDWatcher struct {
 	// modelID holds the current authorization model ID as a string. atomic.Value
 	// is used so GetModelID can be called from multiple goroutines without a
@@ -27,6 +33,10 @@ type AuthorizationModelIDWatcher struct {
 	modelID atomic.Value
 	// configMapName is the name of the ConfigMap to watch for model ID updates.
 	configMapName string
+	// stopCh is used to stop a standalone informer when one was created via
+	// NewAuthorizationModelIDWatcherWithConfig. It is nil when using the
+	// manager-backed constructor.
+	stopCh chan struct{}
 }
 
 // NewAuthorizationModelIDWatcher creates an AuthorizationModelIDWatcher and
@@ -55,7 +65,73 @@ func NewAuthorizationModelIDWatcher(ctx context.Context, mgr ctrl.Manager, names
 		return nil, fmt.Errorf("failed to get ConfigMap informer: %w", err)
 	}
 
-	if _, err := informer.AddEventHandler(toolscache.ResourceEventHandlerFuncs{
+	w.addEventHandler(informer)
+
+	return w, nil
+}
+
+// NewAuthorizationModelIDWatcherWithConfig creates an AuthorizationModelIDWatcher
+// using a dedicated rest.Config instead of the manager's cache. This is useful
+// when the manager's KUBECONFIG points to a remote cluster (e.g. a control
+// plane) but the ConfigMap resides on the local workload cluster.
+//
+// The informer is started in a background goroutine and stopped when ctx is
+// cancelled.
+func NewAuthorizationModelIDWatcherWithConfig(ctx context.Context, cfg *rest.Config, namespace, configMapName, seedModelID string) (*AuthorizationModelIDWatcher, error) {
+	if configMapName == "" {
+		return nil, fmt.Errorf("configMapName is required")
+	}
+
+	clientset, err := kubernetes.NewForConfig(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create kubernetes clientset for ConfigMap watcher: %w", err)
+	}
+
+	// Create a namespace-scoped informer factory filtered to just the target
+	// ConfigMap to minimise memory and API load.
+	factory := informers.NewSharedInformerFactoryWithOptions(
+		clientset,
+		30*time.Second,
+		informers.WithNamespace(namespace),
+		informers.WithTweakListOptions(func(opts *metav1.ListOptions) {
+			opts.FieldSelector = fields.OneTermEqualSelector("metadata.name", configMapName).String()
+		}),
+	)
+
+	w := &AuthorizationModelIDWatcher{
+		configMapName: configMapName,
+		stopCh:        make(chan struct{}),
+	}
+
+	if seedModelID != "" {
+		w.modelID.Store(seedModelID)
+	}
+
+	informer := factory.Core().V1().ConfigMaps().Informer()
+	w.addEventHandler(informer)
+
+	// Start the informer in the background.
+	go factory.Start(w.stopCh)
+
+	// Stop the informer when the context is cancelled.
+	go func() {
+		<-ctx.Done()
+		close(w.stopCh)
+	}()
+
+	return w, nil
+}
+
+// informerWithEventHandler is the subset of informer interfaces needed to
+// register event handlers. Both controller-runtime cache.Informer and
+// client-go cache.SharedIndexInformer satisfy this interface.
+type informerWithEventHandler interface {
+	AddEventHandler(handler toolscache.ResourceEventHandler) (toolscache.ResourceEventHandlerRegistration, error)
+}
+
+// addEventHandler registers the ConfigMap event handlers on the given informer.
+func (w *AuthorizationModelIDWatcher) addEventHandler(informer informerWithEventHandler) {
+	informer.AddEventHandler(toolscache.ResourceEventHandlerFuncs{ //nolint:errcheck
 		AddFunc: func(obj interface{}) {
 			w.handleConfigMap(obj)
 		},
@@ -65,11 +141,7 @@ func NewAuthorizationModelIDWatcher(ctx context.Context, mgr ctrl.Manager, names
 		// Deletions are intentionally ignored: the model ID remains in memory
 		// so that in-flight requests can still be pinned to a model ID even if
 		// the ConfigMap is transiently absent.
-	}); err != nil {
-		return nil, fmt.Errorf("failed to add event handler to ConfigMap informer: %w", err)
-	}
-
-	return w, nil
+	})
 }
 
 // GetModelID returns the most recently observed authorization model ID, or an

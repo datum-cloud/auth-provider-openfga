@@ -15,8 +15,10 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
+	"k8s.io/client-go/rest"
 
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -199,6 +201,20 @@ func runManager(
 		return fmt.Errorf("unable to create controller ResourceOwnerHierarchy: %w", err)
 	}
 
+	// Create an in-cluster client for ConfigMap operations. The manager's
+	// primary client uses KUBECONFIG which may point to a remote control plane,
+	// but the ConfigMap must be written to the local workload cluster where the
+	// webhook pod watches it.
+	var configMapClient client.Client
+	if inClusterConfig, inClusterErr := rest.InClusterConfig(); inClusterErr == nil {
+		configMapClient, err = client.New(inClusterConfig, client.Options{Scheme: scheme})
+		if err != nil {
+			return fmt.Errorf("unable to create in-cluster client for ConfigMap: %w", err)
+		}
+	} else {
+		setupLog.Info("in-cluster config not available, falling back to manager client for ConfigMap operations")
+	}
+
 	// Add the new AuthorizationModelReconciler
 	if err = (&controller.AuthorizationModelReconciler{
 		Client:             mgr.GetClient(),
@@ -207,6 +223,7 @@ func runManager(
 		FGAStoreID:         openfgaStoreID,
 		ConfigMapNamespace: configmapNamespace,
 		ConfigMapName:      configmapName,
+		ConfigMapClient:    configMapClient,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to create controller AuthorizationModel: %w", err)
 	}

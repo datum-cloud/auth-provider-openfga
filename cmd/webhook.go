@@ -24,6 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/client-go/discovery/cached/disk"
+	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -214,7 +215,16 @@ func runWebhookServer(
 	// whenever the controller-manager writes a new model. The watcher starts
 	// with an empty seed — the first informer event after cache sync will
 	// populate it.
-	modelIDWatcher, err := webhook.NewAuthorizationModelIDWatcher(ctx, mgr, configmapNamespace, configmapName, "")
+	//
+	// When running in-cluster the ConfigMap lives on the local workload cluster
+	// (not the remote control plane pointed to by KUBECONFIG), so we prefer an
+	// in-cluster informer when available.
+	var modelIDWatcher *webhook.AuthorizationModelIDWatcher
+	if inClusterCfg, inClusterErr := rest.InClusterConfig(); inClusterErr == nil {
+		modelIDWatcher, err = webhook.NewAuthorizationModelIDWatcherWithConfig(ctx, inClusterCfg, configmapNamespace, configmapName, "")
+	} else {
+		modelIDWatcher, err = webhook.NewAuthorizationModelIDWatcher(ctx, mgr, configmapNamespace, configmapName, "")
+	}
 	if err != nil {
 		return fmt.Errorf("failed to create authorization model ID watcher: %w", err)
 	}

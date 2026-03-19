@@ -84,8 +84,14 @@ type AuthorizationModelReconciler struct {
 	ConfigMapNamespace string
 	// ConfigMapName is the name of the ConfigMap that stores the model ID.
 	ConfigMapName string
-	modelBuilder  *openfga.AuthorizationModelReconciler
-	Finalizers    finalizer.Finalizers
+	// ConfigMapClient is the Kubernetes client used to write the authorization
+	// model ConfigMap. This may differ from the primary Client when the
+	// controller uses a remote KUBECONFIG (e.g. for a Milo control plane) but
+	// ConfigMap operations need to target the local workload cluster. When nil,
+	// the primary Client is used as a fallback.
+	ConfigMapClient client.Client
+	modelBuilder    *openfga.AuthorizationModelReconciler
+	Finalizers      finalizer.Finalizers
 }
 
 //+kubebuilder:rbac:groups=iam.miloapis.com,resources=protectedresources,verbs=get;list;watch;update;patch
@@ -220,10 +226,14 @@ func (r *AuthorizationModelReconciler) SetupWithManager(mgr ctrl.Manager) error 
 	// Always initialize ModelBuilder internally using the FGAClient and
 	// FGAStoreID. This component is responsible for interacting with OpenFGA to
 	// reconcile the authorization model.
+	cmClient := r.ConfigMapClient
+	if cmClient == nil {
+		cmClient = r.Client
+	}
 	r.modelBuilder = &openfga.AuthorizationModelReconciler{
 		StoreID:       r.FGAStoreID,
 		OpenFGA:       r.FGAClient,
-		K8sClient:     r.Client,
+		K8sClient:     cmClient,
 		Namespace:     r.ConfigMapNamespace,
 		ConfigMapName: r.ConfigMapName,
 	}
