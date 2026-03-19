@@ -290,8 +290,44 @@ func (r *AuthorizationModelReconciler) createExpectedAuthorizationModel(protecte
 		getUserGroupTypeDefinition(),
 	}
 
-	if directEnabled {
-		// Direct-permission model: resource types with direct user/group
+	switch {
+	case directEnabled && legacyEnabled:
+		// Dual-write / hybrid mode: resource types must carry relations from
+		// both models so that the legacy check path (rolebinding/rootbinding
+		// contextual tuples) continues to work while direct tuples are also
+		// being written.
+		//
+		// We use the legacy resource types (which include rolebinding +
+		// rootbinding relations and resolve permissions through those
+		// tuplesets) as the base. The direct permission model's relations
+		// (direct user/group assignment) are NOT merged into the resource
+		// types because OpenFGA requires each relation to have exactly one
+		// Userset, and the legacy model's union already handles resolution.
+		// The direct tuples written by the controller will be consumed once
+		// we switch to direct-only mode.
+		resourceTypeDefinitions := getLegacyResourceTypeDefinitionsWithHierarchicalPermissions(hierarchicalPermissions, resourceGraph)
+
+		sortedResourceTypes := make([]string, 0, len(resourceTypeDefinitions))
+		for resourceType := range resourceTypeDefinitions {
+			sortedResourceTypes = append(sortedResourceTypes, resourceType)
+		}
+		sort.Strings(sortedResourceTypes)
+
+		for _, resourceType := range sortedResourceTypes {
+			typeDefinitions = append(typeDefinitions, resourceTypeDefinitions[resourceType])
+		}
+
+		// Include the legacy infrastructure types (InternalRole, RoleBinding)
+		// and the legacy Root type.
+		typeDefinitions = append(typeDefinitions,
+			getLegacyInternalRoleTypeDefinition(allPermissions),
+			getLegacyRoleBindingTypeDefinition(allPermissions),
+		)
+		resourceTypes := getAllResourceTypes(resourceGraph)
+		typeDefinitions = append(typeDefinitions, getLegacyRootTypeDefinition(allPermissions, resourceTypes))
+
+	case directEnabled:
+		// Direct-permission model only: resource types with direct user/group
 		// relations and a simplified Root type.
 		resourceTypeDefinitions := getResourceTypeDefinitionsWithHierarchicalPermissions(hierarchicalPermissions, resourceGraph)
 
@@ -306,37 +342,28 @@ func (r *AuthorizationModelReconciler) createExpectedAuthorizationModel(protecte
 		}
 
 		typeDefinitions = append(typeDefinitions, getRootTypeDefinition(allPermissions))
-	}
 
-	if legacyEnabled {
-		// Legacy RoleBinding model: InternalRole + RoleBinding types plus
-		// legacy resource types (rolebinding/rootbinding relations).
+	case legacyEnabled:
+		// Legacy RoleBinding model only: InternalRole + RoleBinding types
+		// plus legacy resource types (rolebinding/rootbinding relations).
+		resourceTypeDefinitions := getLegacyResourceTypeDefinitionsWithHierarchicalPermissions(hierarchicalPermissions, resourceGraph)
+
+		sortedResourceTypes := make([]string, 0, len(resourceTypeDefinitions))
+		for resourceType := range resourceTypeDefinitions {
+			sortedResourceTypes = append(sortedResourceTypes, resourceType)
+		}
+		sort.Strings(sortedResourceTypes)
+
+		for _, resourceType := range sortedResourceTypes {
+			typeDefinitions = append(typeDefinitions, resourceTypeDefinitions[resourceType])
+		}
+
 		typeDefinitions = append(typeDefinitions,
 			getLegacyInternalRoleTypeDefinition(allPermissions),
 			getLegacyRoleBindingTypeDefinition(allPermissions),
 		)
-
-		// When both gates are enabled the direct-permission resource types are
-		// already in typeDefinitions. For the legacy-only case we need to add
-		// the legacy resource types (which carry rolebinding/rootbinding
-		// relations instead of direct user relations).
-		if !directEnabled {
-			resourceTypeDefinitions := getLegacyResourceTypeDefinitionsWithHierarchicalPermissions(hierarchicalPermissions, resourceGraph)
-
-			sortedResourceTypes := make([]string, 0, len(resourceTypeDefinitions))
-			for resourceType := range resourceTypeDefinitions {
-				sortedResourceTypes = append(sortedResourceTypes, resourceType)
-			}
-			sort.Strings(sortedResourceTypes)
-
-			for _, resourceType := range sortedResourceTypes {
-				typeDefinitions = append(typeDefinitions, resourceTypeDefinitions[resourceType])
-			}
-
-			// Legacy Root type — uses rolebinding/rootbinding relations.
-			resourceTypes := getAllResourceTypes(resourceGraph)
-			typeDefinitions = append(typeDefinitions, getLegacyRootTypeDefinition(allPermissions, resourceTypes))
-		}
+		resourceTypes := getAllResourceTypes(resourceGraph)
+		typeDefinitions = append(typeDefinitions, getLegacyRootTypeDefinition(allPermissions, resourceTypes))
 	}
 
 	return &openfgav1.AuthorizationModel{
