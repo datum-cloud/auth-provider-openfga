@@ -37,8 +37,14 @@ spec:
               metadata:
                 name: organization-contoso
 
-    # Step 2: Create resources for testing with dynamic UIDs
-    - try:
+    # Single step: Create resources with dynamic UIDs, create PolicyBinding, and
+    # run all authorization checks together. All actions are in one step so that:
+    #   1. Outputs captured from create/apply (e.g. $org, $user) are in scope
+    #      for subsequent operations within the step.
+    #   2. The PolicyBinding and its OpenFGA tuples are not cleaned up until the
+    #      step ends, ensuring they are present for all authorization checks.
+    - name: setup-and-verify-authz
+      try:
         - create:
             file: test-org.yaml
             outputs:
@@ -93,8 +99,7 @@ spec:
                 name: Ready
                 value: "true"
 
-    # Step 3: Test allowed access - correct namespace
-    - try:
+        # Test allowed access - correct namespace
         - create:
             resource:
               apiVersion: v1
@@ -160,8 +165,7 @@ spec:
                 path: "status.phase"
                 value: "Succeeded"
 
-    # Step 4: Test denied access - wrong namespace
-    - try:
+        # Test denied access - wrong namespace
         - create:
             resource:
               apiVersion: v1
@@ -230,8 +234,7 @@ spec:
                 path: "status.phase"
                 value: "Succeeded"
 
-    # Step 5: Test non-organization request - no namespace validation
-    - try:
+        # Test non-organization request - no namespace validation
         - create:
             resource:
               apiVersion: v1
@@ -290,3 +293,20 @@ spec:
               jsonPath:
                 path: "status.phase"
                 value: "Succeeded"
+
+      catch:
+        - describe:
+            apiVersion: v1
+            kind: Pod
+        - describe:
+            apiVersion: iam.miloapis.com/v1alpha1
+            kind: PolicyBinding
+        - describe:
+            apiVersion: iam.miloapis.com/v1alpha1
+            kind: Role
+        - describe:
+            apiVersion: iam.miloapis.com/v1alpha1
+            kind: User
+        - describe:
+            apiVersion: resourcemanager.miloapis.com/v1alpha1
+            kind: Organization

@@ -145,6 +145,15 @@ func (r *AuthorizationModelReconciler) ReconcileAuthorizationModel(ctx context.C
 	// Compare using go-cmp with protocmp for proper protobuf comparison
 	if authorizationModelsEqual(currentAuthorizationModel, mergedAuthorizationModel) {
 		log.Info("Authorization model is already up to date, skipping write operation")
+		// Even when the model is unchanged we still want the ConfigMap to
+		// reflect the current model ID (e.g. after a controller restart or
+		// a fresh cluster where the ConfigMap was never created).
+		if r.K8sClient != nil && r.Namespace != "" && currentAuthorizationModel.GetId() != "" {
+			if cmErr := r.writeModelIDToConfigMap(ctx, currentAuthorizationModel.GetId()); cmErr != nil {
+				log.Error(cmErr, "failed to write authorization model ID to ConfigMap (no-op path)",
+					"model_id", currentAuthorizationModel.GetId())
+			}
+		}
 		return nil
 	}
 
@@ -256,10 +265,10 @@ func (r *AuthorizationModelReconciler) createExpectedAuthorizationModel(protecte
 	// Calculate hierarchical permissions for each resource type
 	hierarchicalPermissions := calculateHierarchicalPermissions(resourceGraph)
 
-	// Create base IAM type definitions in deterministic order. Under the
-	// direct-permission model only InternalUser and InternalUserGroup are
-	// needed as top-level IAM types. InternalRole, RoleBinding, and Root are
-	// no longer part of the model.
+	// Create base IAM type definitions in deterministic order. InternalUser
+	// and InternalUserGroup are the top-level subject types. Root is required
+	// for ResourceKind policy bindings which write tuples targeting
+	// iam.miloapis.com/Root:<apiGroup>/<Kind> objects.
 	typeDefinitions := []*openfgav1.TypeDefinition{
 		getUserTypeDefinition(),
 		getUserGroupTypeDefinition(),
@@ -279,6 +288,25 @@ func (r *AuthorizationModelReconciler) createExpectedAuthorizationModel(protecte
 	for _, resourceType := range sortedResourceTypes {
 		typeDefinitions = append(typeDefinitions, resourceTypeDefinitions[resourceType])
 	}
+
+	// Collect all unique permissions across all resource types so that the Root
+	// type can accept direct-permission tuples for ResourceKind bindings. A
+	// ResourceKind PolicyBinding writes tuples like:
+	//   (InternalUser:uid, hash(perm), iam.miloapis.com/Root:apiGroup/Kind)
+	// so the Root type must define those same hashed-permission relations.
+	allPermsSet := make(map[string]struct{})
+	for _, perms := range hierarchicalPermissions {
+		for _, p := range perms {
+			allPermsSet[p] = struct{}{}
+		}
+	}
+	allPermissions := make([]string, 0, len(allPermsSet))
+	for p := range allPermsSet {
+		allPermissions = append(allPermissions, p)
+	}
+	sort.Strings(allPermissions)
+
+	typeDefinitions = append(typeDefinitions, getRootTypeDefinition(allPermissions))
 
 	return &openfgav1.AuthorizationModel{
 		SchemaVersion:   "1.2",
@@ -450,6 +478,50 @@ func getUserGroupTypeDefinition() *openfgav1.TypeDefinition {
 			},
 		},
 	}
+}
+
+// getRootTypeDefinition builds the OpenFGA TypeDefinition for the
+// iam.miloapis.com/Root type under the direct-permission model.
+//
+// ResourceKind PolicyBindings write tuples of the form:
+//
+//	(InternalUser:<uid>, hash(svc/resource.verb), iam.miloapis.com/Root:<apiGroup>/<Kind>)
+//
+// The Root type therefore needs the same hashed-permission relations that
+// individual resource types carry, so that Check calls against Root objects
+// resolve correctly.
+func getRootTypeDefinition(permissions []string) *openfgav1.TypeDefinition {
+	root := &openfgav1.TypeDefinition{
+		Type: TypeRoot,
+		Metadata: &openfgav1.Metadata{
+			Relations: map[string]*openfgav1.RelationMetadata{},
+			SourceInfo: &openfgav1.SourceInfo{
+				File: SourceFile,
+			},
+			Module: Module,
+		},
+		Relations: map[string]*openfgav1.Userset{},
+	}
+
+	for _, permission := range permissions {
+		hashedPermission := hashPermission(permission)
+		root.Metadata.Relations[hashedPermission] = &openfgav1.RelationMetadata{
+			DirectlyRelatedUserTypes: []*openfgav1.RelationReference{
+				{Type: TypeInternalUser},
+				{
+					Type: TypeInternalUserGroup,
+					RelationOrWildcard: &openfgav1.RelationReference_Relation{
+						Relation: RelationMember,
+					},
+				},
+			},
+		}
+		root.Relations[hashedPermission] = &openfgav1.Userset{
+			Userset: &openfgav1.Userset_This{This: &openfgav1.DirectUserset{}},
+		}
+	}
+
+	return root
 }
 
 func hashPermission(permission string) string {

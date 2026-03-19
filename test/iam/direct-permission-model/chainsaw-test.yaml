@@ -4,8 +4,15 @@ metadata:
   name: direct-permission-model
 spec:
   steps:
-    # Step 1: Setup — Create Role, User, Organization
-    - name: setup-role-user-org
+    # Single step: setup IAM resources, verify authorization, trigger a model
+    # refresh, and verify authorization still works post-refresh.
+    #
+    # All actions are in one step so that:
+    #   1. Outputs captured from create/apply (e.g. $user, $org) are in scope
+    #      for subsequent operations within the step.
+    #   2. Resources are not cleaned up until the step ends, ensuring the
+    #      PolicyBinding and User are still present for the post-refresh check.
+    - name: setup-and-verify-authz
       try:
         - apply:
             file: resources/role.yaml
@@ -31,20 +38,6 @@ spec:
               - name: org
                 value: (@)
 
-      catch:
-        - describe:
-            apiVersion: iam.miloapis.com/v1alpha1
-            kind: Role
-        - describe:
-            apiVersion: iam.miloapis.com/v1alpha1
-            kind: User
-        - describe:
-            apiVersion: resourcemanager.miloapis.com/v1alpha1
-            kind: Organization
-
-    # Step 2: Create PolicyBinding and verify authorization decisions
-    - name: create-policy-binding-and-verify-authz
-      try:
         - apply:
             resource:
               apiVersion: iam.miloapis.com/v1alpha1
@@ -76,7 +69,9 @@ spec:
                 name: Ready
                 value: 'true'
 
-        # Verify organizations.get is allowed (permission is in the role)
+        # Verify organizations.get is allowed (permission is in the role).
+        # The uid field uses the user's resource name, which is what the
+        # policy reconciler uses as the OpenFGA user identifier.
         - apply:
             resource:
               apiVersion: v1
@@ -99,7 +94,7 @@ spec:
                         "kind": "SubjectAccessReview",
                         "spec": {
                           "user": "direct-perm-model-test-user",
-                          "uid": "$USER_UID",
+                          "uid": "direct-perm-model-test-user",
                           "extra": {
                             "resourcemanager.miloapis.com/organization-id": ["direct-perm-model-test-org"]
                           },
@@ -130,9 +125,6 @@ spec:
                         echo "FAIL: could not determine allowed status"
                         exit 1
                       fi
-                  env:
-                    - name: USER_UID
-                      value: ($user.metadata.uid)
 
         - wait:
             apiVersion: v1
@@ -167,7 +159,7 @@ spec:
                         "kind": "SubjectAccessReview",
                         "spec": {
                           "user": "direct-perm-model-test-user",
-                          "uid": "$USER_UID",
+                          "uid": "direct-perm-model-test-user",
                           "extra": {
                             "resourcemanager.miloapis.com/organization-id": ["direct-perm-model-test-org"]
                           },
@@ -198,9 +190,6 @@ spec:
                         echo "FAIL: could not determine allowed status"
                         exit 1
                       fi
-                  env:
-                    - name: USER_UID
-                      value: ($user.metadata.uid)
 
         - wait:
             apiVersion: v1
@@ -212,21 +201,8 @@ spec:
                 path: "status.phase"
                 value: "Succeeded"
 
-      catch:
-        - describe:
-            apiVersion: v1
-            kind: Pod
-        - describe:
-            apiVersion: iam.miloapis.com/v1alpha1
-            kind: PolicyBinding
-
-    # Step 3: Verify ConfigMap openfga-authorization-model exists with a non-empty model-id key
-    - name: verify-configmap-exists
-      try:
-        # Use a script so we can wait for the ConfigMap to be populated and
-        # validate the model-id is non-empty, retrying briefly to handle any
-        # propagation delay between the controller writing the model and the
-        # ConfigMap appearing in the API server.
+        # Verify ConfigMap openfga-authorization-model exists with a non-empty model-id key.
+        # The ConfigMap is written by the controller when it reconciles the authorization model.
         - script:
             timeout: 2m
             content: |
@@ -244,17 +220,6 @@ spec:
               echo "FAIL: ConfigMap openfga-authorization-model does not have a non-empty model-id"
               exit 1
 
-      catch:
-        - describe:
-            apiVersion: v1
-            kind: ConfigMap
-            name: openfga-authorization-model
-            namespace: auth-provider-openfga-system
-
-    # Step 4: Capture current model ID, create new ProtectedResource to trigger
-    # a model refresh, then verify the model-id in the ConfigMap changed.
-    - name: trigger-model-refresh-and-verify-id-changed
-      try:
         # Capture the model ID before creating the new ProtectedResource so we
         # have a baseline to compare against after the refresh.
         - script:
@@ -266,7 +231,7 @@ spec:
               - name: modelIdBefore
                 value: (stdout)
 
-        # Create the new ProtectedResource to force a model rebuild
+        # Create the new ProtectedResource to force a model rebuild.
         - apply:
             file: resources/test-protected-resource.yaml
 
@@ -302,22 +267,10 @@ spec:
               exit 1
             env:
               - name: MODEL_ID_BEFORE
-                value: ($modelIdBefore)
+                value: (to_string($modelIdBefore))
 
-      catch:
-        - describe:
-            apiVersion: iam.miloapis.com/v1alpha1
-            kind: ProtectedResource
-            name: direct-perm-model-test-resource
-        - describe:
-            apiVersion: v1
-            kind: ConfigMap
-            name: openfga-authorization-model
-            namespace: auth-provider-openfga-system
-
-    # Step 5: Verify authorization still works after the model ID refresh
-    - name: verify-authz-after-model-refresh
-      try:
+        # Verify authorization still works after the model ID refresh.
+        # The PolicyBinding and User are still active (step cleanup hasn't run).
         - apply:
             resource:
               apiVersion: v1
@@ -340,7 +293,7 @@ spec:
                         "kind": "SubjectAccessReview",
                         "spec": {
                           "user": "direct-perm-model-test-user",
-                          "uid": "$USER_UID",
+                          "uid": "direct-perm-model-test-user",
                           "extra": {
                             "resourcemanager.miloapis.com/organization-id": ["direct-perm-model-test-org"]
                           },
@@ -371,9 +324,6 @@ spec:
                         echo "FAIL: could not determine allowed status"
                         exit 1
                       fi
-                  env:
-                    - name: USER_UID
-                      value: ($user.metadata.uid)
 
         - wait:
             apiVersion: v1
@@ -389,20 +339,25 @@ spec:
         - describe:
             apiVersion: v1
             kind: Pod
-            name: authz-test-post-refresh
-
-    # Step 6: Cleanup — delete the test ProtectedResource and IAM resources.
-    # Chainsaw automatically deletes resources created via apply/create in the
-    # test namespace, but the ProtectedResource is cluster-scoped so we must
-    # delete it explicitly.
-    - name: cleanup
-      try:
-        - delete:
-            file: resources/test-protected-resource.yaml
-        - wait:
+        - describe:
+            apiVersion: iam.miloapis.com/v1alpha1
+            kind: PolicyBinding
+        - describe:
+            apiVersion: iam.miloapis.com/v1alpha1
+            kind: Role
+        - describe:
+            apiVersion: iam.miloapis.com/v1alpha1
+            kind: User
+        - describe:
+            apiVersion: resourcemanager.miloapis.com/v1alpha1
+            kind: Organization
+        - describe:
             apiVersion: iam.miloapis.com/v1alpha1
             kind: ProtectedResource
             name: direct-perm-model-test-resource
-            timeout: 5m
-            for:
-              deletion: {}
+        - describe:
+            apiVersion: v1
+            kind: ConfigMap
+            name: openfga-authorization-model
+            namespace: auth-provider-openfga-system
+

@@ -85,10 +85,14 @@ func TestAuthorizationModelReconciler_ReconcileAuthorizationModel(t *testing.T) 
 			currentModel: &openfgav1.AuthorizationModel{
 				SchemaVersion: "1.2",
 				TypeDefinitions: []*openfgav1.TypeDefinition{
-					// Direct-permission model: only InternalUser, InternalUserGroup,
+					// Direct-permission model: InternalUser, InternalUserGroup, Root,
 					// and the resource type definitions.
 					getUserTypeDefinition(),
 					getUserGroupTypeDefinition(),
+					getRootTypeDefinition([]string{
+						"test.service.com/testresources.get",
+						"test.service.com/testresources.list",
+					}),
 					buildExpectedResourceTypeDefinition("test.service.com/TestResource", []string{
 						"test.service.com/testresources.get",
 						"test.service.com/testresources.list",

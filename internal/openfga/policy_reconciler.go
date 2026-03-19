@@ -348,6 +348,10 @@ func getTupleUser(subject iamdatumapiscomv1alpha1.Subject) (string, error) {
 		if subject.UID == "" {
 			return "", fmt.Errorf("user subject must have a UID")
 		}
+		// Use the subject name as the OpenFGA user identifier. The user.Name is
+		// the Kubernetes resource name, which matches the uid field passed in
+		// SubjectAccessReview requests (the system uses names as identity
+		// tokens, not the K8s metadata UID).
 		return TypeInternalUser + ":" + subject.Name, nil
 	case "Group":
 		// System groups (names starting with "system:") don't require UID and use the group name directly
