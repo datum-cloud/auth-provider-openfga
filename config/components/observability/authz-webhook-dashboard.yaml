@@ -5,7 +5,7 @@ metadata:
 spec:
   instanceSelector:
     matchLabels:
-      dashboards: "grafana"
+      dashboards: "vm-grafana"
   allowCrossNamespaceImport: true
   folder: "Platform / IAM"
   json: |
