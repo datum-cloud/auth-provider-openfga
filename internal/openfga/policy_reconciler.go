@@ -218,11 +218,15 @@ func (r *PolicyReconciler) findProtectedResourceForSelector(ctx context.Context,
 	return nil, fmt.Errorf("no ProtectedResource found for APIGroup=%s, Kind=%s", apiGroup, kind)
 }
 
-// buildDirectPermissionTuples expands the Role's IncludedPermissions into one
+// buildDirectPermissionTuples expands the Role's effective permissions into one
 // OpenFGA tuple per (subject, permission) pair targeting the given object.
 //
-// For a Role with permissions [get, list] on organizations and subjects [alice],
-// this produces:
+// Effective permissions are the fully-resolved set of permissions including
+// those inherited through InheritedRoles. They are pre-computed by the role
+// controller and stored in Status.EffectivePermissions.
+//
+// For a Role with effective permissions [get, list] on organizations and
+// subjects [alice], this produces:
 //
 //	(InternalUser:alice,  hash(svc/organizations.get),  apiGroup/Organization:org-1)
 //	(InternalUser:alice,  hash(svc/organizations.list), apiGroup/Organization:org-1)
@@ -230,8 +234,15 @@ func (r *PolicyReconciler) buildDirectPermissionTuples(
 	binding iamdatumapiscomv1alpha1.PolicyBinding,
 	role *iamdatumapiscomv1alpha1.Role,
 	targetObject string,
-	pr *iamdatumapiscomv1alpha1.ProtectedResource,
+	_ *iamdatumapiscomv1alpha1.ProtectedResource,
 ) ([]*openfgav1.TupleKey, error) {
+	effectivePerms := role.Status.EffectivePermissions
+	if len(effectivePerms) == 0 {
+		// Fall back to spec-level permissions if the role controller hasn't
+		// computed effective permissions yet.
+		effectivePerms = role.Spec.IncludedPermissions
+	}
+
 	var tuples []*openfgav1.TupleKey
 
 	for _, subject := range binding.Spec.Subjects {
@@ -240,11 +251,7 @@ func (r *PolicyReconciler) buildDirectPermissionTuples(
 			return nil, fmt.Errorf("failed to get tuple user for subject %s: %w", subject.Name, err)
 		}
 
-		for _, permName := range role.Spec.IncludedPermissions {
-			// IncludedPermissions are stored as fully-qualified strings in the
-			// format "<apiGroup>/<plural>.<verb>" (e.g.
-			// "resourcemanager.miloapis.com/organizations.get"). Hash and write
-			// directly.
+		for _, permName := range effectivePerms {
 			hashedPerm := hashPermission(permName)
 			tuples = append(tuples, &openfgav1.TupleKey{
 				User:     tupleUser,
@@ -252,12 +259,6 @@ func (r *PolicyReconciler) buildDirectPermissionTuples(
 				Object:   targetObject,
 			})
 		}
-
-		// Also expand permissions inherited via InheritedRoles if the role has
-		// any. We do a best-effort single-level expansion here; deep chains are
-		// handled by the role controller which re-reconciles bindings on role
-		// changes.
-		_ = pr // reserved for future per-resource permission filtering
 	}
 
 	return tuples, nil
