@@ -42,14 +42,14 @@ func buildRootBindingContextualTuple(rootResourceType, targetResource string) *o
 
 // buildAllContextualTuples creates all contextual tuples (root binding + groups)
 func buildAllContextualTuples(attributes authorizer.Attributes, rootResourceType, targetResource string) []*openfgav1.TupleKey {
-	var contextualTuples []*openfgav1.TupleKey
-
 	// Add root binding contextual tuple
 	rootBindingTuple := buildRootBindingContextualTuple(rootResourceType, targetResource)
-	contextualTuples = append(contextualTuples, rootBindingTuple)
 
 	// Add group contextual tuples
 	groupTuples := buildGroupContextualTuples(attributes)
+
+	contextualTuples := make([]*openfgav1.TupleKey, 0, 1+len(groupTuples))
+	contextualTuples = append(contextualTuples, rootBindingTuple)
 	contextualTuples = append(contextualTuples, groupTuples...)
 
 	return contextualTuples
