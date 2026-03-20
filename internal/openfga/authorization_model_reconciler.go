@@ -642,11 +642,13 @@ func calculateHierarchicalPermissions(rootNode *resourceGraphNode) map[string][]
 		allPerms = append(allPerms, p)
 	}
 
-	// Root-level resources (no parentResources) must carry all permissions.
-	for _, child := range rootNode.ChildResources {
-		if len(child.ParentResources) == 0 {
-			hierarchicalPermissions[child.ResourceType] = removeDuplicatePermissions(allPerms)
-		}
+	// Every resource type must carry all permissions so that any permission
+	// can be checked against any scope object. The webhook may check
+	// permissions from unrelated resource types (e.g. checking
+	// iam.miloapis.com/protectedresources.get against an Organization
+	// because a Role bound to the Organization grants that permission).
+	for resourceType := range hierarchicalPermissions {
+		hierarchicalPermissions[resourceType] = removeDuplicatePermissions(allPerms)
 	}
 
 	return hierarchicalPermissions
