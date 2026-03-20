@@ -40,21 +40,14 @@ type PolicyReconciler struct {
 // ReconcilePolicy ensures the correct tuples for a PolicyBinding are present
 // in the OpenFGA store. Which tuples are written is controlled by feature gates:
 //
-//   - DirectPermissionTuples=true AND LegacyRoleBindingModel=false → write
-//     direct (user, hash(perm), resource) tuples only
+//   - DirectPermissionTuples=true → write direct (user, hash(perm), resource) tuples
 //   - LegacyRoleBindingModel=true → write legacy RoleBinding linkage tuples
-//     only (even if DirectPermissionTuples is also enabled)
-//
-// Direct tuples cannot be written while the legacy model is active because the
-// legacy resource types do not include InternalUser/InternalUserGroup as allowed
-// type restrictions on hashed permission relations. Direct tuples will be
-// written once the legacy model is disabled (Phase 2) and the authorization
-// model switches to direct-permission resource types.
+//   - Both true → dual-write mode (both tuple formats written against the hybrid model)
 func (r *PolicyReconciler) ReconcilePolicy(ctx context.Context, binding iamdatumapiscomv1alpha1.PolicyBinding) error {
 	directEnabled := utilfeature.DefaultFeatureGate.Enabled(features.DirectPermissionTuples)
 	legacyEnabled := utilfeature.DefaultFeatureGate.Enabled(features.LegacyRoleBindingModel)
 
-	if directEnabled && !legacyEnabled {
+	if directEnabled {
 		if err := r.reconcileDirectPolicy(ctx, binding); err != nil {
 			return fmt.Errorf("direct-permission reconciliation failed: %w", err)
 		}

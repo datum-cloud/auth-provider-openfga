@@ -292,20 +292,12 @@ func (r *AuthorizationModelReconciler) createExpectedAuthorizationModel(protecte
 
 	switch {
 	case directEnabled && legacyEnabled:
-		// Dual-write / hybrid mode: resource types must carry relations from
-		// both models so that the legacy check path (rolebinding/rootbinding
-		// contextual tuples) continues to work while direct tuples are also
-		// being written.
-		//
-		// We use the legacy resource types (which include rolebinding +
-		// rootbinding relations and resolve permissions through those
-		// tuplesets) as the base. The direct permission model's relations
-		// (direct user/group assignment) are NOT merged into the resource
-		// types because OpenFGA requires each relation to have exactly one
-		// Userset, and the legacy model's union already handles resolution.
-		// The direct tuples written by the controller will be consumed once
-		// we switch to direct-only mode.
-		resourceTypeDefinitions := getLegacyResourceTypeDefinitionsWithHierarchicalPermissions(hierarchicalPermissions, resourceGraph)
+		// Hybrid mode: each resource type carries relations from BOTH models.
+		// Hashed permission relations accept direct user/group writes (This)
+		// AND resolve through legacy rolebinding/rootbinding tupleset lookups.
+		// This allows the controller to dual-write both tuple formats while
+		// the webhook continues using the legacy check path.
+		resourceTypeDefinitions := getHybridResourceTypeDefinitionsWithHierarchicalPermissions(hierarchicalPermissions, resourceGraph)
 
 		sortedResourceTypes := make([]string, 0, len(resourceTypeDefinitions))
 		for resourceType := range resourceTypeDefinitions {
@@ -318,13 +310,13 @@ func (r *AuthorizationModelReconciler) createExpectedAuthorizationModel(protecte
 		}
 
 		// Include the legacy infrastructure types (InternalRole, RoleBinding)
-		// and the legacy Root type.
+		// and a hybrid Root type that accepts both direct and legacy tuples.
 		typeDefinitions = append(typeDefinitions,
 			getLegacyInternalRoleTypeDefinition(allPermissions),
 			getLegacyRoleBindingTypeDefinition(allPermissions),
 		)
 		resourceTypes := getAllResourceTypes(resourceGraph)
-		typeDefinitions = append(typeDefinitions, getLegacyRootTypeDefinition(allPermissions, resourceTypes))
+		typeDefinitions = append(typeDefinitions, getHybridRootTypeDefinition(allPermissions, resourceTypes))
 
 	case directEnabled:
 		// Direct-permission model only: resource types with direct user/group
@@ -994,6 +986,219 @@ func getLegacyRootTypeDefinition(permissions []string, resourceTypes []string) *
 				TupleToUserset: &openfgav1.TupleToUserset{
 					Tupleset:        &openfgav1.ObjectRelation{Relation: RelationRoleBinding},
 					ComputedUserset: &openfgav1.ObjectRelation{Relation: hashedPermission},
+				},
+			},
+		}
+	}
+
+	return root
+}
+
+// =============================================================================
+// Hybrid model type definitions (dual-write migration)
+// These combine both direct user/group assignment (This) and legacy
+// rolebinding/rootbinding tupleset resolution in a single type definition,
+// allowing both tuple formats to coexist.
+// =============================================================================
+
+// getHybridResourceTypeDefinition builds a resource type that supports both
+// direct tuple writes and legacy check resolution. Each hashed permission
+// relation is a union of:
+//   - This (direct InternalUser / InternalUserGroup#member assignment)
+//   - TupleToUserset(rolebinding, hash(perm))  — legacy check path
+//   - TupleToUserset(rootbinding, hash(perm))  — legacy check path
+//   - TupleToUserset(parent, hash(perm))       — hierarchical inheritance
+func getHybridResourceTypeDefinition(permissions []string, resourceNode *resourceGraphNode) *openfgav1.TypeDefinition {
+	typeDefinition := &openfgav1.TypeDefinition{
+		Type: resourceNode.ResourceType,
+		Metadata: &openfgav1.Metadata{
+			Relations: map[string]*openfgav1.RelationMetadata{
+				RelationRoleBinding: {
+					DirectlyRelatedUserTypes: []*openfgav1.RelationReference{
+						{Type: TypeRoleBinding},
+					},
+				},
+				RelationRootBinding: {
+					DirectlyRelatedUserTypes: []*openfgav1.RelationReference{
+						{Type: TypeRoot},
+					},
+				},
+			},
+			SourceInfo: &openfgav1.SourceInfo{File: SourceFile},
+			Module:     strings.Split(resourceNode.ResourceType, "/")[0],
+		},
+		Relations: map[string]*openfgav1.Userset{
+			RelationRoleBinding: {Userset: &openfgav1.Userset_This{}},
+			RelationRootBinding: {Userset: &openfgav1.Userset_This{}},
+		},
+	}
+
+	if len(resourceNode.ParentResources) > 0 {
+		typeDefinition.Metadata.Relations[RelationParent] = &openfgav1.RelationMetadata{
+			DirectlyRelatedUserTypes: getResourceParentRelatedTypes(resourceNode.ParentResources),
+		}
+		typeDefinition.Relations[RelationParent] = &openfgav1.Userset{
+			Userset: &openfgav1.Userset_This{},
+		}
+	}
+
+	for _, permission := range permissions {
+		hashedPermission := hashPermission(permission)
+
+		// Metadata declares which user types may be directly assigned
+		// (needed for the direct-permission tuple writes).
+		typeDefinition.Metadata.Relations[hashedPermission] = &openfgav1.RelationMetadata{
+			DirectlyRelatedUserTypes: []*openfgav1.RelationReference{
+				{Type: TypeInternalUser},
+				{
+					Type: TypeInternalUserGroup,
+					RelationOrWildcard: &openfgav1.RelationReference_Relation{
+						Relation: RelationMember,
+					},
+				},
+			},
+		}
+
+		permChildren := []*openfgav1.Userset{
+			// Direct assignment (new model)
+			{Userset: &openfgav1.Userset_This{This: &openfgav1.DirectUserset{}}},
+			// Legacy: resolve through RoleBinding chain
+			{
+				Userset: &openfgav1.Userset_TupleToUserset{
+					TupleToUserset: &openfgav1.TupleToUserset{
+						Tupleset:        &openfgav1.ObjectRelation{Relation: RelationRoleBinding},
+						ComputedUserset: &openfgav1.ObjectRelation{Relation: hashedPermission},
+					},
+				},
+			},
+			// Legacy: resolve through RootBinding chain
+			{
+				Userset: &openfgav1.Userset_TupleToUserset{
+					TupleToUserset: &openfgav1.TupleToUserset{
+						Tupleset:        &openfgav1.ObjectRelation{Relation: RelationRootBinding},
+						ComputedUserset: &openfgav1.ObjectRelation{Relation: hashedPermission},
+					},
+				},
+			},
+		}
+
+		// Hierarchical inheritance from parent
+		if len(resourceNode.ParentResources) > 0 {
+			permChildren = append(permChildren, &openfgav1.Userset{
+				Userset: &openfgav1.Userset_TupleToUserset{
+					TupleToUserset: &openfgav1.TupleToUserset{
+						Tupleset:        &openfgav1.ObjectRelation{Relation: RelationParent},
+						ComputedUserset: &openfgav1.ObjectRelation{Relation: hashedPermission},
+					},
+				},
+			})
+		}
+
+		typeDefinition.Relations[hashedPermission] = &openfgav1.Userset{
+			Userset: &openfgav1.Userset_Union{
+				Union: &openfgav1.Usersets{Child: permChildren},
+			},
+		}
+	}
+
+	return typeDefinition
+}
+
+// getHybridResourceTypeDefinitionsWithHierarchicalPermissions walks the
+// resource graph and returns hybrid-model TypeDefinitions for each resource.
+func getHybridResourceTypeDefinitionsWithHierarchicalPermissions(hierarchicalPermissions map[string][]string, node *resourceGraphNode) map[string]*openfgav1.TypeDefinition {
+	types := map[string]*openfgav1.TypeDefinition{}
+
+	if node.ResourceType != TypeRoot {
+		permissions := hierarchicalPermissions[node.ResourceType]
+		if permissions == nil {
+			permissions = []string{}
+		}
+		types[node.ResourceType] = getHybridResourceTypeDefinition(permissions, node)
+	}
+
+	for _, child := range node.ChildResources {
+		childTypes := getHybridResourceTypeDefinitionsWithHierarchicalPermissions(hierarchicalPermissions, child)
+		for k, v := range childTypes {
+			types[k] = v
+		}
+	}
+
+	return types
+}
+
+// getHybridRootTypeDefinition builds a Root type that supports both direct
+// tuple writes and legacy rolebinding-based resolution. Each hashed permission
+// is a union of This (direct) and TupleToUserset(rolebinding) (legacy).
+func getHybridRootTypeDefinition(permissions []string, resourceTypes []string) *openfgav1.TypeDefinition {
+	sortedPermissions := make([]string, len(permissions))
+	copy(sortedPermissions, permissions)
+	sort.Strings(sortedPermissions)
+
+	sortedResourceTypes := make([]string, len(resourceTypes))
+	copy(sortedResourceTypes, resourceTypes)
+	sort.Strings(sortedResourceTypes)
+
+	relationReferences := make([]*openfgav1.RelationReference, 0, len(sortedResourceTypes))
+	for _, rt := range sortedResourceTypes {
+		relationReferences = append(relationReferences, &openfgav1.RelationReference{Type: rt})
+	}
+
+	root := &openfgav1.TypeDefinition{
+		Type: TypeRoot,
+		Metadata: &openfgav1.Metadata{
+			Relations: map[string]*openfgav1.RelationMetadata{
+				RelationRoleBinding: {
+					DirectlyRelatedUserTypes: []*openfgav1.RelationReference{
+						{Type: TypeRoleBinding},
+					},
+				},
+				RelationRootBinding: {
+					DirectlyRelatedUserTypes: relationReferences,
+				},
+			},
+			SourceInfo: &openfgav1.SourceInfo{File: SourceFile},
+			Module:     Module,
+		},
+		Relations: map[string]*openfgav1.Userset{
+			RelationRoleBinding: {Userset: &openfgav1.Userset_This{}},
+			RelationRootBinding: {Userset: &openfgav1.Userset_This{}},
+		},
+	}
+
+	for _, permission := range sortedPermissions {
+		hashedPermission := hashPermission(permission)
+
+		// Metadata: accept direct user/group writes
+		root.Metadata.Relations[hashedPermission] = &openfgav1.RelationMetadata{
+			DirectlyRelatedUserTypes: []*openfgav1.RelationReference{
+				{Type: TypeInternalUser},
+				{
+					Type: TypeInternalUserGroup,
+					RelationOrWildcard: &openfgav1.RelationReference_Relation{
+						Relation: RelationMember,
+					},
+				},
+			},
+		}
+
+		// Union: direct assignment + legacy rolebinding resolution
+		root.Relations[hashedPermission] = &openfgav1.Userset{
+			Userset: &openfgav1.Userset_Union{
+				Union: &openfgav1.Usersets{
+					Child: []*openfgav1.Userset{
+						// Direct assignment (new model)
+						{Userset: &openfgav1.Userset_This{This: &openfgav1.DirectUserset{}}},
+						// Legacy: resolve through RoleBinding chain
+						{
+							Userset: &openfgav1.Userset_TupleToUserset{
+								TupleToUserset: &openfgav1.TupleToUserset{
+									Tupleset:        &openfgav1.ObjectRelation{Relation: RelationRoleBinding},
+									ComputedUserset: &openfgav1.ObjectRelation{Relation: hashedPermission},
+								},
+							},
+						},
+					},
 				},
 			},
 		}
