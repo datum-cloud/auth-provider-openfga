@@ -120,12 +120,15 @@ func (r *PolicyReconciler) reconcileDirectPolicy(ctx context.Context, binding ia
 		return fmt.Errorf("failed to get target object from resource selector: %w", err)
 	}
 
-	protectedResource, err := r.findProtectedResourceForSelector(ctx, binding.Spec.ResourceSelector)
+	// Compute the full set of permissions valid on the target resource type,
+	// including permissions inherited from child resources. This mirrors how
+	// the authorization model builder computes hierarchical permissions.
+	validPerms, err := r.getHierarchicalPermissionsForSelector(ctx, binding.Spec.ResourceSelector)
 	if err != nil {
-		return fmt.Errorf("failed to find protected resource: %w", err)
+		return fmt.Errorf("failed to compute hierarchical permissions: %w", err)
 	}
 
-	desiredTuples, err := r.buildDirectPermissionTuples(binding, role, targetObject, protectedResource)
+	desiredTuples, err := r.buildDirectPermissionTuples(binding, role, targetObject, validPerms)
 	if err != nil {
 		return fmt.Errorf("failed to build permission tuples: %w", err)
 	}
@@ -186,38 +189,6 @@ func (r *PolicyReconciler) fetchRole(ctx context.Context, binding iamdatumapisco
 	return role, nil
 }
 
-// findProtectedResourceForSelector locates the ProtectedResource that describes
-// the resource type targeted by the binding. Returns nil (no error) when the
-// selector cannot be resolved to a ProtectedResource (e.g. malformed selector).
-func (r *PolicyReconciler) findProtectedResourceForSelector(ctx context.Context, selector iamdatumapiscomv1alpha1.ResourceSelector) (*iamdatumapiscomv1alpha1.ProtectedResource, error) {
-	var apiGroup, kind string
-
-	switch {
-	case selector.ResourceRef != nil:
-		apiGroup = selector.ResourceRef.APIGroup
-		kind = selector.ResourceRef.Kind
-	case selector.ResourceKind != nil:
-		apiGroup = selector.ResourceKind.APIGroup
-		kind = selector.ResourceKind.Kind
-	default:
-		return nil, fmt.Errorf("resourceSelector must specify either resourceRef or resourceKind")
-	}
-
-	var prList iamdatumapiscomv1alpha1.ProtectedResourceList
-	if err := r.K8sClient.List(ctx, &prList); err != nil {
-		return nil, fmt.Errorf("failed to list ProtectedResources: %w", err)
-	}
-
-	for i := range prList.Items {
-		pr := &prList.Items[i]
-		if pr.Spec.ServiceRef.Name == apiGroup && pr.Spec.Kind == kind {
-			return pr, nil
-		}
-	}
-
-	return nil, fmt.Errorf("no ProtectedResource found for APIGroup=%s, Kind=%s", apiGroup, kind)
-}
-
 // buildDirectPermissionTuples expands the Role's effective permissions into one
 // OpenFGA tuple per (subject, permission) pair targeting the given object.
 //
@@ -234,7 +205,7 @@ func (r *PolicyReconciler) buildDirectPermissionTuples(
 	binding iamdatumapiscomv1alpha1.PolicyBinding,
 	role *iamdatumapiscomv1alpha1.Role,
 	targetObject string,
-	_ *iamdatumapiscomv1alpha1.ProtectedResource,
+	validPerms map[string]struct{},
 ) ([]*openfgav1.TupleKey, error) {
 	effectivePerms := role.Status.EffectivePermissions
 	if len(effectivePerms) == 0 {
@@ -252,6 +223,15 @@ func (r *PolicyReconciler) buildDirectPermissionTuples(
 		}
 
 		for _, permName := range effectivePerms {
+			// Skip permissions not valid for the target resource type.
+			// validPerms contains the hierarchical permission set: the
+			// target resource's own permissions plus all descendant
+			// resource permissions.
+			if len(validPerms) > 0 {
+				if _, ok := validPerms[permName]; !ok {
+					continue
+				}
+			}
 			hashedPerm := hashPermission(permName)
 			tuples = append(tuples, &openfgav1.TupleKey{
 				User:     tupleUser,
@@ -262,6 +242,58 @@ func (r *PolicyReconciler) buildDirectPermissionTuples(
 	}
 
 	return tuples, nil
+}
+
+// getHierarchicalPermissionsForSelector computes the full set of permissions
+// valid on a target resource type, including permissions inherited from child
+// resources in the hierarchy. This mirrors calculateHierarchicalPermissions
+// used by the authorization model builder.
+func (r *PolicyReconciler) getHierarchicalPermissionsForSelector(ctx context.Context, selector iamdatumapiscomv1alpha1.ResourceSelector) (map[string]struct{}, error) {
+	var apiGroup, kind string
+	switch {
+	case selector.ResourceRef != nil:
+		apiGroup = selector.ResourceRef.APIGroup
+		kind = selector.ResourceRef.Kind
+	case selector.ResourceKind != nil:
+		apiGroup = selector.ResourceKind.APIGroup
+		kind = selector.ResourceKind.Kind
+	default:
+		return nil, fmt.Errorf("resourceSelector must specify either resourceRef or resourceKind")
+	}
+
+	var prList iamdatumapiscomv1alpha1.ProtectedResourceList
+	if err := r.K8sClient.List(ctx, &prList); err != nil {
+		return nil, fmt.Errorf("failed to list ProtectedResources: %w", err)
+	}
+
+	// Build the resource graph and compute hierarchical permissions, reusing
+	// the same logic as the authorization model builder.
+	resourceGraph, err := getResourceGraph(prList.Items)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build resource graph: %w", err)
+	}
+	hierarchicalPermissions := calculateHierarchicalPermissions(resourceGraph)
+
+	// Find the target resource type in the graph.
+	targetResourceType := apiGroup + "/" + kind
+	perms, ok := hierarchicalPermissions[targetResourceType]
+	if !ok {
+		// If the resource type is not in the graph, it might be a
+		// Root-scoped resource. Return all permissions across all types.
+		allPerms := make(map[string]struct{})
+		for _, typePerms := range hierarchicalPermissions {
+			for _, p := range typePerms {
+				allPerms[p] = struct{}{}
+			}
+		}
+		return allPerms, nil
+	}
+
+	permSet := make(map[string]struct{}, len(perms))
+	for _, p := range perms {
+		permSet[p] = struct{}{}
+	}
+	return permSet, nil
 }
 
 // getExistingDirectTuples reads all direct-permission tuples owned by this
