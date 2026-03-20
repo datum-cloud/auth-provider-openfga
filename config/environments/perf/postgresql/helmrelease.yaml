@@ -1,0 +1,39 @@
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: openfga-database
+  namespace: openfga-system
+spec:
+  chartRef:
+    kind: OCIRepository
+    name: postgresql
+  install:
+    createNamespace: false
+    timeout: 1m
+    remediation:
+      retries: 5
+  upgrade:
+    timeout: 1m
+    remediation:
+      retries: 5
+  interval: 1m0s
+  timeout: 1m
+  releaseName: openfga-database
+  targetNamespace: openfga-system
+  values:
+    auth:
+      postgresPassword: openfga
+      database: openfga
+
+    primary:
+      persistence:
+        enabled: true
+        size: 1Gi
+        storageClass: standard
+      resources:
+        requests:
+          cpu: 100m
+          memory: 128Mi
+        limits:
+          cpu: 500m
+          memory: 512Mi

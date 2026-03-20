@@ -10,9 +10,11 @@ import (
 
 	openfgav1 "github.com/openfga/api/proto/openfga/v1"
 	"github.com/spf13/cobra"
+	"go.miloapis.com/auth-provider-openfga/internal/telemetry"
 	"go.miloapis.com/auth-provider-openfga/internal/webhook"
 	iamv1alpha1 "go.miloapis.com/milo/pkg/apis/iam/v1alpha1"
 	resourcemanagerv1alpha1 "go.miloapis.com/milo/pkg/apis/resourcemanager/v1alpha1"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
@@ -35,6 +37,7 @@ func createWebhookCommand() *cobra.Command {
 	var webhookPort int
 	var metricsBindAddress string
 	var discoveryCacheTTL time.Duration
+	var otlpEndpoint string
 
 	cmd := &cobra.Command{
 		Use:   "authz-webhook",
@@ -51,6 +54,7 @@ func createWebhookCommand() *cobra.Command {
 				webhookPort,
 				metricsBindAddress,
 				discoveryCacheTTL,
+				otlpEndpoint,
 			)
 		},
 	}
@@ -67,6 +71,8 @@ func createWebhookCommand() *cobra.Command {
 	cmd.Flags().StringVar(&metricsBindAddress, "metrics-bind-address", ":8080", "Address for the metrics server")
 	cmd.Flags().DurationVar(&discoveryCacheTTL, "discovery-cache-ttl", 5*time.Minute,
 		"TTL for Kubernetes API discovery cache (enables automatic detection of new resources)")
+	cmd.Flags().StringVar(&otlpEndpoint, "otlp-endpoint", os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
+		"OTLP HTTP endpoint for OpenTelemetry trace export (e.g. tempo:4318). Leave empty to disable tracing.")
 
 	// Mark required flags
 	if err := cmd.MarkFlagRequired("openfga-api-url"); err != nil {
@@ -89,9 +95,23 @@ func runWebhookServer(
 	webhookPort int,
 	metricsBindAddress string,
 	discoveryCacheTTL time.Duration,
+	otlpEndpoint string,
 ) error {
 	log.SetLogger(zap.New(zap.JSONEncoder()))
 	entryLog := log.Log.WithName("webhook-server")
+
+	// Initialise OpenTelemetry tracing. When otlpEndpoint is empty a no-op
+	// provider is installed and this is effectively free at runtime.
+	ctx := context.Background()
+	_, tracerShutdown, err := telemetry.SetupTracer(ctx, "auth-provider-openfga-webhook", "dev", otlpEndpoint)
+	if err != nil {
+		return fmt.Errorf("failed to setup tracer: %w", err)
+	}
+	defer func() {
+		if shutdownErr := tracerShutdown(ctx); shutdownErr != nil {
+			entryLog.Error(shutdownErr, "failed to shutdown tracer provider")
+		}
+	}()
 
 	// Create OpenFGA client
 	var creds credentials.TransportCredentials
@@ -103,6 +123,7 @@ func runWebhookServer(
 
 	conn, err := grpc.NewClient(openfgaAPIURL,
 		grpc.WithTransportCredentials(creds),
+		grpc.WithStatsHandler(otelgrpc.NewClientHandler()),
 	)
 	if err != nil {
 		return fmt.Errorf("unable to create gRPC connection to OpenFGA: %w", err)

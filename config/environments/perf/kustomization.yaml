@@ -1,0 +1,70 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Performance testing environment overlay
+# Combines app resources (from testing) with OpenFGA + PostgreSQL infrastructure
+# and store-init Job into a single overlay.
+
+resources:
+  # App overlay (controller-manager + authz-webhook with testing config)
+  - ../testing
+  # OpenFGA HelmRelease + HelmRepository + namespace (in-memory config, overridden below)
+  - ../../dependencies/openfga
+  # PostgreSQL HelmRelease + OCIRepository for OpenFGA persistence
+  - postgresql
+  # Job + RBAC to create the OpenFGA store and write store ID to a ConfigMap
+  - store-init
+
+components:
+  # GrafanaDashboard CR for authorization webhook metrics
+  - ../../components/observability
+
+patches:
+  # Switch OpenFGA from in-memory to PostgreSQL datastore
+  - path: openfga-postgres-patch.yaml
+    target:
+      kind: HelmRelease
+      name: openfga
+  # Replace hardcoded OPENFGA_STORE_ID with ConfigMap reference in controller-manager
+  # OPENFGA_STORE_ID is at env index 1 in the manager container
+  - target:
+      kind: Deployment
+      name: controller-manager
+    patch: |
+      - op: replace
+        path: /spec/template/spec/containers/0/env/1
+        value:
+          name: OPENFGA_STORE_ID
+          valueFrom:
+            configMapKeyRef:
+              name: openfga-store-id
+              key: store-id
+  # Replace hardcoded OPENFGA_STORE_ID with ConfigMap reference in authz-webhook
+  # OPENFGA_STORE_ID is at env index 1 in the authz-webhook container
+  - target:
+      kind: Deployment
+      name: authz-webhook
+    patch: |
+      - op: replace
+        path: /spec/template/spec/containers/0/env/1
+        value:
+          name: OPENFGA_STORE_ID
+          valueFrom:
+            configMapKeyRef:
+              name: openfga-store-id
+              key: store-id
+  # Configure authz-webhook to send OTLP traces to the OTel Collector
+  - target:
+      kind: Deployment
+      name: authz-webhook
+    patch: |
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: "http://otel-collector.telemetry-system.svc.cluster.local:4318"
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: OTEL_EXPORTER_OTLP_PROTOCOL
+          value: "http/protobuf"

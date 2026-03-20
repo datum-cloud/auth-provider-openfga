@@ -1,0 +1,1047 @@
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: authz-webhook
+  namespace: telemetry-system
+spec:
+  instanceSelector:
+    matchLabels:
+      dashboards: "grafana"
+  allowCrossNamespaceImport: true
+  folder: "Platform / IAM"
+  json: |
+    {
+      "__inputs": [],
+      "__requires": [
+        {
+          "type": "datasource",
+          "id": "prometheus",
+          "name": "Prometheus",
+          "version": "1.0.0"
+        }
+      ],
+      "annotations": {
+        "list": [
+          {
+            "builtIn": 1,
+            "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+            "enable": true,
+            "hide": true,
+            "iconColor": "rgba(0, 211, 255, 1)",
+            "name": "Annotations & Alerts",
+            "type": "dashboard"
+          },
+          {
+            "datasource": { "type": "prometheus", "uid": "${datasource}" },
+            "enable": true,
+            "expr": "perf_annotation{type=\"tweak\"}",
+            "iconColor": "rgba(255, 152, 48, 1)",
+            "name": "System Tweaks",
+            "titleFormat": "{{description}}",
+            "useValueForTime": false,
+            "step": "1s"
+          },
+          {
+            "datasource": { "type": "prometheus", "uid": "${datasource}" },
+            "enable": true,
+            "expr": "perf_annotation{type=~\"perf-test|scale-perf-test\"}",
+            "iconColor": "rgba(115, 191, 105, 1)",
+            "name": "Perf Test Runs",
+            "titleFormat": "{{description}}",
+            "useValueForTime": false,
+            "step": "1s"
+          }
+        ]
+      },
+      "description": "Authorization webhook performance and operational metrics for auth-provider-openfga",
+      "editable": true,
+      "fiscalYearStartMonth": 0,
+      "graphTooltip": 1,
+      "id": null,
+      "links": [],
+      "panels": [
+        {
+          "collapsed": false,
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+          "id": 100,
+          "title": "Overview",
+          "type": "row"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": {
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "hideFrom": { "legend": false, "tooltip": false, "viz": false },
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "pointSize": 5,
+                "scaleDistribution": { "type": "linear" },
+                "showPoints": "auto",
+                "spanNulls": false,
+                "stacking": { "group": "A", "mode": "none" },
+                "thresholdsStyle": { "mode": "off" }
+              },
+              "unit": "reqps"
+            },
+            "overrides": [
+              {
+                "matcher": { "id": "byName", "options": "allow" },
+                "properties": [{ "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } }]
+              },
+              {
+                "matcher": { "id": "byName", "options": "deny" },
+                "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }]
+              },
+              {
+                "matcher": { "id": "byName", "options": "error" },
+                "properties": [{ "id": "color", "value": { "fixedColor": "orange", "mode": "fixed" } }]
+              }
+            ]
+          },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 1 },
+          "id": 1,
+          "options": {
+            "legend": { "calcs": ["mean", "lastNotNull"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+            "tooltip": { "mode": "multi", "sort": "none" }
+          },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "sum by (decision) (rate(authz_decisions_total{namespace=~\"$namespace\"}[$__rate_interval]))",
+              "legendFormat": "{{decision}}",
+              "refId": "A"
+            }
+          ],
+          "title": "Request Rate by Decision",
+          "type": "timeseries"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "yellow", "value": 1 },
+                  { "color": "red", "value": 5 }
+                ]
+              },
+              "unit": "percent"
+            },
+            "overrides": []
+          },
+          "gridPos": { "h": 4, "w": 6, "x": 12, "y": 1 },
+          "id": 2,
+          "options": {
+            "colorMode": "background",
+            "graphMode": "none",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+            "text": {},
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "100 * sum(rate(authz_decisions_total{namespace=~\"$namespace\", decision=\"error\"}[$__rate_interval])) / sum(rate(authz_decisions_total{namespace=~\"$namespace\"}[$__rate_interval]))",
+              "legendFormat": "Error Rate",
+              "refId": "A"
+            }
+          ],
+          "title": "Error Rate",
+          "type": "stat"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "thresholds" },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "yellow", "value": 0.1 },
+                  { "color": "red", "value": 0.5 }
+                ]
+              },
+              "unit": "s"
+            },
+            "overrides": []
+          },
+          "gridPos": { "h": 4, "w": 6, "x": 18, "y": 1 },
+          "id": 3,
+          "options": {
+            "colorMode": "background",
+            "graphMode": "none",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "histogram_quantile(0.50, sum by (le) (rate(authz_request_duration_seconds_bucket{namespace=~\"$namespace\"}[$__rate_interval])))",
+              "legendFormat": "p50",
+              "refId": "A"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "histogram_quantile(0.95, sum by (le) (rate(authz_request_duration_seconds_bucket{namespace=~\"$namespace\"}[$__rate_interval])))",
+              "legendFormat": "p95",
+              "refId": "B"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "histogram_quantile(0.99, sum by (le) (rate(authz_request_duration_seconds_bucket{namespace=~\"$namespace\"}[$__rate_interval])))",
+              "legendFormat": "p99",
+              "refId": "C"
+            }
+          ],
+          "title": "Latency (p50 / p95 / p99)",
+          "type": "stat"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": {
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "hideFrom": { "legend": false, "tooltip": false, "viz": false },
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "pointSize": 5,
+                "scaleDistribution": { "type": "linear" },
+                "showPoints": "auto",
+                "spanNulls": false,
+                "stacking": { "group": "A", "mode": "none" },
+                "thresholdsStyle": { "mode": "off" }
+              },
+              "unit": "reqps"
+            },
+            "overrides": [
+              {
+                "matcher": { "id": "byName", "options": "allow" },
+                "properties": [{ "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } }]
+              },
+              {
+                "matcher": { "id": "byName", "options": "deny" },
+                "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }]
+              },
+              {
+                "matcher": { "id": "byName", "options": "error" },
+                "properties": [{ "id": "color", "value": { "fixedColor": "orange", "mode": "fixed" } }]
+              }
+            ]
+          },
+          "gridPos": { "h": 4, "w": 6, "x": 12, "y": 5 },
+          "id": 4,
+          "options": {
+            "legend": { "calcs": [], "displayMode": "list", "placement": "bottom", "showLegend": true },
+            "tooltip": { "mode": "multi", "sort": "none" }
+          },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "sum by (decision, scope) (rate(authz_decisions_total{namespace=~\"$namespace\"}[$__rate_interval]))",
+              "legendFormat": "{{decision}} / {{scope}}",
+              "refId": "A"
+            }
+          ],
+          "title": "Request Rate by Decision & Scope",
+          "type": "timeseries"
+        },
+        {
+          "collapsed": false,
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 9 },
+          "id": 101,
+          "title": "Latency Distribution",
+          "type": "row"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "scheme", "scheme": "Oranges" },
+              "custom": {
+                "fillOpacity": 80,
+                "gradientMode": "none",
+                "hideFrom": { "legend": false, "tooltip": false, "viz": false },
+                "lineWidth": 0,
+                "scaleDistribution": { "log": 2, "type": "log" }
+              },
+              "unit": "s"
+            },
+            "overrides": []
+          },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 10 },
+          "id": 10,
+          "options": {
+            "calculate": false,
+            "cellGap": 2,
+            "color": { "exponent": 0.5, "fill": "dark-orange", "mode": "scheme", "reverse": false, "scale": "exponential", "scheme": "Oranges", "steps": 64 },
+            "exemplars": { "color": "rgba(255,0,255,0.7)" },
+            "filterValues": { "le": 1e-9 },
+            "legend": { "show": true },
+            "rowsFrame": { "layout": "auto" },
+            "tooltip": { "mode": "single", "yHistogram": false },
+            "yAxis": { "axisPlacement": "left", "decimals": 1, "reverse": false, "unit": "s" }
+          },
+          "pluginVersion": "10.4.3",
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "sum by (le) (increase(authz_request_duration_seconds_bucket{namespace=~\"$namespace\"}[$__rate_interval]))",
+              "format": "heatmap",
+              "legendFormat": "{{le}}",
+              "refId": "A"
+            }
+          ],
+          "title": "End-to-End Request Latency Heatmap",
+          "type": "heatmap"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": {
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "hideFrom": { "legend": false, "tooltip": false, "viz": false },
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "pointSize": 5,
+                "scaleDistribution": { "type": "linear" },
+                "showPoints": "auto",
+                "spanNulls": false,
+                "stacking": { "group": "A", "mode": "none" },
+                "thresholdsStyle": { "mode": "off" }
+              },
+              "unit": "s"
+            },
+            "overrides": []
+          },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 10 },
+          "id": 11,
+          "options": {
+            "legend": { "calcs": ["mean", "lastNotNull"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+            "tooltip": { "mode": "multi", "sort": "none" }
+          },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "histogram_quantile(0.50, sum by (le) (rate(authz_request_duration_seconds_bucket{namespace=~\"$namespace\"}[$__rate_interval])))",
+              "legendFormat": "p50",
+              "refId": "A"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "histogram_quantile(0.95, sum by (le) (rate(authz_request_duration_seconds_bucket{namespace=~\"$namespace\"}[$__rate_interval])))",
+              "legendFormat": "p95",
+              "refId": "B"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "histogram_quantile(0.99, sum by (le) (rate(authz_request_duration_seconds_bucket{namespace=~\"$namespace\"}[$__rate_interval])))",
+              "legendFormat": "p99",
+              "refId": "C"
+            }
+          ],
+          "title": "Latency Percentiles Over Time",
+          "type": "timeseries"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": {
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "hideFrom": { "legend": false, "tooltip": false, "viz": false },
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "pointSize": 5,
+                "scaleDistribution": { "type": "linear" },
+                "showPoints": "auto",
+                "spanNulls": false,
+                "stacking": { "group": "A", "mode": "none" },
+                "thresholdsStyle": { "mode": "off" }
+              },
+              "unit": "s"
+            },
+            "overrides": [
+              {
+                "matcher": { "id": "byName", "options": "allow p95" },
+                "properties": [{ "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } }]
+              },
+              {
+                "matcher": { "id": "byName", "options": "deny p95" },
+                "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }]
+              },
+              {
+                "matcher": { "id": "byName", "options": "error p95" },
+                "properties": [{ "id": "color", "value": { "fixedColor": "orange", "mode": "fixed" } }]
+              }
+            ]
+          },
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 18 },
+          "id": 12,
+          "options": {
+            "legend": { "calcs": ["mean", "lastNotNull"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+            "tooltip": { "mode": "multi", "sort": "none" }
+          },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "histogram_quantile(0.95, sum by (le, decision) (rate(authz_request_duration_seconds_bucket{namespace=~\"$namespace\"}[$__rate_interval])))",
+              "legendFormat": "{{decision}} p95",
+              "refId": "A"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "histogram_quantile(0.50, sum by (le, decision) (rate(authz_request_duration_seconds_bucket{namespace=~\"$namespace\"}[$__rate_interval])))",
+              "legendFormat": "{{decision}} p50",
+              "refId": "B"
+            }
+          ],
+          "title": "Latency by Decision Type (p50 / p95)",
+          "type": "timeseries"
+        },
+        {
+          "collapsed": false,
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 26 },
+          "id": 102,
+          "title": "Step-by-Step Latency Breakdown",
+          "type": "row"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": {
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 20,
+                "gradientMode": "none",
+                "hideFrom": { "legend": false, "tooltip": false, "viz": false },
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "pointSize": 5,
+                "scaleDistribution": { "type": "linear" },
+                "showPoints": "auto",
+                "spanNulls": false,
+                "stacking": { "group": "A", "mode": "normal" },
+                "thresholdsStyle": { "mode": "off" }
+              },
+              "unit": "s"
+            },
+            "overrides": []
+          },
+          "gridPos": { "h": 8, "w": 16, "x": 0, "y": 27 },
+          "id": 20,
+          "options": {
+            "legend": { "calcs": ["mean", "lastNotNull"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+            "tooltip": { "mode": "multi", "sort": "desc" }
+          },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "sum by (step) (rate(authz_step_duration_seconds_sum{namespace=~\"$namespace\", step=\"build_context\"}[$__rate_interval])) / sum by (step) (rate(authz_step_duration_seconds_count{namespace=~\"$namespace\", step=\"build_context\"}[$__rate_interval]))",
+              "legendFormat": "build_context",
+              "refId": "A"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "sum by (step) (rate(authz_step_duration_seconds_sum{namespace=~\"$namespace\", step=\"validate_namespace\"}[$__rate_interval])) / sum by (step) (rate(authz_step_duration_seconds_count{namespace=~\"$namespace\", step=\"validate_namespace\"}[$__rate_interval]))",
+              "legendFormat": "validate_namespace",
+              "refId": "B"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "sum by (step) (rate(authz_step_duration_seconds_sum{namespace=~\"$namespace\", step=\"validate_permission\"}[$__rate_interval])) / sum by (step) (rate(authz_step_duration_seconds_count{namespace=~\"$namespace\", step=\"validate_permission\"}[$__rate_interval]))",
+              "legendFormat": "validate_permission",
+              "refId": "C"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "sum by (step) (rate(authz_step_duration_seconds_sum{namespace=~\"$namespace\", step=\"build_openfga_request\"}[$__rate_interval])) / sum by (step) (rate(authz_step_duration_seconds_count{namespace=~\"$namespace\", step=\"build_openfga_request\"}[$__rate_interval]))",
+              "legendFormat": "build_openfga_request",
+              "refId": "D"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "sum by (step) (rate(authz_step_duration_seconds_sum{namespace=~\"$namespace\", step=\"openfga_check\"}[$__rate_interval])) / sum by (step) (rate(authz_step_duration_seconds_count{namespace=~\"$namespace\", step=\"openfga_check\"}[$__rate_interval]))",
+              "legendFormat": "openfga_check",
+              "refId": "E"
+            }
+          ],
+          "title": "Average Latency per Step (Stacked)",
+          "type": "timeseries"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "thresholds" },
+              "custom": {
+                "align": "auto",
+                "cellOptions": { "type": "auto" },
+                "inspect": false
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "yellow", "value": 0.05 },
+                  { "color": "red", "value": 0.2 }
+                ]
+              },
+              "unit": "s"
+            },
+            "overrides": [
+              {
+                "matcher": { "id": "byName", "options": "Step" },
+                "properties": [{ "id": "custom.width", "value": 200 }]
+              }
+            ]
+          },
+          "gridPos": { "h": 8, "w": 8, "x": 16, "y": 27 },
+          "id": 21,
+          "options": {
+            "cellHeight": "sm",
+            "footer": { "countRows": false, "fields": "", "reducer": ["sum"], "show": false },
+            "showHeader": true
+          },
+          "pluginVersion": "10.4.3",
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "histogram_quantile(0.50, sum by (le, step) (rate(authz_step_duration_seconds_bucket{namespace=~\"$namespace\"}[$__rate_interval])))",
+              "instant": true,
+              "legendFormat": "{{step}}",
+              "refId": "A"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "histogram_quantile(0.95, sum by (le, step) (rate(authz_step_duration_seconds_bucket{namespace=~\"$namespace\"}[$__rate_interval])))",
+              "instant": true,
+              "legendFormat": "{{step}}",
+              "refId": "B"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "histogram_quantile(0.99, sum by (le, step) (rate(authz_step_duration_seconds_bucket{namespace=~\"$namespace\"}[$__rate_interval])))",
+              "instant": true,
+              "legendFormat": "{{step}}",
+              "refId": "C"
+            }
+          ],
+          "title": "Step Latency Percentiles Table",
+          "transformations": [
+            {
+              "id": "labelsToFields",
+              "options": { "mode": "columns", "valueLabel": "step" }
+            },
+            {
+              "id": "merge",
+              "options": {}
+            },
+            {
+              "id": "organize",
+              "options": {
+                "renameByName": {
+                  "Time": "",
+                  "Value #A": "p50",
+                  "Value #B": "p95",
+                  "Value #C": "p99"
+                }
+              }
+            }
+          ],
+          "type": "table"
+        },
+        {
+          "collapsed": false,
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 35 },
+          "id": 103,
+          "title": "OpenFGA Performance",
+          "type": "row"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "scheme", "scheme": "Purples" },
+              "custom": {
+                "fillOpacity": 80,
+                "gradientMode": "none",
+                "hideFrom": { "legend": false, "tooltip": false, "viz": false },
+                "lineWidth": 0,
+                "scaleDistribution": { "log": 2, "type": "log" }
+              },
+              "unit": "s"
+            },
+            "overrides": []
+          },
+          "gridPos": { "h": 8, "w": 8, "x": 0, "y": 36 },
+          "id": 30,
+          "options": {
+            "calculate": false,
+            "cellGap": 2,
+            "color": { "exponent": 0.5, "fill": "dark-purple", "mode": "scheme", "reverse": false, "scale": "exponential", "scheme": "Purples", "steps": 64 },
+            "exemplars": { "color": "rgba(255,0,255,0.7)" },
+            "filterValues": { "le": 1e-9 },
+            "legend": { "show": true },
+            "rowsFrame": { "layout": "auto" },
+            "tooltip": { "mode": "single", "yHistogram": false },
+            "yAxis": { "axisPlacement": "left", "decimals": 1, "reverse": false, "unit": "s" }
+          },
+          "pluginVersion": "10.4.3",
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "sum by (le) (increase(authz_step_duration_seconds_bucket{step=\"openfga_check\", namespace=~\"$namespace\"}[$__rate_interval]))",
+              "format": "heatmap",
+              "legendFormat": "{{le}}",
+              "refId": "A"
+            }
+          ],
+          "title": "OpenFGA Check Latency Heatmap",
+          "type": "heatmap"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "scheme", "scheme": "Blues" },
+              "custom": {
+                "fillOpacity": 80,
+                "gradientMode": "none",
+                "hideFrom": { "legend": false, "tooltip": false, "viz": false },
+                "lineWidth": 0,
+                "scaleDistribution": { "log": 2, "type": "log" }
+              },
+              "unit": "s"
+            },
+            "overrides": []
+          },
+          "gridPos": { "h": 8, "w": 8, "x": 8, "y": 36 },
+          "id": 31,
+          "options": {
+            "calculate": false,
+            "cellGap": 2,
+            "color": { "exponent": 0.5, "fill": "dark-blue", "mode": "scheme", "reverse": false, "scale": "exponential", "scheme": "Blues", "steps": 64 },
+            "exemplars": { "color": "rgba(255,0,255,0.7)" },
+            "filterValues": { "le": 1e-9 },
+            "legend": { "show": true },
+            "rowsFrame": { "layout": "auto" },
+            "tooltip": { "mode": "single", "yHistogram": false },
+            "yAxis": { "axisPlacement": "left", "decimals": 1, "reverse": false, "unit": "s" }
+          },
+          "pluginVersion": "10.4.3",
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "sum by (le) (increase(authz_step_duration_seconds_bucket{step=\"k8s_list_protectedresources\", namespace=~\"$namespace\"}[$__rate_interval]))",
+              "format": "heatmap",
+              "legendFormat": "{{le}}",
+              "refId": "A"
+            }
+          ],
+          "title": "ProtectedResource List Latency Heatmap",
+          "type": "heatmap"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": {
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "hideFrom": { "legend": false, "tooltip": false, "viz": false },
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "pointSize": 5,
+                "scaleDistribution": { "type": "linear" },
+                "showPoints": "auto",
+                "spanNulls": false,
+                "stacking": { "group": "A", "mode": "none" },
+                "thresholdsStyle": { "mode": "off" }
+              },
+              "unit": "reqps"
+            },
+            "overrides": []
+          },
+          "gridPos": { "h": 8, "w": 8, "x": 16, "y": 36 },
+          "id": 32,
+          "options": {
+            "legend": { "calcs": ["mean", "lastNotNull"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+            "tooltip": { "mode": "multi", "sort": "none" }
+          },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "sum(rate(authz_step_duration_seconds_count{step=\"openfga_check\", namespace=~\"$namespace\"}[$__rate_interval]))",
+              "legendFormat": "OpenFGA check rate",
+              "refId": "A"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "sum(rate(authz_step_duration_seconds_count{step=\"k8s_list_protectedresources\", namespace=~\"$namespace\"}[$__rate_interval]))",
+              "legendFormat": "ProtectedResource list rate",
+              "refId": "B"
+            }
+          ],
+          "title": "OpenFGA & ProtectedResource Call Rate",
+          "type": "timeseries"
+        },
+        {
+          "collapsed": false,
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 44 },
+          "id": 104,
+          "title": "K8s API & gRPC Client Metrics",
+          "type": "row"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": {
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "hideFrom": { "legend": false, "tooltip": false, "viz": false },
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "pointSize": 5,
+                "scaleDistribution": { "type": "linear" },
+                "showPoints": "auto",
+                "spanNulls": false,
+                "stacking": { "group": "A", "mode": "none" },
+                "thresholdsStyle": { "mode": "off" }
+              },
+              "unit": "reqps"
+            },
+            "overrides": []
+          },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 45 },
+          "id": 40,
+          "options": {
+            "legend": { "calcs": ["mean", "lastNotNull"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+            "tooltip": { "mode": "multi", "sort": "none" }
+          },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "sum by (verb) (rate(rest_client_requests_total{namespace=~\"$namespace\", job=~\".*authz-webhook.*\"}[$__rate_interval]))",
+              "legendFormat": "{{verb}}",
+              "refId": "A"
+            }
+          ],
+          "title": "REST Client Request Rate by Verb",
+          "type": "timeseries"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": {
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "hideFrom": { "legend": false, "tooltip": false, "viz": false },
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "pointSize": 5,
+                "scaleDistribution": { "type": "linear" },
+                "showPoints": "auto",
+                "spanNulls": false,
+                "stacking": { "group": "A", "mode": "none" },
+                "thresholdsStyle": { "mode": "off" }
+              },
+              "unit": "s"
+            },
+            "overrides": []
+          },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 45 },
+          "id": 41,
+          "options": {
+            "legend": { "calcs": ["mean", "lastNotNull"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+            "tooltip": { "mode": "multi", "sort": "none" }
+          },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "histogram_quantile(0.50, sum by (le, verb) (rate(rest_client_request_duration_seconds_bucket{namespace=~\"$namespace\", job=~\".*authz-webhook.*\"}[$__rate_interval])))",
+              "legendFormat": "{{verb}} p50",
+              "refId": "A"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "histogram_quantile(0.95, sum by (le, verb) (rate(rest_client_request_duration_seconds_bucket{namespace=~\"$namespace\", job=~\".*authz-webhook.*\"}[$__rate_interval])))",
+              "legendFormat": "{{verb}} p95",
+              "refId": "B"
+            }
+          ],
+          "title": "REST Client Request Duration by Verb",
+          "type": "timeseries"
+        },
+        {
+          "collapsed": false,
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 53 },
+          "id": 105,
+          "title": "Resource Usage",
+          "type": "row"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": {
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "hideFrom": { "legend": false, "tooltip": false, "viz": false },
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "pointSize": 5,
+                "scaleDistribution": { "type": "linear" },
+                "showPoints": "auto",
+                "spanNulls": false,
+                "stacking": { "group": "A", "mode": "none" },
+                "thresholdsStyle": { "mode": "off" }
+              },
+              "unit": "cores"
+            },
+            "overrides": []
+          },
+          "gridPos": { "h": 8, "w": 8, "x": 0, "y": 54 },
+          "id": 50,
+          "options": {
+            "legend": { "calcs": ["mean", "lastNotNull"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+            "tooltip": { "mode": "multi", "sort": "none" }
+          },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "sum by (pod) (rate(container_cpu_usage_seconds_total{namespace=~\"$namespace\", container=\"authz-webhook\"}[$__rate_interval]))",
+              "legendFormat": "{{pod}}",
+              "refId": "A"
+            }
+          ],
+          "title": "Container CPU Usage",
+          "type": "timeseries"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": {
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "hideFrom": { "legend": false, "tooltip": false, "viz": false },
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "pointSize": 5,
+                "scaleDistribution": { "type": "linear" },
+                "showPoints": "auto",
+                "spanNulls": false,
+                "stacking": { "group": "A", "mode": "none" },
+                "thresholdsStyle": { "mode": "off" }
+              },
+              "unit": "bytes"
+            },
+            "overrides": []
+          },
+          "gridPos": { "h": 8, "w": 8, "x": 8, "y": 54 },
+          "id": 51,
+          "options": {
+            "legend": { "calcs": ["mean", "lastNotNull"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+            "tooltip": { "mode": "multi", "sort": "none" }
+          },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "sum by (pod) (container_memory_working_set_bytes{namespace=~\"$namespace\", container=\"authz-webhook\"})",
+              "legendFormat": "{{pod}}",
+              "refId": "A"
+            }
+          ],
+          "title": "Container Memory Usage (Working Set)",
+          "type": "timeseries"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": {
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "hideFrom": { "legend": false, "tooltip": false, "viz": false },
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "pointSize": 5,
+                "scaleDistribution": { "type": "linear" },
+                "showPoints": "auto",
+                "spanNulls": false,
+                "stacking": { "group": "A", "mode": "none" },
+                "thresholdsStyle": { "mode": "off" }
+              },
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "gridPos": { "h": 8, "w": 8, "x": 16, "y": 54 },
+          "id": 52,
+          "options": {
+            "legend": { "calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+            "tooltip": { "mode": "multi", "sort": "none" }
+          },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "sum by (pod) (kube_pod_container_status_restarts_total{namespace=~\"$namespace\", container=\"authz-webhook\"})",
+              "legendFormat": "{{pod}}",
+              "refId": "A"
+            }
+          ],
+          "title": "Pod Restart Count",
+          "type": "timeseries"
+        }
+      ],
+      "refresh": "10s",
+      "schemaVersion": 39,
+      "tags": ["auth-provider-openfga", "authorization", "webhook", "openfga"],
+      "templating": {
+        "list": [
+          {
+            "current": {},
+            "hide": 0,
+            "includeAll": false,
+            "multi": false,
+            "name": "datasource",
+            "options": [],
+            "query": "prometheus",
+            "queryValue": "",
+            "refresh": 1,
+            "regex": "",
+            "type": "datasource",
+            "label": "Datasource"
+          },
+          {
+            "current": {
+              "selected": true,
+              "text": "auth-provider-openfga-system",
+              "value": "auth-provider-openfga-system"
+            },
+            "datasource": { "type": "prometheus", "uid": "${datasource}" },
+            "definition": "label_values(authz_decisions_total, namespace)",
+            "hide": 0,
+            "includeAll": false,
+            "multi": false,
+            "name": "namespace",
+            "options": [],
+            "query": {
+              "qryType": 1,
+              "query": "label_values(authz_decisions_total, namespace)",
+              "refId": "StandardVariableQuery"
+            },
+            "refresh": 2,
+            "regex": "",
+            "sort": 1,
+            "type": "query",
+            "label": "Namespace"
+          }
+        ]
+      },
+      "time": { "from": "now-30m", "to": "now" },
+      "timepicker": {},
+      "timezone": "browser",
+      "title": "Authorization Webhook Performance",
+      "uid": "authz-webhook-perf",
+      "version": 1
+    }
