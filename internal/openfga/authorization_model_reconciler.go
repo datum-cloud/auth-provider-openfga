@@ -617,11 +617,37 @@ func HashPermission(permission string) string {
 // calculateHierarchicalPermissions calculates which permissions each resource type should have
 // based on its position in the hierarchy. Each resource gets its own permissions plus
 // all permissions from its descendants (children, grandchildren, etc.)
+//
+// Root-level resources (direct children of the Root node that have no parent
+// resources) receive ALL permissions from the entire graph. This is required
+// because the authorization webhook may scope checks to these resource types
+// (e.g. checking projects.list against a User object in a user control plane),
+// and the permission must exist as a relation on the type for the check to
+// succeed.
 func calculateHierarchicalPermissions(rootNode *resourceGraphNode) map[string][]string {
 	hierarchicalPermissions := make(map[string][]string)
 
 	// Traverse the entire graph and calculate permissions for each node
 	calculatePermissionsForNode(rootNode, hierarchicalPermissions)
+
+	// Collect ALL permissions across every resource type.
+	allPermsSet := make(map[string]struct{})
+	for _, perms := range hierarchicalPermissions {
+		for _, p := range perms {
+			allPermsSet[p] = struct{}{}
+		}
+	}
+	allPerms := make([]string, 0, len(allPermsSet))
+	for p := range allPermsSet {
+		allPerms = append(allPerms, p)
+	}
+
+	// Root-level resources (no parentResources) must carry all permissions.
+	for _, child := range rootNode.ChildResources {
+		if len(child.ParentResources) == 0 {
+			hierarchicalPermissions[child.ResourceType] = removeDuplicatePermissions(allPerms)
+		}
+	}
 
 	return hierarchicalPermissions
 }
