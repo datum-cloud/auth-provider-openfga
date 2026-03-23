@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"sync/atomic"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	openfgav1 "github.com/openfga/api/proto/openfga/v1"
