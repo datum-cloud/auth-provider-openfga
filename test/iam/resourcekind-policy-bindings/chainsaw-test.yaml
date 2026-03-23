@@ -208,6 +208,73 @@ spec:
                 path: "status.phase"
                 value: "Succeeded"
 
+        # Test specific-resource GET access. This exercises the BatchCheck path:
+        # the webhook checks both the instance (Organization:test-org-1) and the
+        # Root (Root:resourcemanager.miloapis.com/Organization) in a single RPC.
+        # The instance check won't find a tuple (ResourceKind bindings don't write
+        # per-instance tuples), but the Root check will match.
+        - apply:
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: resourcekind-webhook-test-get
+              spec:
+                restartPolicy: Never
+                containers:
+                - name: curl
+                  image: curlimages/curl:latest
+                  command: ["/bin/sh", "-c"]
+                  args:
+                    - |
+                      response=$(curl -ksS https://auth-provider-openfga-authz-webhook.auth-provider-openfga-system.svc.cluster.local:8090/apis/authorization.k8s.io/v1/subjectaccessreviews \
+                        -H "Content-Type: application/json" \
+                        -d @- << EOF
+                      {
+                        "apiVersion": "authorization.k8s.io/v1",
+                        "kind": "SubjectAccessReview",
+                        "spec": {
+                          "user": "test-system-admin",
+                          "uid": "test-system-admin",
+                          "groups": ["system:authenticated"],
+                          "resourceAttributes": {
+                            "group": "resourcemanager.miloapis.com",
+                            "resource": "organizations",
+                            "version": "v1alpha1",
+                            "verb": "get",
+                            "name": "test-org-1"
+                          }
+                        }
+                      }
+                      EOF
+                      )
+                      echo "Webhook response for get: $response"
+                      if ! echo "$response" | grep -q '"kind":"SubjectAccessReview"'; then
+                        echo "Webhook test failed - invalid response format"
+                        exit 1
+                      fi
+                      if echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*true'; then
+                        echo "Webhook test completed successfully - get specific org allowed via BatchCheck"
+                        exit 0
+                      elif echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*false'; then
+                        echo "Webhook test failed - get specific org denied (BatchCheck root fallback not working)"
+                        exit 1
+                      else
+                        echo "Webhook test failed - could not determine allowed status for get"
+                        exit 1
+                      fi
+
+        # Wait for get test to complete
+        - wait:
+            apiVersion: v1
+            kind: Pod
+            name: resourcekind-webhook-test-get
+            timeout: 30s
+            for:
+              jsonPath:
+                path: "status.phase"
+                value: "Succeeded"
+
         # Test that a user WITHOUT the ResourceKind binding cannot access organizations
         - apply:
             file: unauthorized-user.yaml
