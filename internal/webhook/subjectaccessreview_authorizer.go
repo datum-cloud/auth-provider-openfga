@@ -242,7 +242,7 @@ func (o *SubjectAccessReviewAuthorizer) Authorize(ctx context.Context, attribute
 		return authorizer.DecisionDeny, "", fmt.Errorf("permission '%s' not registered", permission)
 	}
 
-	// Step 6: Build and execute OpenFGA check request
+	// Step 6: Build OpenFGA check request
 	stepStart = time.Now()
 	ctx, buildReqSpan := tracer.Start(ctx, "build_openfga_request")
 	checkReq, err := o.buildOpenFGARequest(ctx, attributes, authCtx)
@@ -255,10 +255,34 @@ func (o *SubjectAccessReviewAuthorizer) Authorize(ctx context.Context, attribute
 		return authorizer.DecisionDeny, "", buildErr
 	}
 
-	// Step 8: Execute OpenFGA check
+	// Step 7: Execute OpenFGA check. For direct-permission specific-resource
+	// operations we use BatchCheck to cover both ResourceRef (instance-level)
+	// and ResourceKind (Root-level) PolicyBindings in a single RPC.
 	stepStart = time.Now()
-	decision, reason, checkErr := o.executeOpenFGACheck(ctx, checkReq)
-	authzStepDuration.WithLabelValues("openfga_check").Observe(time.Since(stepStart).Seconds())
+	var decision authorizer.Decision
+	var reason string
+	var checkErr error
+
+	isDirectPermOnly := utilfeature.DefaultFeatureGate.Enabled(features.DirectPermissionTuples) &&
+		!utilfeature.DefaultFeatureGate.Enabled(features.LegacyRoleBindingModel)
+
+	if isDirectPermOnly && needsRootFallbackCheck(authCtx, attributes) {
+		// Retrieve the ProtectedResource to build the Root object string for
+		// the ResourceKind fallback check.
+		protectedResource, prErr := o.getProtectedResource(ctx, attributes)
+		if prErr != nil {
+			buildErr := fmt.Errorf("failed to get protected resource for batch check: %w", prErr)
+			span.RecordError(buildErr)
+			span.SetStatus(codes.Error, buildErr.Error())
+			return authorizer.DecisionDeny, "", buildErr
+		}
+		rootResource := o.buildRootResource(protectedResource)
+		decision, reason, checkErr = o.executeBatchCheck(ctx, checkReq, rootResource)
+		authzStepDuration.WithLabelValues("openfga_batch_check").Observe(time.Since(stepStart).Seconds())
+	} else {
+		decision, reason, checkErr = o.executeOpenFGACheck(ctx, checkReq)
+		authzStepDuration.WithLabelValues("openfga_check").Observe(time.Since(stepStart).Seconds())
+	}
 
 	// Record total end-to-end duration at the authorizer level as well, labeled
 	// with the decision and scope so it can be used independently of the HTTP
@@ -516,6 +540,105 @@ func (o *SubjectAccessReviewAuthorizer) buildDirectPermissionCheckRequest(ctx co
 		// PolicyBinding reconciliation time, making them eligible for OpenFGA's
 		// check query cache.
 	}, nil
+}
+
+// needsRootFallbackCheck returns true when a specific-resource, cluster-scoped
+// operation requires a second check against the kind-level Root object to
+// resolve ResourceKind PolicyBindings.
+//
+// ResourceKind PolicyBindings are stored as tuples on Root:service/Kind. When
+// checking a named resource instance (service/Kind:name) those tuples are not
+// visible from the instance object because there is no stored bridge tuple
+// linking the instance to Root. A BatchCheck against both the instance and
+// Root covers both ResourceRef and ResourceKind binding styles in a single RPC.
+//
+// The fallback is only needed when:
+//   - The operation targets a specific resource (not list/create/watch and name is non-empty)
+//   - The request is not project-scoped (project checks go directly to the project object)
+//   - The request is not org-scoped (org checks go directly to the org object)
+func needsRootFallbackCheck(authCtx *authorizationContext, attributes authorizer.Attributes) bool {
+	if authCtx.isProjectScope() || authCtx.isOrganizationScope() {
+		return false
+	}
+	isCollectionOp := slices.Contains([]string{"list", "create", "watch"}, attributes.GetVerb()) || attributes.GetName() == ""
+	return !isCollectionOp
+}
+
+// executeBatchCheck executes an OpenFGA BatchCheck for a specific-resource
+// operation that may be covered by either a ResourceRef (instance-level) or
+// ResourceKind (Root-level) PolicyBinding. It sends both checks in a single
+// RPC and allows access if either result is allowed.
+func (o *SubjectAccessReviewAuthorizer) executeBatchCheck(
+	ctx context.Context,
+	checkReq *openfgav1.CheckRequest,
+	rootResource string,
+) (authorizer.Decision, string, error) {
+	tracer := otel.GetTracerProvider().Tracer("authz-webhook")
+	ctx, batchSpan := tracer.Start(ctx, "openfga.batch_check")
+	batchSpan.SetAttributes(
+		attribute.String("openfga.store_id", o.FGAStoreID),
+		attribute.String("openfga.user", checkReq.TupleKey.User),
+		attribute.String("openfga.relation", checkReq.TupleKey.Relation),
+		attribute.String("openfga.object_instance", checkReq.TupleKey.Object),
+		attribute.String("openfga.object_root", rootResource),
+	)
+	defer batchSpan.End()
+
+	logf.FromContext(ctx).Info("batch checking OpenFGA authorization",
+		"user", checkReq.TupleKey.User,
+		"relation", checkReq.TupleKey.Relation,
+		"instance", checkReq.TupleKey.Object,
+		"root", rootResource,
+	)
+
+	batchResp, err := o.FGAClient.BatchCheck(ctx, &openfgav1.BatchCheckRequest{
+		StoreId:              o.FGAStoreID,
+		AuthorizationModelId: checkReq.AuthorizationModelId,
+		Checks: []*openfgav1.BatchCheckItem{
+			{
+				TupleKey: &openfgav1.CheckRequestTupleKey{
+					User:     checkReq.TupleKey.User,
+					Relation: checkReq.TupleKey.Relation,
+					Object:   checkReq.TupleKey.Object,
+				},
+				CorrelationId: "instance",
+			},
+			{
+				TupleKey: &openfgav1.CheckRequestTupleKey{
+					User:     checkReq.TupleKey.User,
+					Relation: checkReq.TupleKey.Relation,
+					Object:   rootResource,
+				},
+				CorrelationId: "root",
+			},
+		},
+	})
+	if err != nil {
+		openfgaCheckTotal.WithLabelValues("false", "true").Inc()
+		batchSpan.RecordError(err)
+		batchSpan.SetStatus(codes.Error, err.Error())
+		logf.FromContext(ctx).Error(err, "failed to batch check authorization in OpenFGA")
+		return authorizer.DecisionNoOpinion, "", err
+	}
+
+	// Allow if either the instance check or the Root (ResourceKind) check allows.
+	allowed := false
+	for _, result := range batchResp.GetResult() {
+		if result.GetAllowed() {
+			allowed = true
+			break
+		}
+	}
+
+	openfgaCheckTotal.WithLabelValues(strconv.FormatBool(allowed), "false").Inc()
+	batchSpan.SetAttributes(attribute.Bool("openfga.allowed", allowed))
+
+	if allowed {
+		logf.FromContext(ctx).V(1).Info("subject was granted access through OpenFGA batch check")
+		return authorizer.DecisionAllow, "", nil
+	}
+
+	return authorizer.DecisionDeny, "", nil
 }
 
 // buildLegacyCheckRequest builds a Check request for the legacy RoleBinding
