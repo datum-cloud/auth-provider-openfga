@@ -2,7 +2,6 @@ package webhook
 
 import (
 	"context"
-	"log/slog"
 	"net/http"
 
 	authorizationv1 "k8s.io/api/authorization/v1"
@@ -10,6 +9,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apiserver/pkg/authentication/user"
 	"k8s.io/apiserver/pkg/authorization/authorizer"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 func NewAuthorizerWebhook(authzer authorizer.Authorizer) *Webhook {
@@ -36,7 +36,7 @@ func NewAuthorizerWebhook(authzer authorizer.Authorizer) *Webhook {
 			if r.Spec.ResourceAttributes != nil && r.Spec.ResourceAttributes.FieldSelector != nil {
 				fieldSelectorRequirements, err := fields.ParseSelector(r.Spec.ResourceAttributes.FieldSelector.RawSelector)
 				if err != nil {
-					slog.ErrorContext(ctx, "error parsing field selector", slog.String("error", err.Error()))
+					logf.FromContext(ctx).Error(err, "error parsing field selector")
 					return Errored(err)
 				}
 				attrs.FieldSelectorRequirements = fieldSelectorRequirements.Requirements()
@@ -45,7 +45,7 @@ func NewAuthorizerWebhook(authzer authorizer.Authorizer) *Webhook {
 			if r.Spec.ResourceAttributes != nil && r.Spec.ResourceAttributes.LabelSelector != nil {
 				labelSelectorRequirements, err := labels.ParseToRequirements(r.Spec.ResourceAttributes.LabelSelector.RawSelector)
 				if err != nil {
-					slog.ErrorContext(ctx, "error parsing label selector", slog.String("error", err.Error()))
+					logf.FromContext(ctx).Error(err, "error parsing label selector")
 					return Errored(err)
 				}
 				attrs.LabelSelectorRequirements = labelSelectorRequirements
@@ -73,7 +73,7 @@ func NewAuthorizerWebhook(authzer authorizer.Authorizer) *Webhook {
 				attrs,
 			)
 			if err != nil {
-				slog.ErrorContext(ctx, "error authorizing request", slog.String("error", err.Error()))
+				logf.FromContext(ctx).Error(err, "error authorizing request")
 				return Errored(err)
 			}
 

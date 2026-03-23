@@ -16,7 +16,7 @@ resources:
   - store-init
 
 components:
-  # GrafanaDashboard CR for authorization webhook metrics
+  # ServiceMonitors + GrafanaDashboard for authorization webhook metrics
   - ../../components/observability
 
 patches:

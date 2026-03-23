@@ -1,6 +1,7 @@
 apiVersion: kustomize.config.k8s.io/v1alpha1
 kind: Component
+
 resources:
+  - authz-webhook-monitor.yaml
+  - controller-manager-monitor.yaml
   - authz-webhook-dashboard.yaml
-  - authz-webhook-scrape.yaml
-  - controller-manager-scrape.yaml
