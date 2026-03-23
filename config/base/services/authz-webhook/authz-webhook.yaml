@@ -39,6 +39,7 @@ spec:
             - --openfga-store-id=$(OPENFGA_STORE_ID)
             - --configmap-name=$(CONFIGMAP_NAME)
             - --configmap-namespace=$(CONFIGMAP_NAMESPACE)
+            - --health-probe-bind-address=:8081
             - --feature-gates=$(FEATURE_GATES)
           env:
             - name: OPENFGA_API_URL
@@ -59,6 +60,9 @@ spec:
             - containerPort: 8080
               name: metrics
               protocol: TCP
+            - containerPort: 8081
+              name: health-probe
+              protocol: TCP
             - containerPort: 8090
               name: webhook
               protocol: TCP
@@ -67,6 +71,24 @@ spec:
             capabilities:
               drop:
                 - "ALL"
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8081
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8081
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: 8081
+            failureThreshold: 30
+            periodSeconds: 2
           volumeMounts: []
           resources:
             limits:

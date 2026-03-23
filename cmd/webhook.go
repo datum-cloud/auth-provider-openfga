@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"net/http"
 	"os"
+	"sync/atomic"
 	"strings"
 	"time"
 
@@ -26,6 +28,7 @@ import (
 	"k8s.io/client-go/discovery/cached/disk"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
+	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
@@ -40,6 +43,7 @@ func createWebhookCommand() *cobra.Command {
 	var openfgaScheme string
 	var webhookPort int
 	var metricsBindAddress string
+	var probeAddr string
 	var discoveryCacheTTL time.Duration
 	var otlpEndpoint string
 	var configmapNamespace string
@@ -59,6 +63,7 @@ func createWebhookCommand() *cobra.Command {
 				openfgaScheme,
 				webhookPort,
 				metricsBindAddress,
+				probeAddr,
 				discoveryCacheTTL,
 				otlpEndpoint,
 				configmapNamespace,
@@ -77,6 +82,7 @@ func createWebhookCommand() *cobra.Command {
 	cmd.Flags().StringVar(&openfgaScheme, "openfga-scheme", "http", "OpenFGA Scheme (http or https)")
 	cmd.Flags().IntVar(&webhookPort, "webhook-port", 9443, "Port for the webhook server")
 	cmd.Flags().StringVar(&metricsBindAddress, "metrics-bind-address", ":8080", "Address for the metrics server")
+	cmd.Flags().StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	cmd.Flags().DurationVar(&discoveryCacheTTL, "discovery-cache-ttl", 5*time.Minute,
 		"TTL for Kubernetes API discovery cache (enables automatic detection of new resources)")
 	cmd.Flags().StringVar(&otlpEndpoint, "otlp-endpoint", os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
@@ -108,6 +114,7 @@ func runWebhookServer(
 	openfgaScheme string,
 	webhookPort int,
 	metricsBindAddress string,
+	probeAddr string,
 	discoveryCacheTTL time.Duration,
 	otlpEndpoint string,
 	configmapNamespace string,
@@ -191,6 +198,7 @@ func runWebhookServer(
 		Metrics: server.Options{
 			BindAddress: metricsBindAddress,
 		},
+		HealthProbeBindAddress: probeAddr,
 		WebhookServer: ctrlwebhook.NewServer(ctrlwebhook.Options{
 			CertDir:  certDir,
 			CertName: certFile,
@@ -245,6 +253,31 @@ func runWebhookServer(
 		ProtectedResourceCache: prCache,
 		DiscoveryClient:        discoveryClient,
 	})
+
+	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
+		return fmt.Errorf("unable to set up health check: %w", err)
+	}
+
+	// Track whether the informer cache has completed its initial sync. The
+	// readiness probe returns unhealthy until this flag is set, preventing the
+	// pod from receiving authorization traffic before the ProtectedResource
+	// cache is populated.
+	var cacheReady atomic.Bool
+	go func() {
+		if mgr.GetCache().WaitForCacheSync(ctx) {
+			cacheReady.Store(true)
+			entryLog.Info("informer cache synced, readiness probe will pass")
+		}
+	}()
+
+	if err := mgr.AddReadyzCheck("readyz", func(_ *http.Request) error {
+		if !cacheReady.Load() {
+			return fmt.Errorf("informer caches have not yet synced")
+		}
+		return nil
+	}); err != nil {
+		return fmt.Errorf("unable to set up ready check: %w", err)
+	}
 
 	entryLog.Info("starting webhook server", "port", webhookPort, "metrics-port", metricsBindAddress)
 	return mgr.Start(context.Background())
