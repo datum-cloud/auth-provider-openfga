@@ -3,7 +3,6 @@ package webhook
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"slices"
 	"strconv"
@@ -19,6 +18,7 @@ import (
 	"k8s.io/apiserver/pkg/authorization/authorizer"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/client-go/discovery"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 const (
@@ -202,9 +202,9 @@ func (o *SubjectAccessReviewAuthorizer) Authorize(ctx context.Context, attribute
 	// no-op after the first call for a given user UID.
 	if o.SystemGroupMaterializer != nil {
 		if matErr := o.SystemGroupMaterializer.EnsureMaterialized(ctx, authCtx.userUID, attributes.GetUser().GetGroups()); matErr != nil {
-			slog.WarnContext(ctx, "failed to materialize system group memberships, continuing without persistence",
-				slog.String("userUID", authCtx.userUID),
-				slog.String("error", matErr.Error()),
+			logf.FromContext(ctx).Info("failed to materialize system group memberships, continuing without persistence",
+				"userUID", authCtx.userUID,
+				"error", matErr.Error(),
 			)
 		}
 	}
@@ -216,9 +216,9 @@ func (o *SubjectAccessReviewAuthorizer) Authorize(ctx context.Context, attribute
 	validateNsSpan.End()
 	authzStepDuration.WithLabelValues("validate_namespace").Observe(time.Since(stepStart).Seconds())
 	if validateNsErr != nil {
-		slog.WarnContext(ctx, "organization namespace validation failed",
-			slog.String("error", validateNsErr.Error()),
-			slog.String("request_id", requestID),
+		logf.FromContext(ctx).Info("organization namespace validation failed",
+			"error", validateNsErr.Error(),
+			"request_id", requestID,
 		)
 		span.RecordError(validateNsErr)
 		span.SetStatus(codes.Error, validateNsErr.Error())
@@ -238,7 +238,7 @@ func (o *SubjectAccessReviewAuthorizer) Authorize(ctx context.Context, attribute
 	}
 	if !permExists {
 		permission := o.buildPermissionString(attributes)
-		slog.WarnContext(ctx, "permission not found", slog.Any("attributes", attributes), slog.String("permission", permission))
+		logf.FromContext(ctx).Info("permission not found", "attributes", attributes, "permission", permission)
 		return authorizer.DecisionDeny, "", fmt.Errorf("permission '%s' not registered", permission)
 	}
 
@@ -276,16 +276,16 @@ func (o *SubjectAccessReviewAuthorizer) Authorize(ctx context.Context, attribute
 		span.SetStatus(codes.Error, checkErr.Error())
 	}
 
-	slog.InfoContext(ctx, "authorization completed",
-		slog.String("request_id", requestID),
-		slog.String("traceID", traceIDFromSpan(span)),
-		slog.Duration("duration", totalDuration),
-		slog.String("decision", decisionStr),
-		slog.String("scope", scope),
-		slog.String("resource_group", resourceGroup),
-		slog.String("resource", attributes.GetResource()),
-		slog.String("verb", attributes.GetVerb()),
-		slog.String("user", attributes.GetUser().GetName()),
+	logf.FromContext(ctx).Info("authorization completed",
+		"request_id", requestID,
+		"traceID", traceIDFromSpan(span),
+		"duration", totalDuration,
+		"decision", decisionStr,
+		"scope", scope,
+		"resource_group", resourceGroup,
+		"resource", attributes.GetResource(),
+		"verb", attributes.GetVerb(),
+		"user", attributes.GetUser().GetName(),
 	)
 
 	return decision, reason, checkErr
@@ -354,38 +354,38 @@ func (o *SubjectAccessReviewAuthorizer) isResourceNamespaced(ctx context.Context
 
 	if err != nil {
 		authzK8sAPICallsTotal.WithLabelValues("discovery", "get", "error").Inc()
-		slog.WarnContext(ctx, "failed to get server resources",
-			slog.String("apiGroup", apiGroup),
-			slog.String("apiVersion", apiVersion),
-			slog.String("groupVersion", groupVersion),
-			slog.String("error", err.Error()))
+		logf.FromContext(ctx).Info("failed to get server resources",
+			"apiGroup", apiGroup,
+			"apiVersion", apiVersion,
+			"groupVersion", groupVersion,
+			"error", err.Error())
 		return false, fmt.Errorf("failed to get server resources for group version %s: %w", groupVersion, err)
 	}
 	authzK8sAPICallsTotal.WithLabelValues("discovery", "get", "success").Inc()
 
-	slog.DebugContext(ctx, "k8s discovery completed",
-		slog.String("group_version", groupVersion),
-		slog.Duration("duration", discoveryDuration),
+	logf.FromContext(ctx).V(1).Info("k8s discovery completed",
+		"group_version", groupVersion,
+		"duration", discoveryDuration,
 	)
 
 	// Find the resource in the list
 	for _, apiResource := range resourceList.APIResources {
 		if apiResource.Name == resource {
-			slog.DebugContext(ctx, "found resource in discovery cache",
-				slog.String("apiGroup", apiGroup),
-				slog.String("apiVersion", apiVersion),
-				slog.String("resource", resource),
-				slog.Bool("namespaced", apiResource.Namespaced))
+			logf.FromContext(ctx).V(1).Info("found resource in discovery cache",
+				"apiGroup", apiGroup,
+				"apiVersion", apiVersion,
+				"resource", resource,
+				"namespaced", apiResource.Namespaced)
 			return apiResource.Namespaced, nil
 		}
 	}
 
 	// Resource not found - this could indicate a new resource that hasn't been cached yet
-	slog.WarnContext(ctx, "resource not found in API group version, this may indicate a newly registered resource",
-		slog.String("apiGroup", apiGroup),
-		slog.String("apiVersion", apiVersion),
-		slog.String("groupVersion", groupVersion),
-		slog.String("resource", resource))
+	logf.FromContext(ctx).Info("resource not found in API group version, this may indicate a newly registered resource",
+		"apiGroup", apiGroup,
+		"apiVersion", apiVersion,
+		"groupVersion", groupVersion,
+		"resource", resource)
 	return false, fmt.Errorf("resource %s not found in API group version %s", resource, groupVersion)
 }
 
@@ -436,10 +436,10 @@ func (o *SubjectAccessReviewAuthorizer) executeOpenFGACheck(ctx context.Context,
 	)
 	defer checkSpan.End()
 
-	slog.InfoContext(ctx, "checking OpenFGA authorization",
-		slog.String("user", checkReq.TupleKey.User),
-		slog.String("resource", checkReq.TupleKey.Object),
-		slog.String("relation", checkReq.TupleKey.Relation),
+	logf.FromContext(ctx).Info("checking OpenFGA authorization",
+		"user", checkReq.TupleKey.User,
+		"resource", checkReq.TupleKey.Object,
+		"relation", checkReq.TupleKey.Relation,
 	)
 
 	resp, err := o.FGAClient.Check(ctx, checkReq)
@@ -447,7 +447,7 @@ func (o *SubjectAccessReviewAuthorizer) executeOpenFGACheck(ctx context.Context,
 		openfgaCheckTotal.WithLabelValues("false", "true").Inc()
 		checkSpan.RecordError(err)
 		checkSpan.SetStatus(codes.Error, err.Error())
-		slog.ErrorContext(ctx, "failed to check authorization in OpenFGA", slog.String("error", err.Error()))
+		logf.FromContext(ctx).Error(err, "failed to check authorization in OpenFGA")
 		return authorizer.DecisionNoOpinion, "", err
 	}
 
@@ -456,7 +456,7 @@ func (o *SubjectAccessReviewAuthorizer) executeOpenFGACheck(ctx context.Context,
 	checkSpan.SetAttributes(attribute.Bool("openfga.allowed", allowed))
 
 	if allowed {
-		slog.DebugContext(ctx, "subject was granted access through OpenFGA")
+		logf.FromContext(ctx).V(1).Info("subject was granted access through OpenFGA")
 		return authorizer.DecisionAllow, "", nil
 	}
 
@@ -715,19 +715,19 @@ func (o *SubjectAccessReviewAuthorizer) validatePermissionWithServiceDefaulting(
 
 	if ok {
 		authzK8sAPICallsTotal.WithLabelValues("protectedresources", "cache_get", "hit").Inc()
-		slog.DebugContext(ctx, "protectedresource cache hit (validatePermission)",
-			slog.String("apiGroup", apiGroup),
-			slog.String("resource", resource),
-			slog.Duration("duration", duration),
+		logf.FromContext(ctx).V(1).Info("protectedresource cache hit (validatePermission)",
+			"apiGroup", apiGroup,
+			"resource", resource,
+			"duration", duration,
 		)
 		return slices.Contains(pr.Spec.Permissions, verb), nil
 	}
 
 	authzK8sAPICallsTotal.WithLabelValues("protectedresources", "cache_get", "miss").Inc()
-	slog.DebugContext(ctx, "protectedresource cache miss (validatePermission)",
-		slog.String("apiGroup", apiGroup),
-		slog.String("resource", resource),
-		slog.Duration("duration", duration),
+	logf.FromContext(ctx).V(1).Info("protectedresource cache miss (validatePermission)",
+		"apiGroup", apiGroup,
+		"resource", resource,
+		"duration", duration,
 	)
 	return false, nil
 }
@@ -786,12 +786,12 @@ func (o *SubjectAccessReviewAuthorizer) buildHashedPermissionRelation(attributes
 
 	// Hash the permission to match the OpenFGA model
 	hashedPermission := openfga.HashPermission(permission)
-	slog.Debug("buildRelation",
-		slog.String("permission", permission),
-		slog.String("hashedPermission", hashedPermission),
-		slog.String("apiGroup", attributes.GetAPIGroup()),
-		slog.String("resource", attributes.GetResource()),
-		slog.String("verb", attributes.GetVerb()),
+	logf.Log.V(1).Info("buildRelation",
+		"permission", permission,
+		"hashedPermission", hashedPermission,
+		"apiGroup", attributes.GetAPIGroup(),
+		"resource", attributes.GetResource(),
+		"verb", attributes.GetVerb(),
 	)
 	return hashedPermission
 }
@@ -814,19 +814,19 @@ func (o *SubjectAccessReviewAuthorizer) getProtectedResource(ctx context.Context
 
 	if ok {
 		authzK8sAPICallsTotal.WithLabelValues("protectedresources", "cache_get", "hit").Inc()
-		slog.DebugContext(ctx, "protectedresource cache hit (buildRequest)",
-			slog.String("apiGroup", apiGroup),
-			slog.String("resource", resource),
-			slog.Duration("duration", duration),
+		logf.FromContext(ctx).V(1).Info("protectedresource cache hit (buildRequest)",
+			"apiGroup", apiGroup,
+			"resource", resource,
+			"duration", duration,
 		)
 		return pr, nil
 	}
 
 	authzK8sAPICallsTotal.WithLabelValues("protectedresources", "cache_get", "miss").Inc()
-	slog.DebugContext(ctx, "protectedresource cache miss (buildRequest)",
-		slog.String("apiGroup", apiGroup),
-		slog.String("resource", resource),
-		slog.Duration("duration", duration),
+	logf.FromContext(ctx).V(1).Info("protectedresource cache miss (buildRequest)",
+		"apiGroup", apiGroup,
+		"resource", resource,
+		"duration", duration,
 	)
 	return nil, fmt.Errorf("no ProtectedResource found for APIGroup=%s, Resource=%s", apiGroup, resource)
 }

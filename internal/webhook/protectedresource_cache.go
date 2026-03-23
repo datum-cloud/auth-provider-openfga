@@ -3,13 +3,13 @@ package webhook
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"sync"
 
 	iamv1alpha1 "go.miloapis.com/milo/pkg/apis/iam/v1alpha1"
 	toolscache "k8s.io/client-go/tools/cache"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 // ProtectedResourceCache maintains an in-memory index of ProtectedResource objects,
@@ -59,14 +59,14 @@ func NewProtectedResourceCache(ctx context.Context, mgr ctrl.Manager) (*Protecte
 				// deleted but only the key is available.
 				tombstone, ok := obj.(toolscache.DeletedFinalStateUnknown)
 				if !ok {
-					slog.Warn("protectedresource_cache: unexpected object type in DeleteFunc",
-						slog.String("type", fmt.Sprintf("%T", obj)))
+					logf.Log.Info("protectedresource_cache: unexpected object type in DeleteFunc",
+						"type", fmt.Sprintf("%T", obj))
 					return
 				}
 				pr, ok = tombstone.Obj.(*iamv1alpha1.ProtectedResource)
 				if !ok {
-					slog.Warn("protectedresource_cache: unexpected tombstone object type",
-						slog.String("type", fmt.Sprintf("%T", tombstone.Obj)))
+					logf.Log.Info("protectedresource_cache: unexpected tombstone object type",
+						"type", fmt.Sprintf("%T", tombstone.Obj))
 					return
 				}
 			}
@@ -105,9 +105,9 @@ func (c *ProtectedResourceCache) upsert(pr *iamv1alpha1.ProtectedResource) {
 	c.mu.Lock()
 	c.index[key] = pr
 	c.mu.Unlock()
-	slog.Debug("protectedresource_cache: upserted entry",
-		slog.String("key", key),
-		slog.String("name", pr.Name),
+	logf.Log.V(1).Info("protectedresource_cache: upserted entry",
+		"key", key,
+		"name", pr.Name,
 	)
 }
 
@@ -116,9 +116,9 @@ func (c *ProtectedResourceCache) delete(pr *iamv1alpha1.ProtectedResource) {
 	c.mu.Lock()
 	delete(c.index, key)
 	c.mu.Unlock()
-	slog.Debug("protectedresource_cache: deleted entry",
-		slog.String("key", key),
-		slog.String("name", pr.Name),
+	logf.Log.V(1).Info("protectedresource_cache: deleted entry",
+		"key", key,
+		"name", pr.Name,
 	)
 }
 

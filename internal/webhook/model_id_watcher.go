@@ -3,7 +3,6 @@ package webhook
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"sync/atomic"
 	"time"
 
@@ -16,7 +15,10 @@ import (
 	"k8s.io/client-go/rest"
 	toolscache "k8s.io/client-go/tools/cache"
 	ctrl "sigs.k8s.io/controller-runtime"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
+
+var watcherLog = logf.Log.WithName("model_id_watcher")
 
 // AuthorizationModelIDWatcher watches the openfga-authorization-model ConfigMap
 // and keeps an up-to-date copy of the model ID in memory. The stored value is
@@ -176,9 +178,9 @@ func (w *AuthorizationModelIDWatcher) handleConfigMap(obj interface{}) {
 
 	modelID, ok := cm.Data[openfga.AuthorizationModelIDKey]
 	if !ok || modelID == "" {
-		slog.Warn("model_id_watcher: ConfigMap present but model-id key is missing or empty",
-			slog.String("configmap", cm.Name),
-			slog.String("namespace", cm.Namespace),
+		watcherLog.Info("ConfigMap present but model-id key is missing or empty",
+			"configmap", cm.Name,
+			"namespace", cm.Namespace,
 		)
 		return
 	}
@@ -189,8 +191,8 @@ func (w *AuthorizationModelIDWatcher) handleConfigMap(obj interface{}) {
 	}
 
 	w.modelID.Store(modelID)
-	slog.Info("model_id_watcher: authorization model ID updated",
-		slog.String("model_id", modelID),
-		slog.String("namespace", cm.Namespace),
+	watcherLog.Info("authorization model ID updated",
+		"model_id", modelID,
+		"namespace", cm.Namespace,
 	)
 }

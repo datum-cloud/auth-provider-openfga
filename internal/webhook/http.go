@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"time"
 
@@ -19,6 +18,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 const decisionError = "error"
@@ -119,7 +119,7 @@ func (wh *Webhook) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() {
 		if closeErr := r.Body.Close(); closeErr != nil {
-			slog.ErrorContext(ctx, "failed to close request body", slog.String("error", closeErr.Error()))
+			logf.FromContext(ctx).Error(closeErr, "failed to close request body")
 		}
 	}()
 
@@ -169,18 +169,17 @@ func (wh *Webhook) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	)
 
 	if reviewResponse.Status.EvaluationError != "" {
-		slog.ErrorContext(ctx, "evaluation error in webhook", slog.String("error", reviewResponse.Status.EvaluationError))
+		logf.FromContext(ctx).Error(fmt.Errorf("%s", reviewResponse.Status.EvaluationError), "evaluation error in webhook")
 	}
 
-	slog.InfoContext(
-		ctx,
+	logf.FromContext(ctx).Info(
 		"handled SubjectAccessReview webhook request",
-		slog.Bool("allowed", reviewResponse.Status.Allowed),
-		slog.Bool("denied", reviewResponse.Status.Denied),
-		slog.String("user", req.Spec.User),
-		slog.String("request_id", requestID),
-		slog.String("traceID", traceIDFromSpan(span)),
-		slog.Duration("duration", time.Since(start)),
+		"allowed", reviewResponse.Status.Allowed,
+		"denied", reviewResponse.Status.Denied,
+		"user", req.Spec.User,
+		"request_id", requestID,
+		"traceID", traceIDFromSpan(span),
+		"duration", time.Since(start),
 	)
 	wh.writeResponse(w, &req, reviewResponse)
 }

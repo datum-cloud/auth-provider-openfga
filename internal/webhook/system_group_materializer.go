@@ -3,11 +3,11 @@ package webhook
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"strings"
 	"sync"
 
 	openfgav1 "github.com/openfga/api/proto/openfga/v1"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 const (
@@ -70,9 +70,9 @@ func (m *SystemGroupMaterializer) EnsureMaterialized(ctx context.Context, userUI
 		return nil
 	}
 
-	slog.DebugContext(ctx, "materializing system group memberships",
-		slog.String("userUID", userUID),
-		slog.Int("groupCount", len(tuples)),
+	logf.FromContext(ctx).V(1).Info("materializing system group memberships",
+		"userUID", userUID,
+		"groupCount", len(tuples),
 	)
 
 	_, err := m.fgaClient.Write(ctx, &openfgav1.WriteRequest{
@@ -86,8 +86,8 @@ func (m *SystemGroupMaterializer) EnsureMaterialized(ctx context.Context, userUI
 		// written by another replica or a prior run. Treat this as success rather than
 		// a hard failure so we do not block authorization on transient duplicates.
 		if isTupleConflictError(err) {
-			slog.DebugContext(ctx, "system group tuples already exist in OpenFGA, skipping write",
-				slog.String("userUID", userUID),
+			logf.FromContext(ctx).V(1).Info("system group tuples already exist in OpenFGA, skipping write",
+				"userUID", userUID,
 			)
 		} else {
 			return fmt.Errorf("failed to materialize system group memberships for user %s: %w", userUID, err)
