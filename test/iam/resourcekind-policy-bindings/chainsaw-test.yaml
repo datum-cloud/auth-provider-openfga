@@ -399,7 +399,7 @@ spec:
                     uid: ($userUID)
                 resourceSelector:
                   resourceKind:
-                    apiGroup: ""
+                    apiGroup: "core.miloapis.com"
                     kind: Secret
 
         - wait:
