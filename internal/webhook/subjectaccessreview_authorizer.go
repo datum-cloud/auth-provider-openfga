@@ -255,9 +255,11 @@ func (o *SubjectAccessReviewAuthorizer) Authorize(ctx context.Context, attribute
 		return authorizer.DecisionDeny, "", buildErr
 	}
 
-	// Step 7: Execute OpenFGA check. For direct-permission specific-resource
-	// operations we use BatchCheck to cover both ResourceRef (instance-level)
-	// and ResourceKind (Root-level) PolicyBindings in a single RPC.
+	// Step 7: Execute OpenFGA check. When direct-permission tuples are
+	// enabled, always use BatchCheck to cover both the resolved object
+	// (instance, project, or organization) and the kind-level Root object
+	// in a single RPC. This ensures ResourceKind PolicyBindings are
+	// evaluated regardless of request scope.
 	stepStart = time.Now()
 	var decision authorizer.Decision
 	var reason string
@@ -266,9 +268,7 @@ func (o *SubjectAccessReviewAuthorizer) Authorize(ctx context.Context, attribute
 	isDirectPermOnly := utilfeature.DefaultFeatureGate.Enabled(features.DirectPermissionTuples) &&
 		!utilfeature.DefaultFeatureGate.Enabled(features.LegacyRoleBindingModel)
 
-	if isDirectPermOnly && needsRootFallbackCheck(authCtx, attributes) {
-		// Retrieve the ProtectedResource to build the Root object string for
-		// the ResourceKind fallback check.
+	if isDirectPermOnly {
 		protectedResource, prErr := o.getProtectedResource(ctx, attributes)
 		if prErr != nil {
 			buildErr := fmt.Errorf("failed to get protected resource for batch check: %w", prErr)
@@ -540,28 +540,6 @@ func (o *SubjectAccessReviewAuthorizer) buildDirectPermissionCheckRequest(ctx co
 		// PolicyBinding reconciliation time, making them eligible for OpenFGA's
 		// check query cache.
 	}, nil
-}
-
-// needsRootFallbackCheck returns true when a specific-resource, cluster-scoped
-// operation requires a second check against the kind-level Root object to
-// resolve ResourceKind PolicyBindings.
-//
-// ResourceKind PolicyBindings are stored as tuples on Root:service/Kind. When
-// checking a named resource instance (service/Kind:name) those tuples are not
-// visible from the instance object because there is no stored bridge tuple
-// linking the instance to Root. A BatchCheck against both the instance and
-// Root covers both ResourceRef and ResourceKind binding styles in a single RPC.
-//
-// The fallback is only needed when:
-//   - The operation targets a specific resource (not list/create/watch and name is non-empty)
-//   - The request is not project-scoped (project checks go directly to the project object)
-//   - The request is not org-scoped (org checks go directly to the org object)
-func needsRootFallbackCheck(authCtx *authorizationContext, attributes authorizer.Attributes) bool {
-	if authCtx.isProjectScope() || authCtx.isOrganizationScope() {
-		return false
-	}
-	isCollectionOp := slices.Contains([]string{"list", "create", "watch"}, attributes.GetVerb()) || attributes.GetName() == ""
-	return !isCollectionOp
 }
 
 // executeBatchCheck executes an OpenFGA BatchCheck for a specific-resource
