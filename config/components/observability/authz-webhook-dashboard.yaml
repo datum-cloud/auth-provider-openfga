@@ -4,9 +4,8 @@ metadata:
   name: authz-webhook
 spec:
   instanceSelector:
-    matchExpressions:
-      - key: dashboards
-        operator: Exists
+    matchLabels:
+      dashboards: "grafana"
   allowCrossNamespaceImport: true
   folder: "Platform / IAM"
   json: |
@@ -517,6 +516,12 @@ spec:
               "expr": "sum by (step) (rate(authz_step_duration_seconds_sum{namespace=~\"$namespace\", step=\"openfga_check\"}[$__rate_interval])) / sum by (step) (rate(authz_step_duration_seconds_count{namespace=~\"$namespace\", step=\"openfga_check\"}[$__rate_interval]))",
               "legendFormat": "openfga_check",
               "refId": "E"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "sum by (step) (rate(authz_step_duration_seconds_sum{namespace=~\"$namespace\", step=\"openfga_batch_check\"}[$__rate_interval])) / sum by (step) (rate(authz_step_duration_seconds_count{namespace=~\"$namespace\", step=\"openfga_batch_check\"}[$__rate_interval]))",
+              "legendFormat": "openfga_batch_check",
+              "refId": "F"
             }
           ],
           "title": "Average Latency per Step (Stacked)",
@@ -645,7 +650,7 @@ spec:
           "targets": [
             {
               "datasource": { "type": "prometheus", "uid": "${datasource}" },
-              "expr": "sum by (le) (increase(authz_step_duration_seconds_bucket{step=\"openfga_check\", namespace=~\"$namespace\"}[$__rate_interval]))",
+              "expr": "sum by (le) (increase(authz_step_duration_seconds_bucket{step=~\"openfga_check|openfga_batch_check\", namespace=~\"$namespace\"}[$__rate_interval]))",
               "format": "heatmap",
               "legendFormat": "{{le}}",
               "refId": "A"
@@ -733,7 +738,7 @@ spec:
           "targets": [
             {
               "datasource": { "type": "prometheus", "uid": "${datasource}" },
-              "expr": "sum(rate(authz_step_duration_seconds_count{step=\"openfga_check\", namespace=~\"$namespace\"}[$__rate_interval]))",
+              "expr": "sum(rate(authz_step_duration_seconds_count{step=~\"openfga_check|openfga_batch_check\", namespace=~\"$namespace\"}[$__rate_interval]))",
               "legendFormat": "OpenFGA check rate",
               "refId": "A"
             },

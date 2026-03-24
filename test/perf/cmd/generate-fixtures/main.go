@@ -103,6 +103,7 @@ type ScaleManifest struct {
 	Roles              []string            `json:"roles"`
 	Permissions        []string            `json:"permissions"`
 	UserOrgMemberships map[string][]string `json:"user_org_memberships"`
+	AdminUsers         []string            `json:"admin_users"`
 	DeniedUser         string              `json:"denied_user"`
 	TupleCount         int64               `json:"tuple_count"`
 }
@@ -316,6 +317,16 @@ func runDirectMode(ctx context.Context, cfg Config) {
 		os.Exit(1)
 	}
 	fmt.Fprintf(os.Stderr, "  Wrote %d project tuples\n", len(projectTuples))
+
+	// Phase 6b: Write ResourceKind tuples for admin users on Root objects.
+	// These exercise the BatchCheck path in the webhook.
+	fmt.Fprintln(os.Stderr, "Phase 6b: Writing admin ResourceKind tuples...")
+	adminTuples := buildAdminResourceKindTuples(cfg)
+	if err := writeTuplesBatched(ctx, client, cfg.StoreID, adminTuples, cfg.Workers, &totalWritten); err != nil {
+		fmt.Fprintf(os.Stderr, "ERROR: Phase 6b failed: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Fprintf(os.Stderr, "  Wrote %d admin ResourceKind tuples\n", len(adminTuples))
 
 	membershipMap = buildMembershipMap(cfg)
 
@@ -1087,6 +1098,36 @@ func buildOrgBindingTuples(cfg Config, membershipMap map[int][]int) []*openfgav1
 }
 
 // ---------------------------------------------------------------------------
+// Direct mode: Phase 6b — Admin ResourceKind tuples on Root objects
+// ---------------------------------------------------------------------------
+
+// buildAdminResourceKindTuples creates direct permission tuples for admin users
+// on Root objects. These exercise the BatchCheck path where the webhook checks
+// both the instance and Root in a single RPC.
+func buildAdminResourceKindTuples(cfg Config) []*openfgav1.TupleKey {
+	numAdmins := 5
+	if numAdmins > cfg.NumUsers {
+		numAdmins = cfg.NumUsers
+	}
+
+	// Each admin gets tuples for the first role's permissions on the Root Organization.
+	rootObject := internalopenfga.TypeRoot + ":resourcemanager.miloapis.com/Organization"
+	tuples := make([]*openfgav1.TupleKey, 0, numAdmins*cfg.PermissionsPerRole)
+	for a := 0; a < numAdmins; a++ {
+		user := fmt.Sprintf("iam.miloapis.com/InternalUser:scale-admin-%d", a)
+		for p := 0; p < cfg.PermissionsPerRole; p++ {
+			perm := buildPermissionString(0, p) // Use role-0 permissions
+			tuples = append(tuples, &openfgav1.TupleKey{
+				User:     user,
+				Relation: internalopenfga.HashPermission(perm),
+				Object:   rootObject,
+			})
+		}
+	}
+	return tuples
+}
+
+// ---------------------------------------------------------------------------
 // Direct mode: Phase 5 — Organization RootBinding tuples
 // ---------------------------------------------------------------------------
 
@@ -1272,6 +1313,17 @@ func buildManifest(cfg Config, membershipMap map[int][]int, tupleCount int64) Sc
 		userOrgMap[userName] = orgNames
 	}
 
+	// Admin users get ResourceKind bindings (tuples on Root objects).
+	// Use a small fixed number — these exercise the BatchCheck path.
+	numAdmins := 5
+	if numAdmins > cfg.NumUsers {
+		numAdmins = cfg.NumUsers
+	}
+	adminUsers := make([]string, numAdmins)
+	for i := range adminUsers {
+		adminUsers[i] = fmt.Sprintf("scale-admin-%d", i)
+	}
+
 	return ScaleManifest{
 		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
 		Params: ManifestParams{
@@ -1289,6 +1341,7 @@ func buildManifest(cfg Config, membershipMap map[int][]int, tupleCount int64) Sc
 		Roles:              roles,
 		Permissions:        permissions,
 		UserOrgMemberships: userOrgMap,
+		AdminUsers:         adminUsers,
 		// scale-denied-user has no tuples; it must not appear in the Users list
 		// or UserOrgMemberships map. We record it here so k6 can use it.
 		DeniedUser: "scale-denied-user",

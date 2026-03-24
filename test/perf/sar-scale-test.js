@@ -12,6 +12,9 @@
  *                  full branch exhaustion on the denial path.
  *   project      — Project-scoped checks with parent inheritance. Exercises
  *                  the hierarchy resolution path.
+ *   resourcekind — Cluster-scoped specific-resource checks. Exercises the
+ *                  BatchCheck path where both the instance and Root objects
+ *                  are checked in a single RPC.
  *
  * Usage (via Taskfile):
  *   task test:perf:scale
@@ -67,7 +70,7 @@ const PERF_RAMP_UP    = __ENV.PERF_RAMP_UP  || '10s';
 const ENVIRONMENT     = __ENV.ENVIRONMENT   || 'kind-local';
 
 // Comma-separated list of scenarios to enable. Defaults to all four.
-const PERF_SCENARIOS_RAW = __ENV.PERF_SCENARIOS || 'random,hotspot,denied,project';
+const PERF_SCENARIOS_RAW = __ENV.PERF_SCENARIOS || 'random,hotspot,denied,project,resourcekind';
 const enabledScenarios   = new Set(PERF_SCENARIOS_RAW.split(',').map(s => s.trim()));
 
 // ---------------------------------------------------------------------------
@@ -133,16 +136,26 @@ function buildScenarios() {
       exec: 'projectScoped',
       startTime: PERF_RAMP_UP,
       stages: [
-        { duration: PERF_RAMP_UP, target: Math.floor(PERF_VUS * 0.70) },
-        { duration: PERF_DURATION, target: Math.floor(PERF_VUS * 0.70) },
+        { duration: PERF_RAMP_UP, target: Math.floor(PERF_VUS * 0.60) },
+        { duration: PERF_DURATION, target: Math.floor(PERF_VUS * 0.60) },
+      ],
+    },
+    resourcekind: {
+      executor: 'ramping-vus',
+      exec: 'resourceKind',
+      startTime: PERF_RAMP_UP,
+      stages: [
+        { duration: PERF_RAMP_UP, target: Math.floor(PERF_VUS * 0.10) },
+        { duration: PERF_DURATION, target: Math.floor(PERF_VUS * 0.10) },
       ],
     },
   };
 
   const active = {};
   for (const [name, def] of Object.entries(all)) {
-    // 'project_scoped' is enabled when 'project' is in the set.
-    const key = name === 'project_scoped' ? 'project' : name;
+    // Map internal scenario names to user-facing keys.
+    const keyMap = { project_scoped: 'project' };
+    const key = keyMap[name] || name;
     if (enabledScenarios.has(key)) {
       active[name] = def;
     }
@@ -308,6 +321,44 @@ export function projectScoped() {
 }
 
 // ---------------------------------------------------------------------------
+// Scenario 5 — resourcekind: cluster-scoped specific-resource access via
+// ResourceKind bindings. Exercises the BatchCheck path where the webhook
+// checks both the instance object and the Root object in a single RPC.
+// ---------------------------------------------------------------------------
+
+export function resourceKind() {
+  // Pick a user that has a ResourceKind binding (admin users).
+  // The fixture generator should create at least one admin user with
+  // ResourceKind bindings. Fall back to a regular user if no admin users.
+  const adminUsers = manifest.admin_users || [];
+  const user = adminUsers.length > 0
+    ? adminUsers[Math.floor(Math.random() * adminUsers.length)]
+    : manifest.users[Math.floor(Math.random() * manifest.users.length)];
+
+  // Pick a random org as the specific resource being accessed.
+  const org = manifest.organizations[Math.floor(Math.random() * manifest.organizations.length)];
+
+  // Build a cluster-scoped specific-resource request (no org/project extra).
+  // This exercises the BatchCheck path: the webhook checks both
+  // Organization:org-name AND Root:resourcemanager.miloapis.com/Organization.
+  const payload = buildResourceKindSAR(user, org);
+  const body = sendSAR(payload);
+
+  if (body !== null) {
+    const isAllowed = body.status && body.status.allowed === true;
+    if (isAllowed) {
+      sarAllowedTotal.add(1, { scenario: 'resourcekind' });
+    } else {
+      sarDeniedTotal.add(1, { scenario: 'resourcekind' });
+    }
+    check(body, {
+      'resourcekind: response kind is SubjectAccessReview': (b) =>
+        b.kind === 'SubjectAccessReview',
+    });
+  }
+}
+
+// ---------------------------------------------------------------------------
 // SAR payload builders
 // ---------------------------------------------------------------------------
 
@@ -334,6 +385,31 @@ function buildOrgSAR(user, org) {
         version: 'v1alpha1',
         verb: 'get',
         name: org,
+      },
+    },
+  };
+}
+
+/**
+ * Build a SubjectAccessReview for a cluster-scoped specific-resource check.
+ * No organization-id or project extras — this forces the webhook to use
+ * the BatchCheck path, checking both the instance and Root objects.
+ */
+function buildResourceKindSAR(user, org) {
+  return {
+    apiVersion: 'authorization.k8s.io/v1',
+    kind: 'SubjectAccessReview',
+    spec: {
+      user: user,
+      uid: user,
+      groups: ['system:authenticated'],
+      // No extra context — cluster-scoped, no org/project scope.
+      resourceAttributes: {
+        group: 'resourcemanager.miloapis.com',
+        resource: 'organizations',
+        version: 'v1alpha1',
+        verb: 'get',
+        name: org,   // Specific instance — triggers BatchCheck
       },
     },
   };

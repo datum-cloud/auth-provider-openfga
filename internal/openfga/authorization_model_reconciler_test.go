@@ -482,8 +482,11 @@ func TestAuthorizationModelsEqual_IdFieldIgnored(t *testing.T) {
 
 // TestDirectPermissionModel_ResourceTypeDefinition verifies that the generated
 // TypeDefinition for a resource under the direct-permission model:
-//   - Has no RoleBinding or RootBinding relations
-//   - Has one hashed-permission relation per permission
+//   - Has no legacy RoleBinding relation
+//   - Has no rootbinding relation (ResourceKind bindings are handled via
+//     BatchCheck at the webhook layer, not via a model relation)
+//   - Has one hashed-permission relation per permission using This directly
+//     (or a union of This + TupleToUserset(parent) when a parent exists)
 //   - Each relation declares InternalUser and InternalUserGroup#member as
 //     directly-related user types
 func TestDirectPermissionModel_ResourceTypeDefinition(t *testing.T) {
@@ -498,9 +501,14 @@ func TestDirectPermissionModel_ResourceTypeDefinition(t *testing.T) {
 
 	td := getResourceTypeDefinition(permissions, node)
 
-	// No legacy RoleBinding or RootBinding relations
+	// No legacy RoleBinding relation — that is a hybrid/legacy-only concept.
 	assert.NotContains(t, td.Relations, RelationRoleBinding, "should not have RoleBinding relation")
-	assert.NotContains(t, td.Relations, RelationRootBinding, "should not have RootBinding relation")
+
+	// No rootbinding relation — ResourceKind PolicyBindings are resolved via
+	// BatchCheck at the webhook layer, not through a model relation. Adding
+	// rootbinding to the model would require model changes which is exactly
+	// what BatchCheck is designed to avoid.
+	assert.NotContains(t, td.Relations, RelationRootBinding, "should NOT have rootbinding relation")
 
 	// One hashed-permission relation per permission
 	for _, perm := range permissions {
@@ -521,12 +529,19 @@ func TestDirectPermissionModel_ResourceTypeDefinition(t *testing.T) {
 		}
 		assert.True(t, types[TypeInternalUser], "InternalUser should be directly related")
 		assert.True(t, types[TypeInternalUserGroup+"#"+RelationMember], "InternalUserGroup#member should be directly related")
+
+		// For a resource with no parents the permission relation is a plain This
+		// (no union wrapper needed).
+		relation, ok := td.Relations[hashed]
+		require.True(t, ok)
+		assert.NotNil(t, relation.GetThis(), "permission relation should be This (direct assignment) when no parents")
 	}
 }
 
 // TestDirectPermissionModel_ParentInheritance verifies that permission relations
-// on a child resource include a TupleToUserset branch that reads from the parent
-// relation when the resource has registered parents.
+// on a child resource include This + TupleToUserset(parent) when the resource
+// has registered parents. There is no rootbinding branch — ResourceKind
+// bindings are resolved via BatchCheck at the webhook layer.
 func TestDirectPermissionModel_ParentInheritance(t *testing.T) {
 	permissions := []string{"compute.miloapis.com/workloads.get"}
 	node := &resourceGraphNode{
@@ -539,22 +554,26 @@ func TestDirectPermissionModel_ParentInheritance(t *testing.T) {
 	// Parent relation should exist
 	assert.Contains(t, td.Relations, RelationParent, "should have parent relation")
 
+	// No rootbinding — ResourceKind bindings resolved via BatchCheck, not model.
+	assert.NotContains(t, td.Relations, RelationRootBinding, "should NOT have rootbinding relation")
+
 	hashed := hashPermission(permissions[0])
 	relation, ok := td.Relations[hashed]
 	require.True(t, ok, "hashed permission relation should exist")
 
 	union := relation.GetUnion()
-	require.NotNil(t, union, "permission relation should be a Union when there are parents")
+	require.NotNil(t, union, "permission relation should be a Union")
+	// Union children: This (direct) + TupleToUserset(parent)
 	assert.Len(t, union.Child, 2, "union should have 2 children: direct + parent-inherited")
 
 	// First child: direct assignment (This)
 	assert.NotNil(t, union.Child[0].GetThis(), "first child should be This (direct assignment)")
 
 	// Second child: inherited from parent (TupleToUserset via parent relation)
-	ttu := union.Child[1].GetTupleToUserset()
-	require.NotNil(t, ttu, "second child should be TupleToUserset")
-	assert.Equal(t, RelationParent, ttu.Tupleset.Relation)
-	assert.Equal(t, hashed, ttu.ComputedUserset.Relation)
+	parentTTU := union.Child[1].GetTupleToUserset()
+	require.NotNil(t, parentTTU, "second child should be TupleToUserset for parent inheritance")
+	assert.Equal(t, RelationParent, parentTTU.Tupleset.Relation)
+	assert.Equal(t, hashed, parentTTU.ComputedUserset.Relation)
 }
 
 // TestDirectPermissionModel_MinimalModel verifies that getMinimalAuthorizationModel
