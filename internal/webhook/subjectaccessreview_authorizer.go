@@ -49,10 +49,6 @@ type SubjectAccessReviewAuthorizer struct {
 	ModelIDWatcher         *AuthorizationModelIDWatcher
 	ProtectedResourceCache *ProtectedResourceCache
 	DiscoveryClient        discovery.DiscoveryInterface
-	// SystemGroupMaterializer writes system group membership tuples to OpenFGA
-	// the first time a user UID is seen, replacing per-request contextual tuples
-	// so that the OpenFGA check query cache covers the full resolution path.
-	SystemGroupMaterializer *SystemGroupMaterializer
 }
 
 // Config holds the configuration for creating a SubjectAccessReview webhook
@@ -67,12 +63,11 @@ type Config struct {
 // NewSubjectAccessReviewWebhook creates a new SubjectAccessReview authorization webhook
 func NewSubjectAccessReviewWebhook(config Config) *Webhook {
 	authorizer := &SubjectAccessReviewAuthorizer{
-		FGAClient:               config.FGAClient,
-		FGAStoreID:              config.FGAStoreID,
-		ModelIDWatcher:          config.ModelIDWatcher,
-		ProtectedResourceCache:  config.ProtectedResourceCache,
-		DiscoveryClient:         config.DiscoveryClient,
-		SystemGroupMaterializer: NewSystemGroupMaterializer(config.FGAClient, config.FGAStoreID),
+		FGAClient:              config.FGAClient,
+		FGAStoreID:             config.FGAStoreID,
+		ModelIDWatcher:         config.ModelIDWatcher,
+		ProtectedResourceCache: config.ProtectedResourceCache,
+		DiscoveryClient:        config.DiscoveryClient,
 	}
 	return NewAuthorizerWebhook(authorizer)
 }
@@ -197,19 +192,7 @@ func (o *SubjectAccessReviewAuthorizer) Authorize(ctx context.Context, attribute
 	scope := scopeLabel(authCtx)
 	span.SetAttributes(attribute.String("authz.scope", scope))
 
-	// Step 2: Materialize system group memberships as stored OpenFGA tuples so
-	// that the check query cache can cover the full resolution path. This is a
-	// no-op after the first call for a given user UID.
-	if o.SystemGroupMaterializer != nil {
-		if matErr := o.SystemGroupMaterializer.EnsureMaterialized(ctx, authCtx.userUID, attributes.GetUser().GetGroups()); matErr != nil {
-			logf.FromContext(ctx).Info("failed to materialize system group memberships, continuing without persistence",
-				"userUID", authCtx.userUID,
-				"error", matErr.Error(),
-			)
-		}
-	}
-
-	// Step 4: Validate organization namespace if organization-scoped
+	// Step 2: Validate organization namespace if organization-scoped
 	stepStart = time.Now()
 	ctx, validateNsSpan := tracer.Start(ctx, "validate_organization_namespace")
 	validateNsErr := o.validateOrganizationNamespace(ctx, authCtx, attributes)
