@@ -28,7 +28,7 @@ spec:
           type: RuntimeDefault
       containers:
       - name: manager
-        image: auth-provider-openfga:latest
+        image: ghcr.io/datum-cloud/auth-provider-openfga:latest
         imagePullPolicy: IfNotPresent
         args:
           - manager
@@ -42,7 +42,14 @@ spec:
           - --leader-election-lease-duration=$(LEADER_ELECTION_LEASE_DURATION)
           - --leader-election-renew-deadline=$(LEADER_ELECTION_RENEW_DEADLINE)
           - --leader-election-retry-period=$(LEADER_ELECTION_RETRY_PERIOD)
+          - --configmap-name=$(CONFIGMAP_NAME)
+          - --configmap-namespace=$(CONFIGMAP_NAMESPACE)
+          - --feature-gates=$(FEATURE_GATES)
         env:
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
         - name: OPENFGA_API_URL
           value: openfga.openfga-system.svc.cluster.local:8081
         - name: OPENFGA_STORE_ID
@@ -57,6 +64,14 @@ spec:
           value: 10s
         - name: LEADER_ELECTION_RETRY_PERIOD
           value: 2s
+        - name: CONFIGMAP_NAME
+          value: openfga-authorization-model
+        - name: CONFIGMAP_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: FEATURE_GATES
+          value: ""
         ports:
           - containerPort: 8080
             name: metrics

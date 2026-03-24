@@ -21,23 +21,32 @@ spec:
         # Create test user
         - apply:
             file: user.yaml
-            outputs:
-              - name: user
-                value: (@)
 
         # Create multiple organizations to test system-wide access
         - apply:
             file: organization1.yaml
-            outputs:
-              - name: org1
-                value: (@)
         - apply:
             file: organization2.yaml
-            outputs:
-              - name: org2
-                value: (@)
 
-        # Create ResourceKind PolicyBinding that grants access to ALL organizations
+        # Fetch the test user UID — apply returns the local resource spec (without
+        # server-generated fields like UID), so we fetch it explicitly via script.
+        - script:
+            content: |
+              kubectl get users.iam.miloapis.com test-system-admin \
+                -o jsonpath='{.metadata.uid}'
+            outputs:
+              - name: userUID
+                value: ($stdout)
+
+        # Create ResourceKind PolicyBinding that grants access to ALL organizations.
+        # The uid field is the K8s metadata UID (required for controller validation),
+        # but the OpenFGA tuple uses the subject name ("test-system-admin") as the
+        # user identifier, not the uid field.
+        #
+        # ResourceKind PolicyBindings write tuples targeting the root object
+        # (iam.miloapis.com/Root:<apiGroup>/<Kind>). The webhook resolves collection
+        # operations (list, create, watch) to this root object, enabling system-wide
+        # access for those verbs.
         - apply:
             resource:
               apiVersion: iam.miloapis.com/v1alpha1
@@ -51,7 +60,7 @@ spec:
                 subjects:
                   - kind: User
                     name: "test-system-admin"
-                    uid: ($user.metadata.uid)
+                    uid: ($userUID)
                 resourceSelector:
                   resourceKind:
                     apiGroup: "resourcemanager.miloapis.com"
@@ -68,13 +77,148 @@ spec:
                 name: Ready
                 value: 'true'
 
-        # Test access to first organization
+        # Test collection list access. ResourceKind bindings target the root object
+        # (iam.miloapis.com/Root:resourcemanager.miloapis.com/Organization) which
+        # collection operations (list, create, watch) resolve to. The uid field
+        # uses the user's resource name, which is the OpenFGA user identifier.
         - apply:
             resource:
               apiVersion: v1
               kind: Pod
               metadata:
-                name: resourcekind-webhook-test-org1
+                name: resourcekind-webhook-test-list
+              spec:
+                restartPolicy: Never
+                containers:
+                - name: curl
+                  image: curlimages/curl:latest
+                  command: ["/bin/sh", "-c"]
+                  args:
+                    - |
+                      response=$(curl -ksS https://auth-provider-openfga-authz-webhook.auth-provider-openfga-system.svc.cluster.local:8090/apis/authorization.k8s.io/v1/subjectaccessreviews \
+                        -H "Content-Type: application/json" \
+                        -d @- << EOF
+                      {
+                        "apiVersion": "authorization.k8s.io/v1",
+                        "kind": "SubjectAccessReview",
+                        "spec": {
+                          "user": "test-system-admin",
+                          "uid": "test-system-admin",
+                          "groups": ["system:authenticated"],
+                          "resourceAttributes": {
+                            "group": "resourcemanager.miloapis.com",
+                            "resource": "organizations",
+                            "version": "v1alpha1",
+                            "verb": "list"
+                          }
+                        }
+                      }
+                      EOF
+                      )
+                      echo "Webhook response for list: $response"
+                      # Check if we got a valid SubjectAccessReview response
+                      if ! echo "$response" | grep -q '"kind":"SubjectAccessReview"'; then
+                        echo "Webhook test failed - invalid response format"
+                        exit 1
+                      fi
+                      # Check if the request was allowed
+                      if echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*true'; then
+                        echo "Webhook test completed successfully - list allowed"
+                        exit 0
+                      elif echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*false'; then
+                        echo "Webhook test failed - list denied by authorization webhook"
+                        exit 1
+                      else
+                        echo "Webhook test failed - could not determine allowed status for list"
+                        exit 1
+                      fi
+
+        # Wait for list test to complete
+        - wait:
+            apiVersion: v1
+            kind: Pod
+            name: resourcekind-webhook-test-list
+            timeout: 30s
+            for:
+              jsonPath:
+                path: "status.phase"
+                value: "Succeeded"
+
+        # Test collection create access (another collection operation that should be allowed)
+        - apply:
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: resourcekind-webhook-test-create
+              spec:
+                restartPolicy: Never
+                containers:
+                - name: curl
+                  image: curlimages/curl:latest
+                  command: ["/bin/sh", "-c"]
+                  args:
+                    - |
+                      response=$(curl -ksS https://auth-provider-openfga-authz-webhook.auth-provider-openfga-system.svc.cluster.local:8090/apis/authorization.k8s.io/v1/subjectaccessreviews \
+                        -H "Content-Type: application/json" \
+                        -d @- << EOF
+                      {
+                        "apiVersion": "authorization.k8s.io/v1",
+                        "kind": "SubjectAccessReview",
+                        "spec": {
+                          "user": "test-system-admin",
+                          "uid": "test-system-admin",
+                          "groups": ["system:authenticated"],
+                          "resourceAttributes": {
+                            "group": "resourcemanager.miloapis.com",
+                            "resource": "organizations",
+                            "version": "v1alpha1",
+                            "verb": "create"
+                          }
+                        }
+                      }
+                      EOF
+                      )
+                      echo "Webhook response for create: $response"
+                      # Check if we got a valid SubjectAccessReview response
+                      if ! echo "$response" | grep -q '"kind":"SubjectAccessReview"'; then
+                        echo "Webhook test failed - invalid response format"
+                        exit 1
+                      fi
+                      # Check if the request was allowed
+                      if echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*true'; then
+                        echo "Webhook test completed successfully - create allowed"
+                        exit 0
+                      elif echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*false'; then
+                        echo "Webhook test failed - create denied by authorization webhook"
+                        exit 1
+                      else
+                        echo "Webhook test failed - could not determine allowed status for create"
+                        exit 1
+                      fi
+
+        # Wait for create test to complete
+        - wait:
+            apiVersion: v1
+            kind: Pod
+            name: resourcekind-webhook-test-create
+            timeout: 30s
+            for:
+              jsonPath:
+                path: "status.phase"
+                value: "Succeeded"
+
+        # Test specific-resource GET access. This exercises the BatchCheck path:
+        # the webhook checks both the instance (Organization:test-org-1) and the
+        # Root (Root:resourcemanager.miloapis.com/Organization) in a single RPC.
+        # The instance check won't find a tuple (ResourceKind bindings don't write
+        # per-instance tuples), but the Root check will match.
+        - apply:
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: resourcekind-webhook-test-get
               spec:
                 restartPolicy: Never
                 containers:
@@ -104,45 +248,43 @@ spec:
                       }
                       EOF
                       )
-                      echo "Webhook response for org1: $response"
-                      # Check if we got a valid SubjectAccessReview response
+                      echo "Webhook response for get: $response"
                       if ! echo "$response" | grep -q '"kind":"SubjectAccessReview"'; then
                         echo "Webhook test failed - invalid response format"
                         exit 1
                       fi
-                      # Check if the request was allowed
                       if echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*true'; then
-                        echo "Webhook test completed successfully - access allowed to org1"
+                        echo "Webhook test completed successfully - get specific org allowed via BatchCheck"
                         exit 0
                       elif echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*false'; then
-                        echo "Webhook test failed - access denied by authorization webhook for org1"
+                        echo "Webhook test failed - get specific org denied (BatchCheck root fallback not working)"
                         exit 1
                       else
-                        echo "Webhook test failed - could not determine allowed status for org1"
+                        echo "Webhook test failed - could not determine allowed status for get"
                         exit 1
                       fi
-                  env:
-                    - name: USER_UID
-                      value: ($user.metadata.uid)
 
-        # Wait for first test to complete
+        # Wait for get test to complete
         - wait:
             apiVersion: v1
             kind: Pod
-            name: resourcekind-webhook-test-org1
+            name: resourcekind-webhook-test-get
             timeout: 30s
             for:
               jsonPath:
                 path: "status.phase"
                 value: "Succeeded"
 
-        # Test access to second organization (should also be allowed due to ResourceKind)
+        # Test organization-scoped GET access. When the SAR includes parent
+        # context pointing to an Organization, the webhook resolves the check
+        # to the specific Organization instance. The BatchCheck must also
+        # check the Root object so that ResourceKind bindings are evaluated.
         - apply:
             resource:
               apiVersion: v1
               kind: Pod
               metadata:
-                name: resourcekind-webhook-test-org2
+                name: resourcekind-webhook-test-get-orgscope
               spec:
                 restartPolicy: Never
                 containers:
@@ -160,44 +302,44 @@ spec:
                         "spec": {
                           "user": "test-system-admin",
                           "uid": "test-system-admin",
+                          "extra": {
+                            "iam.miloapis.com/parent-api-group": ["resourcemanager.miloapis.com"],
+                            "iam.miloapis.com/parent-type": ["Organization"],
+                            "iam.miloapis.com/parent-name": ["test-org-1"]
+                          },
                           "groups": ["system:authenticated"],
                           "resourceAttributes": {
                             "group": "resourcemanager.miloapis.com",
                             "resource": "organizations",
                             "version": "v1alpha1",
                             "verb": "get",
-                            "name": "test-org-2"
+                            "name": "test-org-1"
                           }
                         }
                       }
                       EOF
                       )
-                      echo "Webhook response for org2: $response"
-                      # Check if we got a valid SubjectAccessReview response
+                      echo "Webhook response for org-scoped get: $response"
                       if ! echo "$response" | grep -q '"kind":"SubjectAccessReview"'; then
                         echo "Webhook test failed - invalid response format"
                         exit 1
                       fi
-                      # Check if the request was allowed
                       if echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*true'; then
-                        echo "Webhook test completed successfully - access allowed to org2"
+                        echo "Webhook test completed successfully - org-scoped get allowed via BatchCheck Root fallback"
                         exit 0
                       elif echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*false'; then
-                        echo "Webhook test failed - access denied by authorization webhook for org2"
+                        echo "Webhook test failed - org-scoped get denied (BatchCheck Root fallback not working for org scope)"
                         exit 1
                       else
-                        echo "Webhook test failed - could not determine allowed status for org2"
+                        echo "Webhook test failed - could not determine allowed status for org-scoped get"
                         exit 1
                       fi
-                  env:
-                    - name: USER_UID
-                      value: ($user.metadata.uid)
 
-        # Wait for second test to complete
+        # Wait for org-scoped get test to complete
         - wait:
             apiVersion: v1
             kind: Pod
-            name: resourcekind-webhook-test-org2
+            name: resourcekind-webhook-test-get-orgscope
             timeout: 30s
             for:
               jsonPath:
@@ -207,9 +349,6 @@ spec:
         # Test that a user WITHOUT the ResourceKind binding cannot access organizations
         - apply:
             file: unauthorized-user.yaml
-            outputs:
-              - name: unauthorizedUser
-                value: (@)
 
         - apply:
             resource:
@@ -239,8 +378,7 @@ spec:
                             "group": "resourcemanager.miloapis.com",
                             "resource": "organizations",
                             "version": "v1alpha1",
-                            "verb": "get",
-                            "name": "test-org-1"
+                            "verb": "list"
                           }
                         }
                       }
@@ -263,9 +401,6 @@ spec:
                         echo "Webhook test failed - could not determine allowed status for unauthorized user"
                         exit 1
                       fi
-                  env:
-                    - name: UNAUTH_USER_UID
-                      value: ($unauthorizedUser.metadata.uid)
 
         # Wait for unauthorized test to complete
         - wait:

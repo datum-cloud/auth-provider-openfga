@@ -19,8 +19,25 @@ components:
   # Enable TLS for authz webhook
   - webhook-tls
 
+# Enable direct permission tuples for development (opt-in from default legacy model)
+patches:
+  - target:
+      kind: Deployment
+      name: controller-manager
+    patch: |
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: "--feature-gates=DirectPermissionTuples=true,LegacyRoleBindingModel=false"
+  - target:
+      kind: Deployment
+      name: authz-webhook
+    patch: |
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: "--feature-gates=DirectPermissionTuples=true,LegacyRoleBindingModel=false"
+
 # Development-specific image configurations
 images:
-  - name: auth-provider-openfga
+  - name: ghcr.io/datum-cloud/auth-provider-openfga
     newName: auth-provider-openfga
     newTag: dev

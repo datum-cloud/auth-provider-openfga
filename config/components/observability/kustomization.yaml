@@ -4,3 +4,4 @@ kind: Component
 resources:
   - authz-webhook-monitor.yaml
   - controller-manager-monitor.yaml
+  - authz-webhook-dashboard.yaml

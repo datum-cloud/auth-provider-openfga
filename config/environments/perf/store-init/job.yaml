@@ -1,0 +1,99 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: openfga-store-init
+  namespace: openfga-system
+spec:
+  template:
+    spec:
+      serviceAccountName: openfga-store-init
+      initContainers:
+        - name: download-binaries
+          image: busybox
+          volumeMounts:
+            - name: binaries
+              mountPath: /binaries
+          command:
+            - "/bin/sh"
+            - "-c"
+            - "wget -O /tmp/fga.tar.gz https://github.com/openfga/cli/releases/download/v0.6.2/fga_0.6.2_linux_amd64.tar.gz && tar -xvf /tmp/fga.tar.gz -C /tmp && mv /tmp/fga /binaries && wget -O /binaries/jq https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-amd64 && chmod +x /binaries/jq"
+        - name: create-store
+          image: busybox
+          volumeMounts:
+            - name: binaries
+              mountPath: /binaries
+            - name: store
+              mountPath: /store
+          command:
+            - "/bin/sh"
+            - "-c"
+            - |
+              set -e
+              echo "Checking if OpenFGA is ready..."
+              timeout=60
+              while [ $timeout -gt 0 ]; do
+                if wget -q --spider http://openfga.openfga-system.svc.cluster.local:8080/healthz 2>/dev/null; then
+                  echo "OpenFGA is ready"
+                  break
+                fi
+                echo "OpenFGA not ready, waiting..."
+                sleep 2
+                timeout=$((timeout-2))
+              done
+
+              if [ $timeout -le 0 ]; then
+                echo "OpenFGA failed to become ready within timeout"
+                exit 1
+              fi
+
+              echo "Checking for existing store..."
+              if /binaries/fga store get --name="Datum Cloud" --api-url=http://openfga.openfga-system.svc.cluster.local:8080 > /tmp/existing_store.json 2>/dev/null; then
+                echo "Store already exists, extracting ID..."
+                STORE_ID=$(/binaries/jq -r '.id' /tmp/existing_store.json)
+              else
+                echo "Creating new store..."
+                if ! /binaries/fga store create --name="Datum Cloud" --api-url=http://openfga.openfga-system.svc.cluster.local:8080 > /tmp/new_store.json; then
+                  echo "Failed to create store"
+                  exit 1
+                fi
+                STORE_ID=$(/binaries/jq -r '.store.id' /tmp/new_store.json)
+              fi
+
+              if [ -z "$STORE_ID" ] || [ "$STORE_ID" = "null" ]; then
+                echo "Failed to get valid store ID"
+                exit 1
+              fi
+
+              echo "Store ID: $STORE_ID"
+              echo "$STORE_ID" > /store/openfga-store-id
+      containers:
+        - name: save-as-config-map
+          image: bitnami/kubectl
+          volumeMounts:
+            - name: store
+              mountPath: /store
+          command:
+            - "sh"
+            - "-c"
+            - |
+              set -e
+              if [ ! -f /store/openfga-store-id ]; then
+                echo "Store ID file not found"
+                exit 1
+              fi
+
+              STORE_ID=$(cat /store/openfga-store-id)
+              if [ -z "$STORE_ID" ]; then
+                echo "Store ID is empty"
+                exit 1
+              fi
+
+              echo "Creating configmap with store ID: $STORE_ID"
+              kubectl get configmap openfga-store-id -n auth-provider-openfga-system 2>/dev/null || kubectl create configmap openfga-store-id --namespace=auth-provider-openfga-system --from-literal=store-id="$STORE_ID"
+      volumes:
+        - name: store
+          emptyDir: {}
+        - name: binaries
+          emptyDir: {}
+      restartPolicy: OnFailure
+  backoffLimit: 4

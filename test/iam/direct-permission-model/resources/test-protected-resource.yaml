@@ -1,0 +1,16 @@
+apiVersion: iam.miloapis.com/v1alpha1
+kind: ProtectedResource
+metadata:
+  name: direct-perm-model-test-resource
+spec:
+  serviceRef:
+    name: "test.direct-perm-model.local"
+  kind: TestWidget
+  plural: testwidgets
+  singular: testwidget
+  permissions:
+    - get
+    - list
+    - create
+    - update
+    - delete

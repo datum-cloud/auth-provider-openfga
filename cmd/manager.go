@@ -3,17 +3,22 @@ package main
 import (
 	"crypto/tls"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
 	openfgav1 "github.com/openfga/api/proto/openfga/v1"
 	"github.com/spf13/cobra"
 	"go.miloapis.com/auth-provider-openfga/internal/controller"
+	_ "go.miloapis.com/auth-provider-openfga/internal/features" // register feature gates
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
+	"k8s.io/client-go/rest"
 
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -35,6 +40,9 @@ func createManagerCommand() *cobra.Command {
 	var renewDeadline time.Duration
 	var retryPeriod time.Duration
 
+	var configmapNamespace string
+	var configmapName string
+
 	cmd := &cobra.Command{
 		Use:   "manager",
 		Short: "Start the controller manager",
@@ -53,6 +61,8 @@ func createManagerCommand() *cobra.Command {
 				leaseDuration,
 				renewDeadline,
 				retryPeriod,
+				configmapNamespace,
+				configmapName,
 			)
 		},
 	}
@@ -75,6 +85,12 @@ func createManagerCommand() *cobra.Command {
 		"OpenFGA API URL (e.g. localhost:8080 or api.us1.fga.dev)")
 	cmd.Flags().StringVar(&openfgaStoreID, "openfga-store-id", "", "OpenFGA Store ID")
 	cmd.Flags().StringVar(&openfgaScheme, "openfga-scheme", "http", "OpenFGA Scheme (http or https)")
+	cmd.Flags().StringVar(&configmapNamespace, "configmap-namespace", os.Getenv("POD_NAMESPACE"),
+		"Namespace in which to create/update the authorization model ConfigMap. Defaults to the POD_NAMESPACE environment variable.")
+	cmd.Flags().StringVar(&configmapName, "configmap-name", "openfga-authorization-model",
+		"Name of the ConfigMap used to store the current authorization model ID.")
+
+	utilfeature.DefaultMutableFeatureGate.AddFlag(cmd.Flags())
 
 	// Mark required flags
 	if err := cmd.MarkFlagRequired("openfga-api-url"); err != nil {
@@ -100,6 +116,8 @@ func runManager(
 	leaseDuration time.Duration,
 	renewDeadline time.Duration,
 	retryPeriod time.Duration,
+	configmapNamespace string,
+	configmapName string,
 ) error {
 	opts := zap.Options{
 		Development: true,
@@ -183,12 +201,29 @@ func runManager(
 		return fmt.Errorf("unable to create controller ResourceOwnerHierarchy: %w", err)
 	}
 
+	// Create an in-cluster client for ConfigMap operations. The manager's
+	// primary client uses KUBECONFIG which may point to a remote control plane,
+	// but the ConfigMap must be written to the local workload cluster where the
+	// webhook pod watches it.
+	var configMapClient client.Client
+	if inClusterConfig, inClusterErr := rest.InClusterConfig(); inClusterErr == nil {
+		configMapClient, err = client.New(inClusterConfig, client.Options{Scheme: scheme})
+		if err != nil {
+			return fmt.Errorf("unable to create in-cluster client for ConfigMap: %w", err)
+		}
+	} else {
+		setupLog.Info("in-cluster config not available, falling back to manager client for ConfigMap operations")
+	}
+
 	// Add the new AuthorizationModelReconciler
 	if err = (&controller.AuthorizationModelReconciler{
-		Client:     mgr.GetClient(),
-		Scheme:     mgr.GetScheme(),
-		FGAClient:  fgaClient,
-		FGAStoreID: openfgaStoreID,
+		Client:             mgr.GetClient(),
+		Scheme:             mgr.GetScheme(),
+		FGAClient:          fgaClient,
+		FGAStoreID:         openfgaStoreID,
+		ConfigMapNamespace: configmapNamespace,
+		ConfigMapName:      configmapName,
+		ConfigMapClient:    configMapClient,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to create controller AuthorizationModel: %w", err)
 	}
@@ -201,6 +236,15 @@ func runManager(
 		EventRecorder: mgr.GetEventRecorderFor("groupmembership-controller"),
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to create controller GroupMembership: %w", err)
+	}
+
+	if err = (&controller.SystemGroupReconciler{
+		Client:     mgr.GetClient(),
+		Scheme:     mgr.GetScheme(),
+		FGAClient:  fgaClient,
+		FGAStoreID: openfgaStoreID,
+	}).SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("unable to create controller SystemGroup: %w", err)
 	}
 
 	//+kubebuilder:scaffold:builder

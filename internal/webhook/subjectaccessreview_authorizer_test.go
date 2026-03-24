@@ -9,14 +9,16 @@ import (
 	openfgav1 "github.com/openfga/api/proto/openfga/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.miloapis.com/auth-provider-openfga/internal/features"
 	"go.miloapis.com/auth-provider-openfga/internal/webhook"
 	iamv1alpha1 "go.miloapis.com/milo/pkg/apis/iam/v1alpha1"
 	"google.golang.org/grpc"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apiserver/pkg/authentication/user"
 	"k8s.io/apiserver/pkg/authorization/authorizer"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/client-go/discovery"
-	"sigs.k8s.io/controller-runtime/pkg/client"
+	featuregatetesting "k8s.io/component-base/featuregate/testing"
 )
 
 // mockAttributes is a simple mock for authorizer.Attributes
@@ -43,7 +45,9 @@ func (m *mockAttributes) IsResourceRequest() bool { return true }
 // mockFGAClient is a mock of OpenFGAServiceClient for testing.
 type mockFGAClient struct {
 	openfgav1.OpenFGAServiceClient
-	CheckFunc func(ctx context.Context, in *openfgav1.CheckRequest, opts ...grpc.CallOption) (*openfgav1.CheckResponse, error)
+	CheckFunc      func(ctx context.Context, in *openfgav1.CheckRequest, opts ...grpc.CallOption) (*openfgav1.CheckResponse, error)
+	BatchCheckFunc func(ctx context.Context, in *openfgav1.BatchCheckRequest, opts ...grpc.CallOption) (*openfgav1.BatchCheckResponse, error)
+	WriteFunc      func(ctx context.Context, in *openfgav1.WriteRequest, opts ...grpc.CallOption) (*openfgav1.WriteResponse, error)
 }
 
 func (m *mockFGAClient) Check(ctx context.Context, in *openfgav1.CheckRequest, opts ...grpc.CallOption) (*openfgav1.CheckResponse, error) {
@@ -53,17 +57,18 @@ func (m *mockFGAClient) Check(ctx context.Context, in *openfgav1.CheckRequest, o
 	return nil, errors.New("CheckFunc not implemented")
 }
 
-// mockK8sClient is a mock of client.Client for testing.
-type mockK8sClient struct {
-	client.Client
-	listFunc func(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error
+func (m *mockFGAClient) BatchCheck(ctx context.Context, in *openfgav1.BatchCheckRequest, opts ...grpc.CallOption) (*openfgav1.BatchCheckResponse, error) {
+	if m.BatchCheckFunc != nil {
+		return m.BatchCheckFunc(ctx, in)
+	}
+	return nil, errors.New("BatchCheckFunc not implemented")
 }
 
-func (m *mockK8sClient) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
-	if m.listFunc != nil {
-		return m.listFunc(ctx, list, opts...)
+func (m *mockFGAClient) Write(ctx context.Context, in *openfgav1.WriteRequest, opts ...grpc.CallOption) (*openfgav1.WriteResponse, error) {
+	if m.WriteFunc != nil {
+		return m.WriteFunc(ctx, in)
 	}
-	return errors.New("List not implemented")
+	return &openfgav1.WriteResponse{}, nil
 }
 
 // mockDiscoveryClient is a mock of discovery.DiscoveryInterface for testing.
@@ -80,14 +85,19 @@ func (m *mockDiscoveryClient) ServerResourcesForGroupVersion(groupVersion string
 }
 
 func TestSubjectAccessReviewAuthorizer_Authorize_Integration(t *testing.T) {
+	// Enable the direct permission tuple model for these tests.
+	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.DirectPermissionTuples, true)
+	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.LegacyRoleBindingModel, false)
 	testCases := []struct {
-		name               string
-		attributes         authorizer.Attributes
-		k8sListFunc        func(client.ObjectList)
-		fgaCheckFunc       func(*testing.T, *openfgav1.CheckRequest) (*openfgav1.CheckResponse, error)
-		expectedDecision   authorizer.Decision
-		expectedErrorMsg   string
-		expectFgaCheckCall bool
+		name                    string
+		attributes              authorizer.Attributes
+		protectedResources      []iamv1alpha1.ProtectedResource
+		fgaCheckFunc            func(*testing.T, *openfgav1.CheckRequest) (*openfgav1.CheckResponse, error)
+		fgaBatchCheckFunc       func(*testing.T, *openfgav1.BatchCheckRequest) (*openfgav1.BatchCheckResponse, error)
+		expectedDecision        authorizer.Decision
+		expectedErrorMsg        string
+		expectFgaCheckCall      bool
+		expectFgaBatchCheckCall bool
 	}{
 		{
 			name: "allowed resource get with registered parent",
@@ -106,42 +116,40 @@ func TestSubjectAccessReviewAuthorizer_Authorize_Integration(t *testing.T) {
 					},
 				},
 			},
-			k8sListFunc: func(list client.ObjectList) {
-				l := list.(*iamv1alpha1.ProtectedResourceList)
-				l.Items = []iamv1alpha1.ProtectedResource{
-					{
-						Spec: iamv1alpha1.ProtectedResourceSpec{
-							ServiceRef:  iamv1alpha1.ServiceReference{Name: "compute.miloapis.com"},
-							Plural:      "workloads",
-							Kind:        "Workload",
-							Permissions: []string{"get"},
-							ParentResources: []iamv1alpha1.ParentResourceRef{
-								{APIGroup: "resourcemanager.miloapis.com", Kind: "Project"},
-							},
+			protectedResources: []iamv1alpha1.ProtectedResource{
+				{
+					Spec: iamv1alpha1.ProtectedResourceSpec{
+						ServiceRef:  iamv1alpha1.ServiceReference{Name: "compute.miloapis.com"},
+						Plural:      "workloads",
+						Kind:        "Workload",
+						Permissions: []string{"get"},
+						ParentResources: []iamv1alpha1.ParentResourceRef{
+							{APIGroup: "resourcemanager.miloapis.com", Kind: "Project"},
 						},
 					},
-				}
+				},
 			},
-			fgaCheckFunc: func(t *testing.T, req *openfgav1.CheckRequest) (*openfgav1.CheckResponse, error) {
-				// When project is parent, we authorize against the project itself
-				assert.Equal(t, "resourcemanager.miloapis.com/Project:proj-xyz", req.TupleKey.Object)
-				require.NotNil(t, req.ContextualTuples)
-				require.Len(t, req.ContextualTuples.TupleKeys, 1) // Only root binding tuple, no parent tuple needed
-
-				// Check for root binding tuple
-				rootBindingFound := false
-				for _, tuple := range req.ContextualTuples.TupleKeys {
-					if tuple.Relation == "iam.miloapis.com/RootBinding" {
-						assert.Equal(t, "iam.miloapis.com/Root:resourcemanager.miloapis.com/Project", tuple.User)
-						assert.Equal(t, "resourcemanager.miloapis.com/Project:proj-xyz", tuple.Object)
-						rootBindingFound = true
-					}
+			fgaBatchCheckFunc: func(t *testing.T, req *openfgav1.BatchCheckRequest) (*openfgav1.BatchCheckResponse, error) {
+				// Project-scoped get: instance check is against the project, root check
+				// is against the kind-level Root object. Access is allowed if either allows.
+				require.Len(t, req.Checks, 2, "BatchCheck must have instance and root checks")
+				checksById := make(map[string]*openfgav1.BatchCheckItem)
+				for _, c := range req.Checks {
+					checksById[c.CorrelationId] = c
 				}
-				assert.True(t, rootBindingFound, "root binding contextual tuple not found")
-				return &openfgav1.CheckResponse{Allowed: true}, nil
+				require.Contains(t, checksById, "instance")
+				require.Contains(t, checksById, "root")
+				assert.Equal(t, "resourcemanager.miloapis.com/Project:proj-xyz", checksById["instance"].TupleKey.Object)
+				assert.Equal(t, "iam.miloapis.com/Root:compute.miloapis.com/Workload", checksById["root"].TupleKey.Object)
+				return &openfgav1.BatchCheckResponse{
+					Result: map[string]*openfgav1.BatchCheckSingleResult{
+						"instance": {CheckResult: &openfgav1.BatchCheckSingleResult_Allowed{Allowed: true}},
+						"root":     {CheckResult: &openfgav1.BatchCheckSingleResult_Allowed{Allowed: false}},
+					},
+				}, nil
 			},
-			expectedDecision:   authorizer.DecisionAllow,
-			expectFgaCheckCall: true,
+			expectedDecision:        authorizer.DecisionAllow,
+			expectFgaBatchCheckCall: true,
 		},
 		{
 			name: "denied collection create with project parent context",
@@ -159,29 +167,37 @@ func TestSubjectAccessReviewAuthorizer_Authorize_Integration(t *testing.T) {
 					},
 				},
 			},
-			k8sListFunc: func(list client.ObjectList) {
-				l := list.(*iamv1alpha1.ProtectedResourceList)
-				l.Items = []iamv1alpha1.ProtectedResource{
-					{
-						Spec: iamv1alpha1.ProtectedResourceSpec{
-							ServiceRef:  iamv1alpha1.ServiceReference{Name: "compute.miloapis.com"},
-							Plural:      "workloads",
-							Kind:        "Workload",
-							Permissions: []string{"create"},
-						},
+			protectedResources: []iamv1alpha1.ProtectedResource{
+				{
+					Spec: iamv1alpha1.ProtectedResourceSpec{
+						ServiceRef:  iamv1alpha1.ServiceReference{Name: "compute.miloapis.com"},
+						Plural:      "workloads",
+						Kind:        "Workload",
+						Permissions: []string{"create"},
 					},
+				},
+			},
+			fgaBatchCheckFunc: func(t *testing.T, req *openfgav1.BatchCheckRequest) (*openfgav1.BatchCheckResponse, error) {
+				// Project-scoped create: instance check is against the project, root check
+				// is against the kind-level Root object. Deny when both deny.
+				require.Len(t, req.Checks, 2, "BatchCheck must have instance and root checks")
+				checksById := make(map[string]*openfgav1.BatchCheckItem)
+				for _, c := range req.Checks {
+					checksById[c.CorrelationId] = c
 				}
+				require.Contains(t, checksById, "instance")
+				require.Contains(t, checksById, "root")
+				assert.Equal(t, "resourcemanager.miloapis.com/Project:proj-xyz", checksById["instance"].TupleKey.Object)
+				assert.Equal(t, "iam.miloapis.com/Root:compute.miloapis.com/Workload", checksById["root"].TupleKey.Object)
+				return &openfgav1.BatchCheckResponse{
+					Result: map[string]*openfgav1.BatchCheckSingleResult{
+						"instance": {CheckResult: &openfgav1.BatchCheckSingleResult_Allowed{Allowed: false}},
+						"root":     {CheckResult: &openfgav1.BatchCheckSingleResult_Allowed{Allowed: false}},
+					},
+				}, nil
 			},
-			fgaCheckFunc: func(t *testing.T, req *openfgav1.CheckRequest) (*openfgav1.CheckResponse, error) {
-				assert.Equal(t, "resourcemanager.miloapis.com/Project:proj-xyz", req.TupleKey.Object)
-				require.NotNil(t, req.ContextualTuples)
-				require.Len(t, req.ContextualTuples.TupleKeys, 1)
-				assert.Equal(t, "iam.miloapis.com/Root:resourcemanager.miloapis.com/Project", req.ContextualTuples.TupleKeys[0].User)
-				assert.Equal(t, "iam.miloapis.com/RootBinding", req.ContextualTuples.TupleKeys[0].Relation)
-				return &openfgav1.CheckResponse{Allowed: false}, nil
-			},
-			expectedDecision:   authorizer.DecisionDeny,
-			expectFgaCheckCall: true,
+			expectedDecision:        authorizer.DecisionDeny,
+			expectFgaBatchCheckCall: true,
 		},
 		{
 			name: "permission not registered",
@@ -191,16 +207,17 @@ func TestSubjectAccessReviewAuthorizer_Authorize_Integration(t *testing.T) {
 				verb:     "get",
 				user:     &user.DefaultInfo{UID: "user-abc"},
 			},
-			k8sListFunc: func(list client.ObjectList) {
-				l := list.(*iamv1alpha1.ProtectedResourceList)
-				l.Items = []iamv1alpha1.ProtectedResource{}
-			},
+			protectedResources: []iamv1alpha1.ProtectedResource{},
 			expectedDecision:   authorizer.DecisionDeny,
 			expectedErrorMsg:   "permission 'foo.com/bars.get' not registered",
 			expectFgaCheckCall: false,
 		},
 		{
-			name: "no contextual tuple for unregistered parent",
+			// Specific-resource cluster-scoped operations use BatchCheck to cover
+			// both ResourceRef (instance-level) and ResourceKind (Root-level)
+			// PolicyBindings in a single RPC. The instance check and the Root
+			// check are sent together; access is allowed if either is allowed.
+			name: "batch check used for specific resource at cluster scope",
 			attributes: &mockAttributes{
 				apiGroup: "compute.miloapis.com",
 				resource: "workloads",
@@ -209,54 +226,50 @@ func TestSubjectAccessReviewAuthorizer_Authorize_Integration(t *testing.T) {
 				user: &user.DefaultInfo{
 					Name: "test-user",
 					UID:  "user-abc",
-					Extra: map[string][]string{
-						iamv1alpha1.ParentAPIGroupExtraKey: {"some.other.api"},
-						iamv1alpha1.ParentKindExtraKey:     {"OtherKind"},
-						iamv1alpha1.ParentNameExtraKey:     {"other-123"},
+					// No project or org parent — cluster-scoped specific resource.
+				},
+			},
+			protectedResources: []iamv1alpha1.ProtectedResource{
+				{
+					Spec: iamv1alpha1.ProtectedResourceSpec{
+						ServiceRef:  iamv1alpha1.ServiceReference{Name: "compute.miloapis.com"},
+						Plural:      "workloads",
+						Kind:        "Workload",
+						Permissions: []string{"get"},
 					},
 				},
 			},
-			k8sListFunc: func(list client.ObjectList) {
-				l := list.(*iamv1alpha1.ProtectedResourceList)
-				l.Items = []iamv1alpha1.ProtectedResource{
-					{
-						Spec: iamv1alpha1.ProtectedResourceSpec{
-							ServiceRef:  iamv1alpha1.ServiceReference{Name: "compute.miloapis.com"},
-							Plural:      "workloads",
-							Kind:        "Workload",
-							Permissions: []string{"get"},
-							ParentResources: []iamv1alpha1.ParentResourceRef{
-								{APIGroup: "resourcemanager.miloapis.com", Kind: "Project"},
-							},
-						},
-					},
+			fgaBatchCheckFunc: func(t *testing.T, req *openfgav1.BatchCheckRequest) (*openfgav1.BatchCheckResponse, error) {
+				require.Len(t, req.Checks, 2, "BatchCheck must have instance and Root checks")
+				checksById := make(map[string]*openfgav1.BatchCheckItem)
+				for _, c := range req.Checks {
+					checksById[c.CorrelationId] = c
 				}
+				require.Contains(t, checksById, "instance")
+				require.Contains(t, checksById, "root")
+				assert.Equal(t, "compute.miloapis.com/Workload:wkld-123", checksById["instance"].TupleKey.Object)
+				assert.Equal(t, "iam.miloapis.com/Root:compute.miloapis.com/Workload", checksById["root"].TupleKey.Object)
+				return &openfgav1.BatchCheckResponse{
+					Result: map[string]*openfgav1.BatchCheckSingleResult{
+						"instance": {CheckResult: &openfgav1.BatchCheckSingleResult_Allowed{Allowed: true}},
+						"root":     {CheckResult: &openfgav1.BatchCheckSingleResult_Allowed{Allowed: false}},
+					},
+				}, nil
 			},
-			fgaCheckFunc: func(t *testing.T, req *openfgav1.CheckRequest) (*openfgav1.CheckResponse, error) {
-				assert.Equal(t, "compute.miloapis.com/Workload:wkld-123", req.TupleKey.Object)
-				require.NotNil(t, req.ContextualTuples)
-				require.Len(t, req.ContextualTuples.TupleKeys, 1)
-				assert.Equal(t, "iam.miloapis.com/Root:compute.miloapis.com/Workload", req.ContextualTuples.TupleKeys[0].User)
-				assert.Equal(t, "iam.miloapis.com/RootBinding", req.ContextualTuples.TupleKeys[0].Relation)
-				return &openfgav1.CheckResponse{Allowed: true}, nil
-			},
-			expectedDecision:   authorizer.DecisionAllow,
-			expectFgaCheckCall: true,
+			expectedDecision:        authorizer.DecisionAllow,
+			expectFgaBatchCheckCall: true,
 		},
 		{
 			name: "deny if user has no UID",
 			attributes: &mockAttributes{
 				user: &user.DefaultInfo{Name: "no-uid-user"},
 			},
-			k8sListFunc: func(list client.ObjectList) {
-				l := list.(*iamv1alpha1.ProtectedResourceList)
-				l.Items = []iamv1alpha1.ProtectedResource{
-					{
-						Spec: iamv1alpha1.ProtectedResourceSpec{
-							Permissions: []string{"get"},
-						},
+			protectedResources: []iamv1alpha1.ProtectedResource{
+				{
+					Spec: iamv1alpha1.ProtectedResourceSpec{
+						Permissions: []string{"get"},
 					},
-				}
+				},
 			},
 			expectedDecision:   authorizer.DecisionDeny,
 			expectedErrorMsg:   "user UID is required",
@@ -267,6 +280,7 @@ func TestSubjectAccessReviewAuthorizer_Authorize_Integration(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			fgaCheckCalled := false
+			fgaBatchCheckCalled := false
 			mockFGA := &mockFGAClient{
 				CheckFunc: func(ctx context.Context, req *openfgav1.CheckRequest, opts ...grpc.CallOption) (*openfgav1.CheckResponse, error) {
 					fgaCheckCalled = true
@@ -275,21 +289,20 @@ func TestSubjectAccessReviewAuthorizer_Authorize_Integration(t *testing.T) {
 					}
 					return nil, errors.New("FGA CheckFunc not provided")
 				},
-			}
-			mockK8s := &mockK8sClient{
-				listFunc: func(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
-					if tc.k8sListFunc != nil {
-						tc.k8sListFunc(list)
+				BatchCheckFunc: func(ctx context.Context, req *openfgav1.BatchCheckRequest, opts ...grpc.CallOption) (*openfgav1.BatchCheckResponse, error) {
+					fgaBatchCheckCalled = true
+					if tc.fgaBatchCheckFunc != nil {
+						return tc.fgaBatchCheckFunc(t, req)
 					}
-					return nil
+					return nil, errors.New("FGA BatchCheckFunc not provided")
 				},
 			}
 
 			auth := &webhook.SubjectAccessReviewAuthorizer{
-				FGAClient:       mockFGA,
-				K8sClient:       mockK8s,
-				FGAStoreID:      "test_store",
-				DiscoveryClient: &mockDiscoveryClient{},
+				FGAClient:              mockFGA,
+				ProtectedResourceCache: webhook.NewProtectedResourceCacheForTest(tc.protectedResources),
+				FGAStoreID:             "test_store",
+				DiscoveryClient:        &mockDiscoveryClient{},
 			}
 
 			decision, _, err := auth.Authorize(context.Background(), tc.attributes)
@@ -301,7 +314,8 @@ func TestSubjectAccessReviewAuthorizer_Authorize_Integration(t *testing.T) {
 			} else {
 				require.NoError(t, err)
 			}
-			assert.Equal(t, tc.expectFgaCheckCall, fgaCheckCalled)
+			assert.Equal(t, tc.expectFgaCheckCall, fgaCheckCalled, "Check call expectation mismatch")
+			assert.Equal(t, tc.expectFgaBatchCheckCall, fgaBatchCheckCalled, "BatchCheck call expectation mismatch")
 		})
 	}
 }
@@ -310,10 +324,10 @@ func TestSubjectAccessReviewAuthorizer_Authorize_Integration(t *testing.T) {
 func TestSubjectAccessReviewWebhookFactory(t *testing.T) {
 	t.Run("NewSubjectAccessReviewWebhook creates webhook correctly", func(t *testing.T) {
 		config := webhook.Config{
-			FGAClient:       &mockFGAClient{},
-			FGAStoreID:      "test-store",
-			K8sClient:       &mockK8sClient{},
-			DiscoveryClient: &mockDiscoveryClient{},
+			FGAClient:              &mockFGAClient{},
+			FGAStoreID:             "test-store",
+			ProtectedResourceCache: webhook.NewProtectedResourceCacheForTest(nil),
+			DiscoveryClient:        &mockDiscoveryClient{},
 		}
 
 		w := webhook.NewSubjectAccessReviewWebhook(config)
@@ -322,10 +336,10 @@ func TestSubjectAccessReviewWebhookFactory(t *testing.T) {
 
 	t.Run("RegisterSubjectAccessReviewWebhook registers correctly", func(t *testing.T) {
 		config := webhook.Config{
-			FGAClient:       &mockFGAClient{},
-			FGAStoreID:      "test-store",
-			K8sClient:       &mockK8sClient{},
-			DiscoveryClient: &mockDiscoveryClient{},
+			FGAClient:              &mockFGAClient{},
+			FGAStoreID:             "test-store",
+			ProtectedResourceCache: webhook.NewProtectedResourceCacheForTest(nil),
+			DiscoveryClient:        &mockDiscoveryClient{},
 		}
 
 		registered := false
@@ -354,28 +368,22 @@ func TestProjectScopedAuthorization(t *testing.T) {
 			},
 		}
 
-		mockK8s := &mockK8sClient{
-			listFunc: func(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
-				l := list.(*iamv1alpha1.ProtectedResourceList)
-				l.Items = []iamv1alpha1.ProtectedResource{
-					{
-						Spec: iamv1alpha1.ProtectedResourceSpec{
-							ServiceRef:  iamv1alpha1.ServiceReference{Name: "core.miloapis.com"},
-							Plural:      "pods",
-							Kind:        "Pod",
-							Permissions: []string{"get"},
-						},
-					},
-				}
-				return nil
+		prCache := webhook.NewProtectedResourceCacheForTest([]iamv1alpha1.ProtectedResource{
+			{
+				Spec: iamv1alpha1.ProtectedResourceSpec{
+					ServiceRef:  iamv1alpha1.ServiceReference{Name: "core.miloapis.com"},
+					Plural:      "pods",
+					Kind:        "Pod",
+					Permissions: []string{"get"},
+				},
 			},
-		}
+		})
 
 		auth := &webhook.SubjectAccessReviewAuthorizer{
-			FGAClient:       mockFGA,
-			K8sClient:       mockK8s,
-			FGAStoreID:      "test_store",
-			DiscoveryClient: &mockDiscoveryClient{},
+			FGAClient:              mockFGA,
+			ProtectedResourceCache: prCache,
+			FGAStoreID:             "test_store",
+			DiscoveryClient:        &mockDiscoveryClient{},
 		}
 
 		// Create attributes with project parent extra keys
@@ -404,22 +412,16 @@ func TestProjectScopedAuthorization(t *testing.T) {
 
 func TestOrganizationNamespaceValidation(t *testing.T) {
 	t.Run("organization-scoped request with wrong namespace is denied", func(t *testing.T) {
-		mockK8s := &mockK8sClient{
-			listFunc: func(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
-				l := list.(*iamv1alpha1.ProtectedResourceList)
-				l.Items = []iamv1alpha1.ProtectedResource{
-					{
-						Spec: iamv1alpha1.ProtectedResourceSpec{
-							ServiceRef:  iamv1alpha1.ServiceReference{Name: iamv1alpha1.SchemeGroupVersion.Group},
-							Kind:        "Group",
-							Plural:      "groups",
-							Permissions: []string{"list"},
-						},
-					},
-				}
-				return nil
+		prCache := webhook.NewProtectedResourceCacheForTest([]iamv1alpha1.ProtectedResource{
+			{
+				Spec: iamv1alpha1.ProtectedResourceSpec{
+					ServiceRef:  iamv1alpha1.ServiceReference{Name: iamv1alpha1.SchemeGroupVersion.Group},
+					Kind:        "Group",
+					Plural:      "groups",
+					Permissions: []string{"list"},
+				},
 			},
-		}
+		})
 
 		// FGA should not be called since validation fails before that
 		mockFGA := &mockFGAClient{}
@@ -441,10 +443,10 @@ func TestOrganizationNamespaceValidation(t *testing.T) {
 		}
 
 		auth := &webhook.SubjectAccessReviewAuthorizer{
-			FGAClient:       mockFGA,
-			FGAStoreID:      "test-store",
-			K8sClient:       mockK8s,
-			DiscoveryClient: mockDiscovery,
+			FGAClient:              mockFGA,
+			FGAStoreID:             "test-store",
+			ProtectedResourceCache: prCache,
+			DiscoveryClient:        mockDiscovery,
 		}
 
 		attributes := &mockAttributes{
@@ -473,22 +475,16 @@ func TestOrganizationNamespaceValidation(t *testing.T) {
 	})
 
 	t.Run("organization-scoped request with correct namespace is allowed", func(t *testing.T) {
-		mockK8s := &mockK8sClient{
-			listFunc: func(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
-				l := list.(*iamv1alpha1.ProtectedResourceList)
-				l.Items = []iamv1alpha1.ProtectedResource{
-					{
-						Spec: iamv1alpha1.ProtectedResourceSpec{
-							ServiceRef:  iamv1alpha1.ServiceReference{Name: iamv1alpha1.SchemeGroupVersion.Group},
-							Kind:        "Group",
-							Plural:      "groups",
-							Permissions: []string{"list"},
-						},
-					},
-				}
-				return nil
+		prCache := webhook.NewProtectedResourceCacheForTest([]iamv1alpha1.ProtectedResource{
+			{
+				Spec: iamv1alpha1.ProtectedResourceSpec{
+					ServiceRef:  iamv1alpha1.ServiceReference{Name: iamv1alpha1.SchemeGroupVersion.Group},
+					Kind:        "Group",
+					Plural:      "groups",
+					Permissions: []string{"list"},
+				},
 			},
-		}
+		})
 
 		mockFGA := &mockFGAClient{
 			CheckFunc: func(ctx context.Context, req *openfgav1.CheckRequest, opts ...grpc.CallOption) (*openfgav1.CheckResponse, error) {
@@ -515,10 +511,10 @@ func TestOrganizationNamespaceValidation(t *testing.T) {
 		}
 
 		auth := &webhook.SubjectAccessReviewAuthorizer{
-			FGAClient:       mockFGA,
-			FGAStoreID:      "test-store",
-			K8sClient:       mockK8s,
-			DiscoveryClient: mockDiscovery,
+			FGAClient:              mockFGA,
+			FGAStoreID:             "test-store",
+			ProtectedResourceCache: prCache,
+			DiscoveryClient:        mockDiscovery,
 		}
 
 		attributes := &mockAttributes{
@@ -544,22 +540,16 @@ func TestOrganizationNamespaceValidation(t *testing.T) {
 	})
 
 	t.Run("non-organization request ignores namespace validation", func(t *testing.T) {
-		mockK8s := &mockK8sClient{
-			listFunc: func(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
-				l := list.(*iamv1alpha1.ProtectedResourceList)
-				l.Items = []iamv1alpha1.ProtectedResource{
-					{
-						Spec: iamv1alpha1.ProtectedResourceSpec{
-							ServiceRef:  iamv1alpha1.ServiceReference{Name: iamv1alpha1.SchemeGroupVersion.Group},
-							Kind:        "Group",
-							Plural:      "groups",
-							Permissions: []string{"list"},
-						},
-					},
-				}
-				return nil
+		prCache := webhook.NewProtectedResourceCacheForTest([]iamv1alpha1.ProtectedResource{
+			{
+				Spec: iamv1alpha1.ProtectedResourceSpec{
+					ServiceRef:  iamv1alpha1.ServiceReference{Name: iamv1alpha1.SchemeGroupVersion.Group},
+					Kind:        "Group",
+					Plural:      "groups",
+					Permissions: []string{"list"},
+				},
 			},
-		}
+		})
 
 		mockFGA := &mockFGAClient{
 			CheckFunc: func(ctx context.Context, req *openfgav1.CheckRequest, opts ...grpc.CallOption) (*openfgav1.CheckResponse, error) {
@@ -568,10 +558,10 @@ func TestOrganizationNamespaceValidation(t *testing.T) {
 		}
 
 		auth := &webhook.SubjectAccessReviewAuthorizer{
-			FGAClient:       mockFGA,
-			FGAStoreID:      "test-store",
-			K8sClient:       mockK8s,
-			DiscoveryClient: &mockDiscoveryClient{}, // No need for specific mock since no org context
+			FGAClient:              mockFGA,
+			FGAStoreID:             "test-store",
+			ProtectedResourceCache: prCache,
+			DiscoveryClient:        &mockDiscoveryClient{}, // No need for specific mock since no org context
 		}
 
 		attributes := &mockAttributes{
@@ -593,22 +583,16 @@ func TestOrganizationNamespaceValidation(t *testing.T) {
 	})
 
 	t.Run("organization-scoped request for cluster-scoped resource is allowed", func(t *testing.T) {
-		mockK8s := &mockK8sClient{
-			listFunc: func(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
-				l := list.(*iamv1alpha1.ProtectedResourceList)
-				l.Items = []iamv1alpha1.ProtectedResource{
-					{
-						Spec: iamv1alpha1.ProtectedResourceSpec{
-							ServiceRef:  iamv1alpha1.ServiceReference{Name: "resourcemanager.miloapis.com"},
-							Kind:        "Organization",
-							Plural:      "organizations",
-							Permissions: []string{"list"},
-						},
-					},
-				}
-				return nil
+		prCache := webhook.NewProtectedResourceCacheForTest([]iamv1alpha1.ProtectedResource{
+			{
+				Spec: iamv1alpha1.ProtectedResourceSpec{
+					ServiceRef:  iamv1alpha1.ServiceReference{Name: "resourcemanager.miloapis.com"},
+					Kind:        "Organization",
+					Plural:      "organizations",
+					Permissions: []string{"list"},
+				},
 			},
-		}
+		})
 
 		mockDiscovery := &mockDiscoveryClient{
 			serverResourcesForGroupVersionFunc: func(groupVersion string) (*metav1.APIResourceList, error) {
@@ -635,10 +619,10 @@ func TestOrganizationNamespaceValidation(t *testing.T) {
 		}
 
 		auth := &webhook.SubjectAccessReviewAuthorizer{
-			FGAClient:       mockFGA,
-			FGAStoreID:      "test-store",
-			K8sClient:       mockK8s,
-			DiscoveryClient: mockDiscovery,
+			FGAClient:              mockFGA,
+			FGAStoreID:             "test-store",
+			ProtectedResourceCache: prCache,
+			DiscoveryClient:        mockDiscovery,
 		}
 
 		attributes := &mockAttributes{
@@ -665,22 +649,16 @@ func TestOrganizationNamespaceValidation(t *testing.T) {
 	})
 
 	t.Run("organization-scoped cross-namespace query is denied", func(t *testing.T) {
-		mockK8s := &mockK8sClient{
-			listFunc: func(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
-				l := list.(*iamv1alpha1.ProtectedResourceList)
-				l.Items = []iamv1alpha1.ProtectedResource{
-					{
-						Spec: iamv1alpha1.ProtectedResourceSpec{
-							ServiceRef:  iamv1alpha1.ServiceReference{Name: iamv1alpha1.SchemeGroupVersion.Group},
-							Kind:        "Group",
-							Plural:      "groups",
-							Permissions: []string{"list"},
-						},
-					},
-				}
-				return nil
+		prCache := webhook.NewProtectedResourceCacheForTest([]iamv1alpha1.ProtectedResource{
+			{
+				Spec: iamv1alpha1.ProtectedResourceSpec{
+					ServiceRef:  iamv1alpha1.ServiceReference{Name: iamv1alpha1.SchemeGroupVersion.Group},
+					Kind:        "Group",
+					Plural:      "groups",
+					Permissions: []string{"list"},
+				},
 			},
-		}
+		})
 
 		mockDiscovery := &mockDiscoveryClient{
 			serverResourcesForGroupVersionFunc: func(groupVersion string) (*metav1.APIResourceList, error) {
@@ -702,10 +680,10 @@ func TestOrganizationNamespaceValidation(t *testing.T) {
 		mockFGA := &mockFGAClient{}
 
 		auth := &webhook.SubjectAccessReviewAuthorizer{
-			FGAClient:       mockFGA,
-			FGAStoreID:      "test-store",
-			K8sClient:       mockK8s,
-			DiscoveryClient: mockDiscovery,
+			FGAClient:              mockFGA,
+			FGAStoreID:             "test-store",
+			ProtectedResourceCache: prCache,
+			DiscoveryClient:        mockDiscovery,
 		}
 
 		attributes := &mockAttributes{
@@ -731,6 +709,421 @@ func TestOrganizationNamespaceValidation(t *testing.T) {
 		assert.Contains(t, err.Error(), "cross-namespace queries not allowed")
 		assert.Equal(t, authorizer.DecisionDeny, decision)
 	})
+}
+
+// TestResourceKindBindingResolution covers the BatchCheck approach used by
+// the direct-permission model to resolve ResourceKind policy bindings. When a
+// user requests a named resource instance without project or org scope the
+// authorizer sends a BatchCheck with two items: one for the specific instance
+// and one for Root:service/Kind so that both ResourceRef and ResourceKind
+// bindings are covered in a single RPC.
+func TestResourceKindBindingResolution(t *testing.T) {
+	// All sub-tests use the direct-permission model with no legacy fallback.
+	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.DirectPermissionTuples, true)
+	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.LegacyRoleBindingModel, false)
+
+	computeWorkloadResource := iamv1alpha1.ProtectedResource{
+		Spec: iamv1alpha1.ProtectedResourceSpec{
+			ServiceRef:  iamv1alpha1.ServiceReference{Name: "compute.miloapis.com"},
+			Plural:      "workloads",
+			Kind:        "Workload",
+			Permissions: []string{"get", "list", "create", "update", "delete"},
+		},
+	}
+
+	t.Run("specific resource at cluster scope uses BatchCheck with instance and Root", func(t *testing.T) {
+		// verb=get, name=instance-1, no project/org scope.
+		// The authorizer must send BatchCheck with instance + Root checks.
+		var capturedBatchReq *openfgav1.BatchCheckRequest
+		mockFGA := &mockFGAClient{
+			BatchCheckFunc: func(ctx context.Context, req *openfgav1.BatchCheckRequest, opts ...grpc.CallOption) (*openfgav1.BatchCheckResponse, error) {
+				capturedBatchReq = req
+				return &openfgav1.BatchCheckResponse{
+					Result: map[string]*openfgav1.BatchCheckSingleResult{
+						"instance": {CheckResult: &openfgav1.BatchCheckSingleResult_Allowed{Allowed: true}},
+						"root":     {CheckResult: &openfgav1.BatchCheckSingleResult_Allowed{Allowed: false}},
+					},
+				}, nil
+			},
+		}
+
+		auth := &webhook.SubjectAccessReviewAuthorizer{
+			FGAClient:              mockFGA,
+			ProtectedResourceCache: webhook.NewProtectedResourceCacheForTest([]iamv1alpha1.ProtectedResource{computeWorkloadResource}),
+			FGAStoreID:             "test_store",
+			DiscoveryClient:        &mockDiscoveryClient{},
+		}
+
+		attributes := &mockAttributes{
+			apiGroup: "compute.miloapis.com",
+			resource: "workloads",
+			name:     "instance-1",
+			verb:     "get",
+			user:     &user.DefaultInfo{Name: "test-user", UID: "user-abc"},
+		}
+
+		decision, _, err := auth.Authorize(context.Background(), attributes)
+
+		require.NoError(t, err)
+		assert.Equal(t, authorizer.DecisionAllow, decision)
+
+		require.NotNil(t, capturedBatchReq, "BatchCheck should have been called")
+		require.Len(t, capturedBatchReq.Checks, 2, "BatchCheck must have instance and Root checks")
+		checksById := make(map[string]*openfgav1.BatchCheckItem)
+		for _, c := range capturedBatchReq.Checks {
+			checksById[c.CorrelationId] = c
+		}
+		require.Contains(t, checksById, "instance", "instance check must be present")
+		require.Contains(t, checksById, "root", "root check must be present")
+		assert.Equal(t, "compute.miloapis.com/Workload:instance-1", checksById["instance"].TupleKey.Object)
+		assert.Equal(t, "iam.miloapis.com/Root:compute.miloapis.com/Workload", checksById["root"].TupleKey.Object)
+	})
+
+	t.Run("collection operation uses BatchCheck with Root for both checks", func(t *testing.T) {
+		// verb=list, no name. Collection operations resolve to Root for the object;
+		// both the instance and root BatchCheck items target the Root resource.
+		var capturedBatchReq *openfgav1.BatchCheckRequest
+		mockFGA := &mockFGAClient{
+			BatchCheckFunc: func(ctx context.Context, req *openfgav1.BatchCheckRequest, opts ...grpc.CallOption) (*openfgav1.BatchCheckResponse, error) {
+				capturedBatchReq = req
+				return &openfgav1.BatchCheckResponse{
+					Result: map[string]*openfgav1.BatchCheckSingleResult{
+						"instance": {CheckResult: &openfgav1.BatchCheckSingleResult_Allowed{Allowed: true}},
+						"root":     {CheckResult: &openfgav1.BatchCheckSingleResult_Allowed{Allowed: false}},
+					},
+				}, nil
+			},
+		}
+
+		auth := &webhook.SubjectAccessReviewAuthorizer{
+			FGAClient:              mockFGA,
+			ProtectedResourceCache: webhook.NewProtectedResourceCacheForTest([]iamv1alpha1.ProtectedResource{computeWorkloadResource}),
+			FGAStoreID:             "test_store",
+			DiscoveryClient:        &mockDiscoveryClient{},
+		}
+
+		attributes := &mockAttributes{
+			apiGroup: "compute.miloapis.com",
+			resource: "workloads",
+			name:     "", // no name = collection operation
+			verb:     "list",
+			user:     &user.DefaultInfo{Name: "test-user", UID: "user-abc"},
+		}
+
+		decision, _, err := auth.Authorize(context.Background(), attributes)
+
+		require.NoError(t, err)
+		assert.Equal(t, authorizer.DecisionAllow, decision)
+		require.NotNil(t, capturedBatchReq, "BatchCheck should have been called")
+		require.Len(t, capturedBatchReq.Checks, 2, "BatchCheck must have instance and root checks")
+		checksById := make(map[string]*openfgav1.BatchCheckItem)
+		for _, c := range capturedBatchReq.Checks {
+			checksById[c.CorrelationId] = c
+		}
+		require.Contains(t, checksById, "instance")
+		require.Contains(t, checksById, "root")
+		// For collection operations the resolved object is Root, so both checks target Root.
+		assert.Equal(t, "iam.miloapis.com/Root:compute.miloapis.com/Workload", checksById["instance"].TupleKey.Object)
+		assert.Equal(t, "iam.miloapis.com/Root:compute.miloapis.com/Workload", checksById["root"].TupleKey.Object)
+	})
+
+	t.Run("project-scoped request uses BatchCheck against Project and Root", func(t *testing.T) {
+		// Project scope: BatchCheck with instance=Project and root=Root; access
+		// is allowed if either allows.
+		var capturedBatchReq *openfgav1.BatchCheckRequest
+		mockFGA := &mockFGAClient{
+			BatchCheckFunc: func(ctx context.Context, req *openfgav1.BatchCheckRequest, opts ...grpc.CallOption) (*openfgav1.BatchCheckResponse, error) {
+				capturedBatchReq = req
+				return &openfgav1.BatchCheckResponse{
+					Result: map[string]*openfgav1.BatchCheckSingleResult{
+						"instance": {CheckResult: &openfgav1.BatchCheckSingleResult_Allowed{Allowed: true}},
+						"root":     {CheckResult: &openfgav1.BatchCheckSingleResult_Allowed{Allowed: false}},
+					},
+				}, nil
+			},
+		}
+
+		auth := &webhook.SubjectAccessReviewAuthorizer{
+			FGAClient:              mockFGA,
+			ProtectedResourceCache: webhook.NewProtectedResourceCacheForTest([]iamv1alpha1.ProtectedResource{computeWorkloadResource}),
+			FGAStoreID:             "test_store",
+			DiscoveryClient:        &mockDiscoveryClient{},
+		}
+
+		attributes := &mockAttributes{
+			apiGroup: "compute.miloapis.com",
+			resource: "workloads",
+			name:     "wkld-123",
+			verb:     "get",
+			user: &user.DefaultInfo{
+				Name: "test-user",
+				UID:  "user-abc",
+				Extra: map[string][]string{
+					iamv1alpha1.ParentAPIGroupExtraKey: {"resourcemanager.miloapis.com"},
+					iamv1alpha1.ParentKindExtraKey:     {"Project"},
+					iamv1alpha1.ParentNameExtraKey:     {"proj-xyz"},
+				},
+			},
+		}
+
+		decision, _, err := auth.Authorize(context.Background(), attributes)
+
+		require.NoError(t, err)
+		assert.Equal(t, authorizer.DecisionAllow, decision)
+		require.NotNil(t, capturedBatchReq, "BatchCheck should have been called")
+		require.Len(t, capturedBatchReq.Checks, 2, "BatchCheck must have instance and root checks")
+		checksById := make(map[string]*openfgav1.BatchCheckItem)
+		for _, c := range capturedBatchReq.Checks {
+			checksById[c.CorrelationId] = c
+		}
+		require.Contains(t, checksById, "instance")
+		require.Contains(t, checksById, "root")
+		assert.Equal(t, "resourcemanager.miloapis.com/Project:proj-xyz", checksById["instance"].TupleKey.Object)
+		assert.Equal(t, "iam.miloapis.com/Root:compute.miloapis.com/Workload", checksById["root"].TupleKey.Object)
+	})
+
+	t.Run("BatchCheck allows when instance check allows (ResourceRef binding)", func(t *testing.T) {
+		// Instance check allows, Root denies — access must be granted.
+		mockFGA := &mockFGAClient{
+			BatchCheckFunc: func(ctx context.Context, req *openfgav1.BatchCheckRequest, opts ...grpc.CallOption) (*openfgav1.BatchCheckResponse, error) {
+				return &openfgav1.BatchCheckResponse{
+					Result: map[string]*openfgav1.BatchCheckSingleResult{
+						"instance": {CheckResult: &openfgav1.BatchCheckSingleResult_Allowed{Allowed: true}},
+						"root":     {CheckResult: &openfgav1.BatchCheckSingleResult_Allowed{Allowed: false}},
+					},
+				}, nil
+			},
+		}
+
+		auth := &webhook.SubjectAccessReviewAuthorizer{
+			FGAClient:              mockFGA,
+			ProtectedResourceCache: webhook.NewProtectedResourceCacheForTest([]iamv1alpha1.ProtectedResource{computeWorkloadResource}),
+			FGAStoreID:             "test_store",
+			DiscoveryClient:        &mockDiscoveryClient{},
+		}
+
+		attributes := &mockAttributes{
+			apiGroup: "compute.miloapis.com",
+			resource: "workloads",
+			name:     "instance-1",
+			verb:     "get",
+			user:     &user.DefaultInfo{Name: "test-user", UID: "user-abc"},
+		}
+
+		decision, _, err := auth.Authorize(context.Background(), attributes)
+
+		require.NoError(t, err)
+		assert.Equal(t, authorizer.DecisionAllow, decision, "should be allowed when instance check allows")
+	})
+
+	t.Run("BatchCheck allows when Root check allows (ResourceKind binding)", func(t *testing.T) {
+		// Instance denies, Root (ResourceKind binding) allows — access must be granted.
+		mockFGA := &mockFGAClient{
+			BatchCheckFunc: func(ctx context.Context, req *openfgav1.BatchCheckRequest, opts ...grpc.CallOption) (*openfgav1.BatchCheckResponse, error) {
+				return &openfgav1.BatchCheckResponse{
+					Result: map[string]*openfgav1.BatchCheckSingleResult{
+						"instance": {CheckResult: &openfgav1.BatchCheckSingleResult_Allowed{Allowed: false}},
+						"root":     {CheckResult: &openfgav1.BatchCheckSingleResult_Allowed{Allowed: true}},
+					},
+				}, nil
+			},
+		}
+
+		auth := &webhook.SubjectAccessReviewAuthorizer{
+			FGAClient:              mockFGA,
+			ProtectedResourceCache: webhook.NewProtectedResourceCacheForTest([]iamv1alpha1.ProtectedResource{computeWorkloadResource}),
+			FGAStoreID:             "test_store",
+			DiscoveryClient:        &mockDiscoveryClient{},
+		}
+
+		attributes := &mockAttributes{
+			apiGroup: "compute.miloapis.com",
+			resource: "workloads",
+			name:     "instance-1",
+			verb:     "get",
+			user:     &user.DefaultInfo{Name: "test-user", UID: "user-abc"},
+		}
+
+		decision, _, err := auth.Authorize(context.Background(), attributes)
+
+		require.NoError(t, err)
+		assert.Equal(t, authorizer.DecisionAllow, decision, "should be allowed via ResourceKind binding on Root")
+	})
+
+	t.Run("BatchCheck denies when both instance and Root deny", func(t *testing.T) {
+		// Both deny — access must be denied.
+		mockFGA := &mockFGAClient{
+			BatchCheckFunc: func(ctx context.Context, req *openfgav1.BatchCheckRequest, opts ...grpc.CallOption) (*openfgav1.BatchCheckResponse, error) {
+				return &openfgav1.BatchCheckResponse{
+					Result: map[string]*openfgav1.BatchCheckSingleResult{
+						"instance": {CheckResult: &openfgav1.BatchCheckSingleResult_Allowed{Allowed: false}},
+						"root":     {CheckResult: &openfgav1.BatchCheckSingleResult_Allowed{Allowed: false}},
+					},
+				}, nil
+			},
+		}
+
+		auth := &webhook.SubjectAccessReviewAuthorizer{
+			FGAClient:              mockFGA,
+			ProtectedResourceCache: webhook.NewProtectedResourceCacheForTest([]iamv1alpha1.ProtectedResource{computeWorkloadResource}),
+			FGAStoreID:             "test_store",
+			DiscoveryClient:        &mockDiscoveryClient{},
+		}
+
+		attributes := &mockAttributes{
+			apiGroup: "compute.miloapis.com",
+			resource: "workloads",
+			name:     "instance-1",
+			verb:     "get",
+			user:     &user.DefaultInfo{Name: "test-user", UID: "user-abc"},
+		}
+
+		decision, _, err := auth.Authorize(context.Background(), attributes)
+
+		require.NoError(t, err)
+		assert.Equal(t, authorizer.DecisionDeny, decision, "should be denied when both instance and Root checks deny")
+	})
+
+	t.Run("collection operation denied when OpenFGA returns denied", func(t *testing.T) {
+		// Collection op denied — both instance and root checks deny, propagate deny.
+		mockFGA := &mockFGAClient{
+			BatchCheckFunc: func(ctx context.Context, req *openfgav1.BatchCheckRequest, opts ...grpc.CallOption) (*openfgav1.BatchCheckResponse, error) {
+				return &openfgav1.BatchCheckResponse{
+					Result: map[string]*openfgav1.BatchCheckSingleResult{
+						"instance": {CheckResult: &openfgav1.BatchCheckSingleResult_Allowed{Allowed: false}},
+						"root":     {CheckResult: &openfgav1.BatchCheckSingleResult_Allowed{Allowed: false}},
+					},
+				}, nil
+			},
+		}
+
+		auth := &webhook.SubjectAccessReviewAuthorizer{
+			FGAClient:              mockFGA,
+			ProtectedResourceCache: webhook.NewProtectedResourceCacheForTest([]iamv1alpha1.ProtectedResource{computeWorkloadResource}),
+			FGAStoreID:             "test_store",
+			DiscoveryClient:        &mockDiscoveryClient{},
+		}
+
+		attributes := &mockAttributes{
+			apiGroup: "compute.miloapis.com",
+			resource: "workloads",
+			verb:     "list",
+			user:     &user.DefaultInfo{Name: "test-user", UID: "user-abc"},
+		}
+
+		decision, _, err := auth.Authorize(context.Background(), attributes)
+
+		require.NoError(t, err)
+		assert.Equal(t, authorizer.DecisionDeny, decision)
+	})
+
+	t.Run("collection operation uses BatchCheck not regular Check", func(t *testing.T) {
+		// Verify that collection verbs (no resource name) use BatchCheck, not regular Check.
+		var capturedBatchReq *openfgav1.BatchCheckRequest
+		mockFGA := &mockFGAClient{
+			BatchCheckFunc: func(ctx context.Context, req *openfgav1.BatchCheckRequest, opts ...grpc.CallOption) (*openfgav1.BatchCheckResponse, error) {
+				capturedBatchReq = req
+				return &openfgav1.BatchCheckResponse{
+					Result: map[string]*openfgav1.BatchCheckSingleResult{
+						"instance": {CheckResult: &openfgav1.BatchCheckSingleResult_Allowed{Allowed: true}},
+						"root":     {CheckResult: &openfgav1.BatchCheckSingleResult_Allowed{Allowed: false}},
+					},
+				}, nil
+			},
+		}
+
+		auth := &webhook.SubjectAccessReviewAuthorizer{
+			FGAClient:              mockFGA,
+			ProtectedResourceCache: webhook.NewProtectedResourceCacheForTest([]iamv1alpha1.ProtectedResource{computeWorkloadResource}),
+			FGAStoreID:             "test_store",
+			DiscoveryClient:        &mockDiscoveryClient{},
+		}
+
+		for _, verb := range []string{"create"} {
+			attributes := &mockAttributes{
+				apiGroup: "compute.miloapis.com",
+				resource: "workloads",
+				verb:     verb,
+				user:     &user.DefaultInfo{Name: "test-user", UID: "user-abc"},
+			}
+
+			_, _, err := auth.Authorize(context.Background(), attributes)
+			require.NoError(t, err)
+			require.NotNil(t, capturedBatchReq, "BatchCheck should be called for verb=%s", verb)
+			capturedBatchReq = nil
+		}
+	})
+}
+
+// TestResourceKindGroupBindingViaBatchCheck verifies that group-based
+// ResourceKind policy bindings resolve correctly via BatchCheck. The direct
+// model stores group memberships as persistent tuples, and the Root fallback
+// check in BatchCheck covers the ResourceKind binding path.
+func TestResourceKindGroupBindingViaBatchCheck(t *testing.T) {
+	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.DirectPermissionTuples, true)
+	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.LegacyRoleBindingModel, false)
+
+	computeWorkloadResource := iamv1alpha1.ProtectedResource{
+		Spec: iamv1alpha1.ProtectedResourceSpec{
+			ServiceRef:  iamv1alpha1.ServiceReference{Name: "compute.miloapis.com"},
+			Plural:      "workloads",
+			Kind:        "Workload",
+			Permissions: []string{"get"},
+		},
+	}
+
+	var capturedBatchReq *openfgav1.BatchCheckRequest
+	mockFGA := &mockFGAClient{
+		BatchCheckFunc: func(ctx context.Context, req *openfgav1.BatchCheckRequest, opts ...grpc.CallOption) (*openfgav1.BatchCheckResponse, error) {
+			capturedBatchReq = req
+			// Instance check denies (no direct binding), Root check allows
+			// (group has ResourceKind binding on Root).
+			return &openfgav1.BatchCheckResponse{
+				Result: map[string]*openfgav1.BatchCheckSingleResult{
+					"instance": {CheckResult: &openfgav1.BatchCheckSingleResult_Allowed{Allowed: false}},
+					"root":     {CheckResult: &openfgav1.BatchCheckSingleResult_Allowed{Allowed: true}},
+				},
+			}, nil
+		},
+	}
+
+	auth := &webhook.SubjectAccessReviewAuthorizer{
+		FGAClient:              mockFGA,
+		ProtectedResourceCache: webhook.NewProtectedResourceCacheForTest([]iamv1alpha1.ProtectedResource{computeWorkloadResource}),
+		FGAStoreID:             "test_store",
+		DiscoveryClient:        &mockDiscoveryClient{},
+	}
+
+	attributes := &mockAttributes{
+		apiGroup: "compute.miloapis.com",
+		resource: "workloads",
+		name:     "instance-1",
+		verb:     "get",
+		user: &user.DefaultInfo{
+			Name:   "test-user",
+			UID:    "user-abc",
+			Groups: []string{"sales-engineers"},
+		},
+	}
+
+	decision, _, err := auth.Authorize(context.Background(), attributes)
+
+	require.NoError(t, err)
+	assert.Equal(t, authorizer.DecisionAllow, decision,
+		"user in group with ResourceKind binding should be allowed via Root BatchCheck")
+
+	require.NotNil(t, capturedBatchReq)
+	require.Len(t, capturedBatchReq.Checks, 2, "BatchCheck must include both instance and Root checks")
+
+	var rootCheck *openfgav1.BatchCheckItem
+	for _, c := range capturedBatchReq.Checks {
+		if c.CorrelationId == "root" {
+			rootCheck = c
+		}
+	}
+	require.NotNil(t, rootCheck, "root check must be present in BatchCheck")
+	assert.Equal(t, "iam.miloapis.com/Root:compute.miloapis.com/Workload", rootCheck.TupleKey.Object,
+		"Root check must target the kind-level Root object for ResourceKind binding resolution")
 }
 
 // mockWebhookServer implements the WebhookServer interface for testing

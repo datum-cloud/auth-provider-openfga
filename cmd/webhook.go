@@ -4,23 +4,31 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	openfgav1 "github.com/openfga/api/proto/openfga/v1"
 	"github.com/spf13/cobra"
+	_ "go.miloapis.com/auth-provider-openfga/internal/features" // register feature gates
+	"go.miloapis.com/auth-provider-openfga/internal/telemetry"
 	"go.miloapis.com/auth-provider-openfga/internal/webhook"
 	iamv1alpha1 "go.miloapis.com/milo/pkg/apis/iam/v1alpha1"
 	resourcemanagerv1alpha1 "go.miloapis.com/milo/pkg/apis/resourcemanager/v1alpha1"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"k8s.io/api/authentication/v1beta1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/client-go/discovery/cached/disk"
-	"sigs.k8s.io/controller-runtime/pkg/client"
+	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
+	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
@@ -35,7 +43,11 @@ func createWebhookCommand() *cobra.Command {
 	var openfgaScheme string
 	var webhookPort int
 	var metricsBindAddress string
+	var probeAddr string
 	var discoveryCacheTTL time.Duration
+	var otlpEndpoint string
+	var configmapNamespace string
+	var configmapName string
 
 	cmd := &cobra.Command{
 		Use:   "authz-webhook",
@@ -51,7 +63,11 @@ func createWebhookCommand() *cobra.Command {
 				openfgaScheme,
 				webhookPort,
 				metricsBindAddress,
+				probeAddr,
 				discoveryCacheTTL,
+				otlpEndpoint,
+				configmapNamespace,
+				configmapName,
 			)
 		},
 	}
@@ -66,8 +82,17 @@ func createWebhookCommand() *cobra.Command {
 	cmd.Flags().StringVar(&openfgaScheme, "openfga-scheme", "http", "OpenFGA Scheme (http or https)")
 	cmd.Flags().IntVar(&webhookPort, "webhook-port", 9443, "Port for the webhook server")
 	cmd.Flags().StringVar(&metricsBindAddress, "metrics-bind-address", ":8080", "Address for the metrics server")
+	cmd.Flags().StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	cmd.Flags().DurationVar(&discoveryCacheTTL, "discovery-cache-ttl", 5*time.Minute,
 		"TTL for Kubernetes API discovery cache (enables automatic detection of new resources)")
+	cmd.Flags().StringVar(&otlpEndpoint, "otlp-endpoint", os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
+		"OTLP HTTP endpoint for OpenTelemetry trace export (e.g. tempo:4318). Leave empty to disable tracing.")
+	cmd.Flags().StringVar(&configmapNamespace, "configmap-namespace", os.Getenv("POD_NAMESPACE"),
+		"Namespace to watch for the authorization model ConfigMap. Defaults to the POD_NAMESPACE environment variable.")
+	cmd.Flags().StringVar(&configmapName, "configmap-name", "openfga-authorization-model",
+		"Name of the ConfigMap that stores the current authorization model ID.")
+
+	utilfeature.DefaultMutableFeatureGate.AddFlag(cmd.Flags())
 
 	// Mark required flags
 	if err := cmd.MarkFlagRequired("openfga-api-url"); err != nil {
@@ -89,10 +114,27 @@ func runWebhookServer(
 	openfgaScheme string,
 	webhookPort int,
 	metricsBindAddress string,
+	probeAddr string,
 	discoveryCacheTTL time.Duration,
+	otlpEndpoint string,
+	configmapNamespace string,
+	configmapName string,
 ) error {
 	log.SetLogger(zap.New(zap.JSONEncoder()))
 	entryLog := log.Log.WithName("webhook-server")
+
+	// Initialise OpenTelemetry tracing. When otlpEndpoint is empty a no-op
+	// provider is installed and this is effectively free at runtime.
+	ctx := context.Background()
+	_, tracerShutdown, err := telemetry.SetupTracer(ctx, "auth-provider-openfga-webhook", "dev", otlpEndpoint)
+	if err != nil {
+		return fmt.Errorf("failed to setup tracer: %w", err)
+	}
+	defer func() {
+		if shutdownErr := tracerShutdown(ctx); shutdownErr != nil {
+			entryLog.Error(shutdownErr, "failed to shutdown tracer provider")
+		}
+	}()
 
 	// Create OpenFGA client
 	var creds credentials.TransportCredentials
@@ -104,6 +146,7 @@ func runWebhookServer(
 
 	conn, err := grpc.NewClient(openfgaAPIURL,
 		grpc.WithTransportCredentials(creds),
+		grpc.WithStatsHandler(otelgrpc.NewClientHandler()),
 	)
 	if err != nil {
 		return fmt.Errorf("unable to create gRPC connection to OpenFGA: %w", err)
@@ -123,6 +166,9 @@ func runWebhookServer(
 	}
 
 	runtimeScheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(runtimeScheme); err != nil {
+		return fmt.Errorf("failed to add corev1 to scheme: %w", err)
+	}
 	if err := v1beta1.AddToScheme(runtimeScheme); err != nil {
 		return fmt.Errorf("failed to add v1beta1 to scheme: %w", err)
 	}
@@ -131,12 +177,6 @@ func runWebhookServer(
 	}
 	if err := iamv1alpha1.AddToScheme(runtimeScheme); err != nil {
 		return fmt.Errorf("failed to add iamv1alpha1 to scheme: %w", err)
-	}
-
-	// Create Kubernetes client
-	k8sClient, err := client.New(restConfig, client.Options{Scheme: runtimeScheme})
-	if err != nil {
-		return fmt.Errorf("failed to create Kubernetes client: %w", err)
 	}
 
 	// Create temporary directory for discovery cache (will be cleaned up on process exit)
@@ -158,6 +198,7 @@ func runWebhookServer(
 		Metrics: server.Options{
 			BindAddress: metricsBindAddress,
 		},
+		HealthProbeBindAddress: probeAddr,
 		WebhookServer: ctrlwebhook.NewServer(ctrlwebhook.Options{
 			CertDir:  certDir,
 			CertName: certFile,
@@ -169,18 +210,74 @@ func runWebhookServer(
 		return fmt.Errorf("failed to setup manager: %w", err)
 	}
 
+	// Build the ProtectedResource informer cache. The cache is backed by the
+	// manager's informer and starts empty; it will be populated once the
+	// manager's cache syncs (i.e. after mgr.Start is called).
+	prCache, err := webhook.NewProtectedResourceCache(ctx, mgr)
+	if err != nil {
+		return fmt.Errorf("failed to create ProtectedResource cache: %w", err)
+	}
+
+	// Build the authorization model ID watcher. It watches the
+	// openfga-authorization-model ConfigMap and updates its cached model ID
+	// whenever the controller-manager writes a new model. The watcher starts
+	// with an empty seed — the first informer event after cache sync will
+	// populate it.
+	//
+	// When running in-cluster the ConfigMap lives on the local workload cluster
+	// (not the remote control plane pointed to by KUBECONFIG), so we prefer an
+	// in-cluster informer when available.
+	var modelIDWatcher *webhook.AuthorizationModelIDWatcher
+	if inClusterCfg, inClusterErr := rest.InClusterConfig(); inClusterErr == nil {
+		modelIDWatcher, err = webhook.NewAuthorizationModelIDWatcherWithConfig(ctx, inClusterCfg, configmapNamespace, configmapName, "")
+	} else {
+		modelIDWatcher, err = webhook.NewAuthorizationModelIDWatcher(ctx, mgr, configmapNamespace, configmapName, "")
+	}
+	if err != nil {
+		return fmt.Errorf("failed to create authorization model ID watcher: %w", err)
+	}
+
 	// Setup webhooks
 	entryLog.Info("setting up webhook server")
 	hookServer := mgr.GetWebhookServer()
 
 	entryLog.Info("registering webhooks to the webhook server")
 
+	// Use the manager's cached client so ProtectedResource List calls are served
+	// from the in-memory informer cache instead of making a network round-trip on
+	// every SubjectAccessReview.
 	webhook.RegisterSubjectAccessReviewWebhook(hookServer, webhook.Config{
-		FGAClient:       fgaClient,
-		FGAStoreID:      openfgaStoreID,
-		K8sClient:       k8sClient,
-		DiscoveryClient: discoveryClient,
+		FGAClient:              fgaClient,
+		FGAStoreID:             openfgaStoreID,
+		ModelIDWatcher:         modelIDWatcher,
+		ProtectedResourceCache: prCache,
+		DiscoveryClient:        discoveryClient,
 	})
+
+	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
+		return fmt.Errorf("unable to set up health check: %w", err)
+	}
+
+	// Track whether the informer cache has completed its initial sync. The
+	// readiness probe returns unhealthy until this flag is set, preventing the
+	// pod from receiving authorization traffic before the ProtectedResource
+	// cache is populated.
+	var cacheReady atomic.Bool
+	go func() {
+		if mgr.GetCache().WaitForCacheSync(ctx) {
+			cacheReady.Store(true)
+			entryLog.Info("informer cache synced, readiness probe will pass")
+		}
+	}()
+
+	if err := mgr.AddReadyzCheck("readyz", func(_ *http.Request) error {
+		if !cacheReady.Load() {
+			return fmt.Errorf("informer caches have not yet synced")
+		}
+		return nil
+	}); err != nil {
+		return fmt.Errorf("unable to set up ready check: %w", err)
+	}
 
 	entryLog.Info("starting webhook server", "port", webhookPort, "metrics-port", metricsBindAddress)
 	return mgr.Start(context.Background())

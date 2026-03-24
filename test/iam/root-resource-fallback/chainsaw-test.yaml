@@ -113,9 +113,6 @@ spec:
                         echo "Root fallback test FAILED - could not determine allowed status"
                         exit 1
                       fi
-                  env:
-                    - name: USER_UID
-                      value: ($user.metadata.uid)
 
         # Wait for first test to complete
         - wait:

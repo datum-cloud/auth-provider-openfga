@@ -297,8 +297,16 @@ func (r *PolicyBindingReconciler) validateResourceRef(ctx context.Context, polic
 
 	// Compare the UID of the fetched target resource with the UID specified in the PolicyBinding.
 	if fetchedTarget.GetUID() != types.UID(resourceRef.UID) {
-		msg := fmt.Sprintf("Target resource %s/%s (namespace: '%s') found, but UID does not match. Expected: %s, Got: %s.", resourceRef.Kind, resourceRef.Name, resourceRef.Namespace, resourceRef.UID, fetchedTarget.GetUID())
-		log.Info(msg, "policyBindingName", policyBinding.Name)
+		namespace := resourceRef.Namespace
+		if namespace == "" {
+			namespace = "cluster-scoped"
+		}
+		msg := fmt.Sprintf(
+			"The %s '%s' in namespace '%s' has UID '%s', but the PolicyBinding references UID '%s'. "+
+				"Update the PolicyBinding to use the correct UID, or delete and recreate the PolicyBinding.",
+			resourceRef.Kind, resourceRef.Name, namespace, fetchedTarget.GetUID(), resourceRef.UID,
+		)
+		log.Info(msg, "policyBindingName", policyBinding.Name, "resourceKind", resourceRef.Kind, "resourceName", resourceRef.Name)
 		meta.SetStatusCondition(&policyBinding.Status.Conditions, metav1.Condition{
 			Type:               ConditionTypeTargetValid,
 			Status:             metav1.ConditionFalse,
@@ -579,7 +587,8 @@ func (r *PolicyBindingReconciler) validateResourceType(
 
 // validatePolicyBindingSubjects iterates through all subjects (users or groups) defined in a PolicyBinding's spec. For
 // each subject, it verifies: 1. A UID is provided in the spec. 2. The subject's Kind and APIGroup are recognized by the
-// Kubernetes API server. 3. The subject resource actually exists in the cluster. It accumulates validation messages for
+// Kubernetes API server. 3. The subject resource actually exists in the cluster. 4. The UID in the spec matches the
+// actual resource's UID. It accumulates validation messages for
 // any invalid subjects. If a subject lookup results in an API error that suggests a transient issue (not a simple "not
 // found" or "kind not recognized"), it returns an error to trigger a requeue of the PolicyBinding.
 func (r *PolicyBindingReconciler) validatePolicyBindingSubjects(ctx context.Context, policyBinding *iamdatumapiscomv1alpha1.PolicyBinding, oldStatus *iamdatumapiscomv1alpha1.PolicyBindingStatus, currentGeneration int64) (subjectsValid bool, validationMessages []string, requeueErr error) {
@@ -605,7 +614,7 @@ func (r *PolicyBindingReconciler) validatePolicyBindingSubjects(ctx context.Cont
 			continue
 		}
 
-		_, err := r.getUnstructuredResourceAndMapping(ctx, iamdatumapiscomv1alpha1.SchemeGroupVersion.Group, subject.Kind, subject.Name, subject.Namespace)
+		fetchedSubject, err := r.getUnstructuredResourceAndMapping(ctx, iamdatumapiscomv1alpha1.SchemeGroupVersion.Group, subject.Kind, subject.Name, subject.Namespace)
 		if err != nil {
 			var subjectMsg string
 			var reason string
@@ -625,6 +634,25 @@ func (r *PolicyBindingReconciler) validatePolicyBindingSubjects(ctx context.Cont
 
 			log.Info(subjectMsg, "policyBindingName", policyBinding.Name, "subjectName", subject.Name)
 			validationMessages = append(validationMessages, fmt.Sprintf("%s/%s (%s)", subject.Kind, subject.Name, reason))
+			subjectsValid = false
+			continue
+		}
+
+		// Verify that the UID in the PolicyBinding spec matches the actual resource's UID.
+		// A mismatch indicates the PolicyBinding references a stale or incorrect UID, which
+		// would cause authorization failures at runtime.
+		if fetchedSubject.GetUID() != types.UID(subject.UID) {
+			namespace := subject.Namespace
+			if namespace == "" {
+				namespace = "cluster-scoped"
+			}
+			msg := fmt.Sprintf(
+				"The %s '%s' in namespace '%s' has UID '%s', but the PolicyBinding references UID '%s'. "+
+					"Update the PolicyBinding to use the correct UID, or delete and recreate the PolicyBinding.",
+				subject.Kind, subject.Name, namespace, fetchedSubject.GetUID(), subject.UID,
+			)
+			log.Info(msg, "policyBindingName", policyBinding.Name, "subjectKind", subject.Kind, "subjectName", subject.Name)
+			validationMessages = append(validationMessages, fmt.Sprintf("%s/%s (UIDMismatch)", subject.Kind, subject.Name))
 			subjectsValid = false
 			continue
 		}
