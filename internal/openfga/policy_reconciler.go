@@ -108,37 +108,58 @@ func (r *PolicyReconciler) DeletePolicy(ctx context.Context, binding iamdatumapi
 
 // --- direct-permission path ---------------------------------------------------
 
-// reconcileDirectPolicy writes/removes (user, hash(perm), resource) tuples.
+// reconcileDirectPolicy computes the full desired tuple set for all
+// PolicyBindings that share the same (subject, targetObject) pair as the
+// triggering binding, then diffs against the existing tuples in OpenFGA.
+//
+// This full-set approach prevents one binding from clobbering tuples written
+// by sibling bindings. For example, if two bindings both grant the staff-users
+// group permissions on Root:Organization, the desired set is the union of both
+// bindings' permissions, and the diff only removes tuples that no binding wants.
 func (r *PolicyReconciler) reconcileDirectPolicy(ctx context.Context, binding iamdatumapiscomv1alpha1.PolicyBinding) error {
-	role, err := r.fetchRole(ctx, binding)
-	if err != nil {
-		return err
-	}
-
 	targetObject, err := r.getTargetObjectFromResourceSelector(binding.Spec.ResourceSelector)
 	if err != nil {
 		return fmt.Errorf("failed to get target object from resource selector: %w", err)
 	}
 
-	// Compute the full set of permissions valid on the target resource type,
-	// including permissions inherited from child resources. This mirrors how
-	// the authorization model builder computes hierarchical permissions.
 	validPerms, err := r.getHierarchicalPermissionsForSelector(ctx, binding.Spec.ResourceSelector)
 	if err != nil {
 		return fmt.Errorf("failed to compute hierarchical permissions: %w", err)
 	}
 
-	desiredTuples, err := r.buildDirectPermissionTuples(binding, role, targetObject, validPerms)
+	// Find all sibling PolicyBindings that share the same target object and
+	// have at least one overlapping subject. The union of their desired tuples
+	// is the complete desired state for these subjects on this object.
+	siblings, err := r.findSiblingBindings(ctx, binding)
 	if err != nil {
-		return fmt.Errorf("failed to build permission tuples: %w", err)
+		return fmt.Errorf("failed to find sibling bindings: %w", err)
 	}
+
+	// Build the union of desired tuples across all sibling bindings.
+	var allDesired []*openfgav1.TupleKey
+	for i := range siblings {
+		role, err := r.fetchRole(ctx, siblings[i])
+		if err != nil {
+			// Skip bindings with missing roles — they'll be handled by
+			// their own reconciliation which will set Ready=False.
+			continue
+		}
+		tuples, err := r.buildDirectPermissionTuples(siblings[i], role, targetObject, validPerms)
+		if err != nil {
+			continue
+		}
+		allDesired = append(allDesired, tuples...)
+	}
+
+	// Deduplicate: multiple bindings may grant the same permission.
+	allDesired = deduplicateTuples(allDesired)
 
 	existingTuples, err := r.getExistingDirectTuples(ctx, binding, targetObject)
 	if err != nil {
 		return fmt.Errorf("failed to retrieve existing tuples: %w", err)
 	}
 
-	added, removed := diffTuples(existingTuples, desiredTuples)
+	added, removed := diffTuples(existingTuples, allDesired)
 
 	writeReq := &openfgav1.WriteRequest{
 		StoreId: r.StoreID,
@@ -166,6 +187,63 @@ func (r *PolicyReconciler) reconcileDirectPolicy(ctx context.Context, binding ia
 	}
 
 	return nil
+}
+
+// findSiblingBindings returns all PolicyBindings (including the triggering one)
+// that target the same resource object and share at least one subject.
+func (r *PolicyReconciler) findSiblingBindings(ctx context.Context, binding iamdatumapiscomv1alpha1.PolicyBinding) ([]iamdatumapiscomv1alpha1.PolicyBinding, error) {
+	var allBindings iamdatumapiscomv1alpha1.PolicyBindingList
+	if err := r.K8sClient.List(ctx, &allBindings); err != nil {
+		return nil, fmt.Errorf("failed to list PolicyBindings: %w", err)
+	}
+
+	targetObject, err := r.getTargetObjectFromResourceSelector(binding.Spec.ResourceSelector)
+	if err != nil {
+		return nil, err
+	}
+
+	// Build subject set for the triggering binding.
+	triggerSubjects := make(map[string]struct{})
+	for _, s := range binding.Spec.Subjects {
+		key := s.Kind + "/" + s.Name
+		triggerSubjects[key] = struct{}{}
+	}
+
+	var siblings []iamdatumapiscomv1alpha1.PolicyBinding
+	for i := range allBindings.Items {
+		sibling := allBindings.Items[i]
+
+		// Must target the same resource object.
+		siblingTarget, err := r.getTargetObjectFromResourceSelector(sibling.Spec.ResourceSelector)
+		if err != nil || siblingTarget != targetObject {
+			continue
+		}
+
+		// Must share at least one subject.
+		for _, s := range sibling.Spec.Subjects {
+			key := s.Kind + "/" + s.Name
+			if _, ok := triggerSubjects[key]; ok {
+				siblings = append(siblings, sibling)
+				break
+			}
+		}
+	}
+
+	return siblings, nil
+}
+
+// deduplicateTuples removes duplicate tuples from a slice.
+func deduplicateTuples(tuples []*openfgav1.TupleKey) []*openfgav1.TupleKey {
+	seen := make(map[string]struct{}, len(tuples))
+	result := make([]*openfgav1.TupleKey, 0, len(tuples))
+	for _, t := range tuples {
+		key := t.User + "|" + t.Relation + "|" + t.Object
+		if _, ok := seen[key]; !ok {
+			seen[key] = struct{}{}
+			result = append(result, t)
+		}
+	}
+	return result
 }
 
 // fetchRole retrieves the Role referenced by the binding.
