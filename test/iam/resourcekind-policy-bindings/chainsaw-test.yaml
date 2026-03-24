@@ -361,6 +361,7 @@ spec:
                 serviceRef:
                   name: core.miloapis.com
                 kind: Secret
+                singular: secret
                 plural: secrets
                 permissions:
                   - list
