@@ -248,9 +248,7 @@ func (r *PolicyBindingReconciler) validateResourceRef(ctx context.Context, polic
 			ObservedGeneration: currentGeneration,
 		})
 
-		if err := r.updatePolicyBindingStatus(ctx, policyBinding, oldStatus, currentGeneration); err != nil {
-			return false, fmt.Errorf("failed to update PolicyBinding status after type validation failure: %w", err)
-		}
+
 		return false, nil // No requeue, type definition needs to be fixed.
 	}
 
@@ -284,9 +282,7 @@ func (r *PolicyBindingReconciler) validateResourceRef(ctx context.Context, polic
 			ObservedGeneration: currentGeneration,
 		})
 
-		if err := r.updatePolicyBindingStatus(ctx, policyBinding, oldStatus, currentGeneration); err != nil {
-			return false, fmt.Errorf("failed to update PolicyBinding status after target validation failure: %w", err)
-		}
+
 		if !stopReconciliation {
 			// Requeue if the error was deemed transient or requires a retry.
 			return false, fmt.Errorf("failed to validate target %s/%s: %w", resourceRef.Kind, resourceRef.Name, err)
@@ -314,9 +310,7 @@ func (r *PolicyBindingReconciler) validateResourceRef(ctx context.Context, polic
 			Message:            msg,
 			ObservedGeneration: currentGeneration,
 		})
-		if err := r.updatePolicyBindingStatus(ctx, policyBinding, oldStatus, currentGeneration); err != nil {
-			return false, fmt.Errorf("failed to update PolicyBinding status after target UID mismatch: %w", err)
-		}
+
 		// UID mismatch is a definitive validation failure. Stop reconciliation.
 		return false, nil
 	}
@@ -353,9 +347,7 @@ func (r *PolicyBindingReconciler) validateResourceKind(ctx context.Context, poli
 			ObservedGeneration: currentGeneration,
 		})
 
-		if err := r.updatePolicyBindingStatus(ctx, policyBinding, oldStatus, currentGeneration); err != nil {
-			return false, fmt.Errorf("failed to update PolicyBinding status after kind validation failure: %w", err)
-		}
+
 		return false, nil // No requeue, type definition needs to be fixed.
 	}
 
