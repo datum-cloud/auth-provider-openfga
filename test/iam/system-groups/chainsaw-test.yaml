@@ -23,11 +23,27 @@ spec:
                 name: Ready
                 value: "true"
 
-        # Create a PolicyBinding that binds system:authenticated-users to the role.
+        # Create User CRDs for the test users so the SystemGroupReconciler
+        # writes their system:authenticated membership tuples to OpenFGA.
+        - apply:
+            resource:
+              apiVersion: iam.miloapis.com/v1alpha1
+              kind: User
+              metadata:
+                name: authenticated-test-user
+        - apply:
+            resource:
+              apiVersion: iam.miloapis.com/v1alpha1
+              kind: User
+              metadata:
+                name: another-authenticated-user
+
+        # Create a PolicyBinding that binds system:authenticated to the role.
         # The resourceKind must match the resource being requested by the webhook
         # (organizationmemberships under resourcemanager.miloapis.com). The
-        # SystemGroupMaterializer writes stored group-membership tuples to OpenFGA
-        # the first time a user is seen, so no contextual tuples are needed.
+        # SystemGroupReconciler in the controller-manager writes stored
+        # group-membership tuples to OpenFGA for each User, so the webhook
+        # does not need to write any tuples at request time.
         - apply:
             resource:
               apiVersion: iam.miloapis.com/v1alpha1
@@ -40,8 +56,7 @@ spec:
                   namespace: ($namespace)
                 subjects:
                   - kind: Group
-                    name: "system:authenticated-users"
-                    # Note: No UID required for system groups
+                    name: "system:authenticated"
                 resourceSelector:
                   resourceKind:
                     apiGroup: "resourcemanager.miloapis.com"
@@ -58,7 +73,7 @@ spec:
                 name: Ready
                 value: 'true'
 
-        # Test that a user with system:authenticated-users group gets access.
+        # Test that a user with system:authenticated group gets access.
         # No parent context in extra — the request is a collection-level create,
         # which resolves to iam.miloapis.com/Root:resourcemanager.miloapis.com/OrganizationMembership.
         - apply:
@@ -123,7 +138,7 @@ spec:
                 path: "status.phase"
                 value: "Succeeded"
 
-        # Test that a user without system:authenticated-users group is denied access
+        # Test that a user without system:authenticated group is denied access
         - apply:
             resource:
               apiVersion: v1
