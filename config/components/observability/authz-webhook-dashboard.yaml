@@ -4,9 +4,8 @@ metadata:
   name: authz-webhook
 spec:
   instanceSelector:
-    matchExpressions:
-      - key: dashboards
-        operator: Exists
+    matchLabels:
+      dashboards: "grafana"
   allowCrossNamespaceImport: true
   folder: "Platform / IAM"
   json: |
