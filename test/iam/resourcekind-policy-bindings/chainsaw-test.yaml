@@ -275,6 +275,77 @@ spec:
                 path: "status.phase"
                 value: "Succeeded"
 
+        # Test organization-scoped GET access. When the SAR includes parent
+        # context pointing to an Organization, the webhook resolves the check
+        # to the specific Organization instance. The BatchCheck must also
+        # check the Root object so that ResourceKind bindings are evaluated.
+        - apply:
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: resourcekind-webhook-test-get-orgscope
+              spec:
+                restartPolicy: Never
+                containers:
+                - name: curl
+                  image: curlimages/curl:latest
+                  command: ["/bin/sh", "-c"]
+                  args:
+                    - |
+                      response=$(curl -ksS https://auth-provider-openfga-authz-webhook.auth-provider-openfga-system.svc.cluster.local:8090/apis/authorization.k8s.io/v1/subjectaccessreviews \
+                        -H "Content-Type: application/json" \
+                        -d @- << EOF
+                      {
+                        "apiVersion": "authorization.k8s.io/v1",
+                        "kind": "SubjectAccessReview",
+                        "spec": {
+                          "user": "test-system-admin",
+                          "uid": "test-system-admin",
+                          "extra": {
+                            "iam.miloapis.com/parent-api-group": ["resourcemanager.miloapis.com"],
+                            "iam.miloapis.com/parent-type": ["Organization"],
+                            "iam.miloapis.com/parent-name": ["test-org-1"]
+                          },
+                          "groups": ["system:authenticated"],
+                          "resourceAttributes": {
+                            "group": "resourcemanager.miloapis.com",
+                            "resource": "organizations",
+                            "version": "v1alpha1",
+                            "verb": "get",
+                            "name": "test-org-1"
+                          }
+                        }
+                      }
+                      EOF
+                      )
+                      echo "Webhook response for org-scoped get: $response"
+                      if ! echo "$response" | grep -q '"kind":"SubjectAccessReview"'; then
+                        echo "Webhook test failed - invalid response format"
+                        exit 1
+                      fi
+                      if echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*true'; then
+                        echo "Webhook test completed successfully - org-scoped get allowed via BatchCheck Root fallback"
+                        exit 0
+                      elif echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*false'; then
+                        echo "Webhook test failed - org-scoped get denied (BatchCheck Root fallback not working for org scope)"
+                        exit 1
+                      else
+                        echo "Webhook test failed - could not determine allowed status for org-scoped get"
+                        exit 1
+                      fi
+
+        # Wait for org-scoped get test to complete
+        - wait:
+            apiVersion: v1
+            kind: Pod
+            name: resourcekind-webhook-test-get-orgscope
+            timeout: 30s
+            for:
+              jsonPath:
+                path: "status.phase"
+                value: "Succeeded"
+
         # Test that a user WITHOUT the ResourceKind binding cannot access organizations
         - apply:
             file: unauthorized-user.yaml
