@@ -346,6 +346,139 @@ spec:
                 path: "status.phase"
                 value: "Succeeded"
 
+        # Test core API group resources (empty API group) work through the webhook.
+        # The webhook has a serviceNameMapping that maps the empty API group ""
+        # to "core.miloapis.com". This test verifies that getProtectedResource
+        # applies that mapping so that core resource authorization does not fail
+        # with "no ProtectedResource found".
+        - apply:
+            resource:
+              apiVersion: iam.miloapis.com/v1alpha1
+              kind: ProtectedResource
+              metadata:
+                name: core-secret
+              spec:
+                serviceRef:
+                  name: core.miloapis.com
+                kind: Secret
+                plural: secrets
+                permissions:
+                  - list
+                  - get
+                  - create
+                  - update
+                  - delete
+
+        - apply:
+            file: roles/core-secret-manager.yaml
+
+        - wait:
+            apiVersion: iam.miloapis.com/v1alpha1
+            kind: Role
+            name: core-secret-manager
+            timeout: 5m
+            for:
+              condition:
+                name: Ready
+                value: "true"
+
+        - apply:
+            resource:
+              apiVersion: iam.miloapis.com/v1alpha1
+              kind: PolicyBinding
+              metadata:
+                name: system-wide-secret-manager-binding
+              spec:
+                roleRef:
+                  name: core-secret-manager
+                  namespace: ($namespace)
+                subjects:
+                  - kind: User
+                    name: "test-system-admin"
+                    uid: ($userUID)
+                resourceSelector:
+                  resourceKind:
+                    apiGroup: ""
+                    kind: Secret
+
+        - wait:
+            apiVersion: iam.miloapis.com/v1alpha1
+            kind: PolicyBinding
+            name: system-wide-secret-manager-binding
+            timeout: 5m
+            for:
+              condition:
+                name: Ready
+                value: 'true'
+
+        # Send a SAR with an empty "group" field — this is the raw core API group
+        # value that Kubernetes uses for secrets, configmaps, pods, etc. The webhook
+        # must translate "" → "core.miloapis.com" via serviceNameMapping before
+        # looking up the ProtectedResource; without that mapping the lookup fails.
+        - apply:
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: resourcekind-webhook-test-core-api-group
+              spec:
+                restartPolicy: Never
+                containers:
+                - name: curl
+                  image: curlimages/curl:latest
+                  command: ["/bin/sh", "-c"]
+                  args:
+                    - |
+                      response=$(curl -ksS https://auth-provider-openfga-authz-webhook.auth-provider-openfga-system.svc.cluster.local:8090/apis/authorization.k8s.io/v1/subjectaccessreviews \
+                        -H "Content-Type: application/json" \
+                        -d @- << EOF
+                      {
+                        "apiVersion": "authorization.k8s.io/v1",
+                        "kind": "SubjectAccessReview",
+                        "spec": {
+                          "user": "test-system-admin",
+                          "uid": "test-system-admin",
+                          "groups": ["system:authenticated"],
+                          "resourceAttributes": {
+                            "group": "",
+                            "resource": "secrets",
+                            "version": "v1",
+                            "verb": "delete",
+                            "name": "my-secret"
+                          }
+                        }
+                      }
+                      EOF
+                      )
+                      echo "Webhook response for core API group delete: $response"
+                      # Check if we got a valid SubjectAccessReview response
+                      if ! echo "$response" | grep -q '"kind":"SubjectAccessReview"'; then
+                        echo "Webhook test failed - invalid response format"
+                        exit 1
+                      fi
+                      # Check if the request was allowed
+                      if echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*true'; then
+                        echo "Webhook test completed successfully - core API group delete allowed"
+                        exit 0
+                      elif echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*false'; then
+                        echo "Webhook test failed - core API group delete denied (serviceNameMapping not applied)"
+                        exit 1
+                      else
+                        echo "Webhook test failed - could not determine allowed status for core API group delete"
+                        exit 1
+                      fi
+
+        # Wait for core API group test to complete
+        - wait:
+            apiVersion: v1
+            kind: Pod
+            name: resourcekind-webhook-test-core-api-group
+            timeout: 30s
+            for:
+              jsonPath:
+                path: "status.phase"
+                value: "Succeeded"
+
         # Test that a user WITHOUT the ResourceKind binding cannot access organizations
         - apply:
             file: unauthorized-user.yaml
