@@ -129,16 +129,27 @@ func TestSubjectAccessReviewAuthorizer_Authorize_Integration(t *testing.T) {
 					},
 				},
 			},
-			fgaCheckFunc: func(t *testing.T, req *openfgav1.CheckRequest) (*openfgav1.CheckResponse, error) {
-				// When project is parent, we authorize against the project itself.
-				// RootBinding tuples are now stored tuples (written by the policy reconciler),
-				// not contextual tuples, so there should be no contextual tuples here.
-				assert.Equal(t, "resourcemanager.miloapis.com/Project:proj-xyz", req.TupleKey.Object)
-				assert.Nil(t, req.ContextualTuples)
-				return &openfgav1.CheckResponse{Allowed: true}, nil
+			fgaBatchCheckFunc: func(t *testing.T, req *openfgav1.BatchCheckRequest) (*openfgav1.BatchCheckResponse, error) {
+				// Project-scoped get: instance check is against the project, root check
+				// is against the kind-level Root object. Access is allowed if either allows.
+				require.Len(t, req.Checks, 2, "BatchCheck must have instance and root checks")
+				checksById := make(map[string]*openfgav1.BatchCheckItem)
+				for _, c := range req.Checks {
+					checksById[c.CorrelationId] = c
+				}
+				require.Contains(t, checksById, "instance")
+				require.Contains(t, checksById, "root")
+				assert.Equal(t, "resourcemanager.miloapis.com/Project:proj-xyz", checksById["instance"].TupleKey.Object)
+				assert.Equal(t, "iam.miloapis.com/Root:compute.miloapis.com/Workload", checksById["root"].TupleKey.Object)
+				return &openfgav1.BatchCheckResponse{
+					Result: map[string]*openfgav1.BatchCheckSingleResult{
+						"instance": {CheckResult: &openfgav1.BatchCheckSingleResult_Allowed{Allowed: true}},
+						"root":     {CheckResult: &openfgav1.BatchCheckSingleResult_Allowed{Allowed: false}},
+					},
+				}, nil
 			},
-			expectedDecision:   authorizer.DecisionAllow,
-			expectFgaCheckCall: true,
+			expectedDecision:        authorizer.DecisionAllow,
+			expectFgaBatchCheckCall: true,
 		},
 		{
 			name: "denied collection create with project parent context",
@@ -166,14 +177,27 @@ func TestSubjectAccessReviewAuthorizer_Authorize_Integration(t *testing.T) {
 					},
 				},
 			},
-			fgaCheckFunc: func(t *testing.T, req *openfgav1.CheckRequest) (*openfgav1.CheckResponse, error) {
-				// RootBinding tuples are now stored tuples; no contextual tuples expected.
-				assert.Equal(t, "resourcemanager.miloapis.com/Project:proj-xyz", req.TupleKey.Object)
-				assert.Nil(t, req.ContextualTuples)
-				return &openfgav1.CheckResponse{Allowed: false}, nil
+			fgaBatchCheckFunc: func(t *testing.T, req *openfgav1.BatchCheckRequest) (*openfgav1.BatchCheckResponse, error) {
+				// Project-scoped create: instance check is against the project, root check
+				// is against the kind-level Root object. Deny when both deny.
+				require.Len(t, req.Checks, 2, "BatchCheck must have instance and root checks")
+				checksById := make(map[string]*openfgav1.BatchCheckItem)
+				for _, c := range req.Checks {
+					checksById[c.CorrelationId] = c
+				}
+				require.Contains(t, checksById, "instance")
+				require.Contains(t, checksById, "root")
+				assert.Equal(t, "resourcemanager.miloapis.com/Project:proj-xyz", checksById["instance"].TupleKey.Object)
+				assert.Equal(t, "iam.miloapis.com/Root:compute.miloapis.com/Workload", checksById["root"].TupleKey.Object)
+				return &openfgav1.BatchCheckResponse{
+					Result: map[string]*openfgav1.BatchCheckSingleResult{
+						"instance": {CheckResult: &openfgav1.BatchCheckSingleResult_Allowed{Allowed: false}},
+						"root":     {CheckResult: &openfgav1.BatchCheckSingleResult_Allowed{Allowed: false}},
+					},
+				}, nil
 			},
-			expectedDecision:   authorizer.DecisionDeny,
-			expectFgaCheckCall: true,
+			expectedDecision:        authorizer.DecisionDeny,
+			expectFgaBatchCheckCall: true,
 		},
 		{
 			name: "permission not registered",
@@ -755,15 +779,19 @@ func TestResourceKindBindingResolution(t *testing.T) {
 		assert.Equal(t, "iam.miloapis.com/Root:compute.miloapis.com/Workload", checksById["root"].TupleKey.Object)
 	})
 
-	t.Run("collection operation uses regular Check against Root", func(t *testing.T) {
-		// verb=list, no name. Single Check against the Root resource; no BatchCheck.
-		var capturedReq *openfgav1.CheckRequest
-		checkCallCount := 0
+	t.Run("collection operation uses BatchCheck with Root for both checks", func(t *testing.T) {
+		// verb=list, no name. Collection operations resolve to Root for the object;
+		// both the instance and root BatchCheck items target the Root resource.
+		var capturedBatchReq *openfgav1.BatchCheckRequest
 		mockFGA := &mockFGAClient{
-			CheckFunc: func(ctx context.Context, req *openfgav1.CheckRequest, opts ...grpc.CallOption) (*openfgav1.CheckResponse, error) {
-				checkCallCount++
-				capturedReq = req
-				return &openfgav1.CheckResponse{Allowed: true}, nil
+			BatchCheckFunc: func(ctx context.Context, req *openfgav1.BatchCheckRequest, opts ...grpc.CallOption) (*openfgav1.BatchCheckResponse, error) {
+				capturedBatchReq = req
+				return &openfgav1.BatchCheckResponse{
+					Result: map[string]*openfgav1.BatchCheckSingleResult{
+						"instance": {CheckResult: &openfgav1.BatchCheckSingleResult_Allowed{Allowed: true}},
+						"root":     {CheckResult: &openfgav1.BatchCheckSingleResult_Allowed{Allowed: false}},
+					},
+				}, nil
 			},
 		}
 
@@ -786,19 +814,32 @@ func TestResourceKindBindingResolution(t *testing.T) {
 
 		require.NoError(t, err)
 		assert.Equal(t, authorizer.DecisionAllow, decision)
-		assert.Equal(t, 1, checkCallCount, "exactly one Check call expected for collection operation")
-		require.NotNil(t, capturedReq)
-		assert.Equal(t, "iam.miloapis.com/Root:compute.miloapis.com/Workload", capturedReq.TupleKey.Object)
-		assert.Nil(t, capturedReq.ContextualTuples, "no contextual tuples expected for collection operations")
+		require.NotNil(t, capturedBatchReq, "BatchCheck should have been called")
+		require.Len(t, capturedBatchReq.Checks, 2, "BatchCheck must have instance and root checks")
+		checksById := make(map[string]*openfgav1.BatchCheckItem)
+		for _, c := range capturedBatchReq.Checks {
+			checksById[c.CorrelationId] = c
+		}
+		require.Contains(t, checksById, "instance")
+		require.Contains(t, checksById, "root")
+		// For collection operations the resolved object is Root, so both checks target Root.
+		assert.Equal(t, "iam.miloapis.com/Root:compute.miloapis.com/Workload", checksById["instance"].TupleKey.Object)
+		assert.Equal(t, "iam.miloapis.com/Root:compute.miloapis.com/Workload", checksById["root"].TupleKey.Object)
 	})
 
-	t.Run("project-scoped request uses regular Check against Project", func(t *testing.T) {
-		// Project scope: single Check against the Project; no BatchCheck.
-		var capturedReq *openfgav1.CheckRequest
+	t.Run("project-scoped request uses BatchCheck against Project and Root", func(t *testing.T) {
+		// Project scope: BatchCheck with instance=Project and root=Root; access
+		// is allowed if either allows.
+		var capturedBatchReq *openfgav1.BatchCheckRequest
 		mockFGA := &mockFGAClient{
-			CheckFunc: func(ctx context.Context, req *openfgav1.CheckRequest, opts ...grpc.CallOption) (*openfgav1.CheckResponse, error) {
-				capturedReq = req
-				return &openfgav1.CheckResponse{Allowed: true}, nil
+			BatchCheckFunc: func(ctx context.Context, req *openfgav1.BatchCheckRequest, opts ...grpc.CallOption) (*openfgav1.BatchCheckResponse, error) {
+				capturedBatchReq = req
+				return &openfgav1.BatchCheckResponse{
+					Result: map[string]*openfgav1.BatchCheckSingleResult{
+						"instance": {CheckResult: &openfgav1.BatchCheckSingleResult_Allowed{Allowed: true}},
+						"root":     {CheckResult: &openfgav1.BatchCheckSingleResult_Allowed{Allowed: false}},
+					},
+				}, nil
 			},
 		}
 
@@ -829,9 +870,16 @@ func TestResourceKindBindingResolution(t *testing.T) {
 
 		require.NoError(t, err)
 		assert.Equal(t, authorizer.DecisionAllow, decision)
-		require.NotNil(t, capturedReq)
-		assert.Equal(t, "resourcemanager.miloapis.com/Project:proj-xyz", capturedReq.TupleKey.Object)
-		assert.Nil(t, capturedReq.ContextualTuples, "no contextual tuples for project-scoped requests")
+		require.NotNil(t, capturedBatchReq, "BatchCheck should have been called")
+		require.Len(t, capturedBatchReq.Checks, 2, "BatchCheck must have instance and root checks")
+		checksById := make(map[string]*openfgav1.BatchCheckItem)
+		for _, c := range capturedBatchReq.Checks {
+			checksById[c.CorrelationId] = c
+		}
+		require.Contains(t, checksById, "instance")
+		require.Contains(t, checksById, "root")
+		assert.Equal(t, "resourcemanager.miloapis.com/Project:proj-xyz", checksById["instance"].TupleKey.Object)
+		assert.Equal(t, "iam.miloapis.com/Root:compute.miloapis.com/Workload", checksById["root"].TupleKey.Object)
 	})
 
 	t.Run("BatchCheck allows when instance check allows (ResourceRef binding)", func(t *testing.T) {
@@ -937,10 +985,15 @@ func TestResourceKindBindingResolution(t *testing.T) {
 	})
 
 	t.Run("collection operation denied when OpenFGA returns denied", func(t *testing.T) {
-		// Collection op denied — propagate deny.
+		// Collection op denied — both instance and root checks deny, propagate deny.
 		mockFGA := &mockFGAClient{
-			CheckFunc: func(ctx context.Context, req *openfgav1.CheckRequest, opts ...grpc.CallOption) (*openfgav1.CheckResponse, error) {
-				return &openfgav1.CheckResponse{Allowed: false}, nil
+			BatchCheckFunc: func(ctx context.Context, req *openfgav1.BatchCheckRequest, opts ...grpc.CallOption) (*openfgav1.BatchCheckResponse, error) {
+				return &openfgav1.BatchCheckResponse{
+					Result: map[string]*openfgav1.BatchCheckSingleResult{
+						"instance": {CheckResult: &openfgav1.BatchCheckSingleResult_Allowed{Allowed: false}},
+						"root":     {CheckResult: &openfgav1.BatchCheckSingleResult_Allowed{Allowed: false}},
+					},
+				}, nil
 			},
 		}
 
@@ -964,13 +1017,18 @@ func TestResourceKindBindingResolution(t *testing.T) {
 		assert.Equal(t, authorizer.DecisionDeny, decision)
 	})
 
-	t.Run("collection operation uses Check not BatchCheck", func(t *testing.T) {
-		// Verify that collection verbs use Check, not BatchCheck.
-		var capturedReq *openfgav1.CheckRequest
+	t.Run("collection operation uses BatchCheck not regular Check", func(t *testing.T) {
+		// Verify that collection verbs (no resource name) use BatchCheck, not regular Check.
+		var capturedBatchReq *openfgav1.BatchCheckRequest
 		mockFGA := &mockFGAClient{
-			CheckFunc: func(ctx context.Context, req *openfgav1.CheckRequest, opts ...grpc.CallOption) (*openfgav1.CheckResponse, error) {
-				capturedReq = req
-				return &openfgav1.CheckResponse{Allowed: true}, nil
+			BatchCheckFunc: func(ctx context.Context, req *openfgav1.BatchCheckRequest, opts ...grpc.CallOption) (*openfgav1.BatchCheckResponse, error) {
+				capturedBatchReq = req
+				return &openfgav1.BatchCheckResponse{
+					Result: map[string]*openfgav1.BatchCheckSingleResult{
+						"instance": {CheckResult: &openfgav1.BatchCheckSingleResult_Allowed{Allowed: true}},
+						"root":     {CheckResult: &openfgav1.BatchCheckSingleResult_Allowed{Allowed: false}},
+					},
+				}, nil
 			},
 		}
 
@@ -991,10 +1049,8 @@ func TestResourceKindBindingResolution(t *testing.T) {
 
 			_, _, err := auth.Authorize(context.Background(), attributes)
 			require.NoError(t, err)
-			require.NotNil(t, capturedReq, "Check should be called for verb=%s", verb)
-			assert.Nil(t, capturedReq.ContextualTuples,
-				"no contextual tuples expected for verb=%s (collection operation)", verb)
-			capturedReq = nil
+			require.NotNil(t, capturedBatchReq, "BatchCheck should be called for verb=%s", verb)
+			capturedBatchReq = nil
 		}
 	})
 }
