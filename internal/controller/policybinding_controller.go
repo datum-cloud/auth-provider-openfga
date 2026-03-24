@@ -248,7 +248,6 @@ func (r *PolicyBindingReconciler) validateResourceRef(ctx context.Context, polic
 			ObservedGeneration: currentGeneration,
 		})
 
-
 		return false, nil // No requeue, type definition needs to be fixed.
 	}
 
@@ -281,7 +280,6 @@ func (r *PolicyBindingReconciler) validateResourceRef(ctx context.Context, polic
 			Message:            errMsg,
 			ObservedGeneration: currentGeneration,
 		})
-
 
 		if !stopReconciliation {
 			// Requeue if the error was deemed transient or requires a retry.
@@ -346,7 +344,6 @@ func (r *PolicyBindingReconciler) validateResourceKind(ctx context.Context, poli
 			),
 			ObservedGeneration: currentGeneration,
 		})
-
 
 		return false, nil // No requeue, type definition needs to be fixed.
 	}
