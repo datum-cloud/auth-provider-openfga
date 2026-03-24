@@ -248,9 +248,6 @@ func (r *PolicyBindingReconciler) validateResourceRef(ctx context.Context, polic
 			ObservedGeneration: currentGeneration,
 		})
 
-		if err := r.updatePolicyBindingStatus(ctx, policyBinding, oldStatus, currentGeneration); err != nil {
-			return false, fmt.Errorf("failed to update PolicyBinding status after type validation failure: %w", err)
-		}
 		return false, nil // No requeue, type definition needs to be fixed.
 	}
 
@@ -284,9 +281,6 @@ func (r *PolicyBindingReconciler) validateResourceRef(ctx context.Context, polic
 			ObservedGeneration: currentGeneration,
 		})
 
-		if err := r.updatePolicyBindingStatus(ctx, policyBinding, oldStatus, currentGeneration); err != nil {
-			return false, fmt.Errorf("failed to update PolicyBinding status after target validation failure: %w", err)
-		}
 		if !stopReconciliation {
 			// Requeue if the error was deemed transient or requires a retry.
 			return false, fmt.Errorf("failed to validate target %s/%s: %w", resourceRef.Kind, resourceRef.Name, err)
@@ -314,9 +308,7 @@ func (r *PolicyBindingReconciler) validateResourceRef(ctx context.Context, polic
 			Message:            msg,
 			ObservedGeneration: currentGeneration,
 		})
-		if err := r.updatePolicyBindingStatus(ctx, policyBinding, oldStatus, currentGeneration); err != nil {
-			return false, fmt.Errorf("failed to update PolicyBinding status after target UID mismatch: %w", err)
-		}
+
 		// UID mismatch is a definitive validation failure. Stop reconciliation.
 		return false, nil
 	}
@@ -353,9 +345,6 @@ func (r *PolicyBindingReconciler) validateResourceKind(ctx context.Context, poli
 			ObservedGeneration: currentGeneration,
 		})
 
-		if err := r.updatePolicyBindingStatus(ctx, policyBinding, oldStatus, currentGeneration); err != nil {
-			return false, fmt.Errorf("failed to update PolicyBinding status after kind validation failure: %w", err)
-		}
 		return false, nil // No requeue, type definition needs to be fixed.
 	}
 
@@ -402,18 +391,13 @@ func (r *PolicyBindingReconciler) reconcileSubjectValidation(ctx context.Context
 		// One or more subjects are invalid (e.g., not found, UID missing), but no error occurred that requires a requeue.
 		// Set the SubjectValid condition to False. The main Reconcile loop will handle setting Ready=False.
 		meta.SetStatusCondition(&policyBinding.Status.Conditions, metav1.Condition{
-			Type:               "Ready",
+			Type:               ConditionTypeSubjectValid,
 			Status:             metav1.ConditionFalse,
-			Reason:             "SubjectValidationFailed",
+			Reason:             ReasonValidationFailed,
 			Message:            msg,
 			LastTransitionTime: metav1.Now(),
 		})
-		// The main Reconcile loop will handle the overall Ready condition. Update status now to reflect the
-		// SubjectValid=False state due to validation failures.
-		if err := r.updatePolicyBindingStatus(ctx, policyBinding, oldStatus, currentGeneration); err != nil {
-			return false, fmt.Errorf("failed to update PolicyBinding status after subject validation failure: %w", err)
-		}
-		// Validation failed cleanly; stop reconciliation.
+		// Validation failed cleanly; stop reconciliation. Status will be persisted by the caller.
 		return false, nil
 	}
 
