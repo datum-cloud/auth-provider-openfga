@@ -887,7 +887,7 @@ func (o *SubjectAccessReviewAuthorizer) getProtectedResource(ctx context.Context
 	ctx, cacheSpan := tracer.Start(ctx, "cache.get.ProtectedResource/buildRequest")
 	defer cacheSpan.End()
 
-	apiGroup := attributes.GetAPIGroup()
+	apiGroup := o.getEffectiveAPIGroup(attributes)
 	resource := attributes.GetResource()
 
 	stepStart := time.Now()
