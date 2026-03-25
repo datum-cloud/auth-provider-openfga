@@ -10,20 +10,17 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	openfgav1 "github.com/openfga/api/proto/openfga/v1"
-	"go.miloapis.com/auth-provider-openfga/internal/features"
 	iamdatumapiscomv1alpha1 "go.miloapis.com/milo/pkg/apis/iam/v1alpha1"
 	"google.golang.org/protobuf/testing/protocmp"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 const (
-	// AuthorizationModelConfigMapName is the name of the ConfigMap that holds
 	// AuthorizationModelConfigMapName is the default name for the ConfigMap
 	// that holds the latest authorization model ID. Used as the flag default.
 	AuthorizationModelConfigMapName = "openfga-authorization-model"
@@ -51,11 +48,8 @@ type AuthorizationModelReconciler struct {
 // with options to ignore ordering differences and the OpenFGA-assigned id field
 func getAuthorizationModelComparisonOptions() []cmp.Option {
 	return []cmp.Option{
-		// Use protocmp.Transform for proper protobuf message comparison
 		protocmp.Transform(),
-		// Ignore the id field since it's assigned by OpenFGA and not semantically meaningful
 		protocmp.IgnoreFields(&openfgav1.AuthorizationModel{}, "id"),
-		// Sort repeated fields that can have different orderings without changing semantics
 		protocmp.SortRepeated(func(a, b *openfgav1.TypeDefinition) bool {
 			return a.Type < b.Type
 		}),
@@ -102,25 +96,18 @@ func (r *AuthorizationModelReconciler) ReconcileAuthorizationModel(ctx context.C
 	}
 
 	// Create a map to track existing types and prevent duplicates.
-	// Under the direct-permission model the IAM system manages InternalUser and
-	// InternalUserGroup only. All other types (InternalRole, RoleBinding, Root)
-	// are no longer generated.
+	// The IAM system manages InternalUser, InternalUserGroup, and Root.
 	existingTypes := make(map[string]bool)
 
 	iamSystemTypes := map[string]bool{
 		TypeInternalUser:      true,
 		TypeInternalUserGroup: true,
-		// Legacy types that are now managed (and regenerated) by this reconciler
-		// so that stale definitions from previous model versions are replaced.
-		TypeInternalRole: true,
-		TypeRoleBinding:  true,
-		TypeRoot:         true,
+		TypeRoot:              true,
 	}
 
 	// Go through the existing type definitions and add any that were provided
 	// through the OpenFGA schema language, excluding IAM system managed types.
 	for _, typeDefinition := range currentAuthorizationModel.TypeDefinitions {
-		// Skip IAM system managed types as they will be regenerated
 		if iamSystemTypes[typeDefinition.Type] {
 			continue
 		}
@@ -163,7 +150,6 @@ func (r *AuthorizationModelReconciler) ReconcileAuthorizationModel(ctx context.C
 		"currentTypeCount", len(currentAuthorizationModel.TypeDefinitions),
 		"mergedTypeCount", len(mergedAuthorizationModel.TypeDefinitions))
 
-	// Add debugging diff output to understand what's different
 	if diff := cmp.Diff(currentAuthorizationModel, mergedAuthorizationModel, getAuthorizationModelComparisonOptions()...); diff != "" {
 		log.Info("Authorization model diff detected", "diff", diff)
 	}
@@ -180,8 +166,6 @@ func (r *AuthorizationModelReconciler) ReconcileAuthorizationModel(ctx context.C
 
 	if r.K8sClient != nil && r.Namespace != "" && writeResp.GetAuthorizationModelId() != "" {
 		if cmErr := r.writeModelIDToConfigMap(ctx, writeResp.GetAuthorizationModelId()); cmErr != nil {
-			// Log the error but do not fail the reconciliation — the webhook
-			// can still resolve the latest model dynamically.
 			log.Error(cmErr, "failed to write authorization model ID to ConfigMap",
 				"model_id", writeResp.GetAuthorizationModelId())
 		}
@@ -225,9 +209,7 @@ func (r *AuthorizationModelReconciler) writeModelIDToConfigMap(ctx context.Conte
 
 func (r *AuthorizationModelReconciler) getCurrentAuthorizationModel(ctx context.Context) (*openfgav1.AuthorizationModel, error) {
 	models, err := r.OpenFGA.ReadAuthorizationModels(ctx, &openfgav1.ReadAuthorizationModelsRequest{
-		StoreId: r.StoreID,
-		// Only request the first result because it'll always be the latest
-		// authorization model that was created for the store.
+		StoreId:  r.StoreID,
 		PageSize: wrapperspb.Int32(1),
 	})
 	if err != nil {
@@ -235,12 +217,9 @@ func (r *AuthorizationModelReconciler) getCurrentAuthorizationModel(ctx context.
 	}
 
 	if len(models.AuthorizationModels) == 0 {
-		// No authorization model has been created yet so we'll just return an
-		// empty model.
 		return &openfgav1.AuthorizationModel{}, nil
 	}
 
-	// Retrieve the full authorization model definition
 	resp, err := r.OpenFGA.ReadAuthorizationModel(ctx, &openfgav1.ReadAuthorizationModelRequest{
 		StoreId: r.StoreID,
 		Id:      models.AuthorizationModels[0].Id,
@@ -253,25 +232,18 @@ func (r *AuthorizationModelReconciler) getCurrentAuthorizationModel(ctx context.
 }
 
 func (r *AuthorizationModelReconciler) createExpectedAuthorizationModel(protectedResources []iamdatumapiscomv1alpha1.ProtectedResource) (*openfgav1.AuthorizationModel, error) {
-	directEnabled := utilfeature.DefaultFeatureGate.Enabled(features.DirectPermissionTuples)
-	legacyEnabled := utilfeature.DefaultFeatureGate.Enabled(features.LegacyRoleBindingModel)
-
-	// If no ProtectedResources exist, return a minimal authorization model
 	if len(protectedResources) == 0 {
 		return getMinimalAuthorizationModel(), nil
 	}
 
-	// Build the resource hierarchy — needed by both models.
 	resourceGraph, err := getResourceGraph(protectedResources)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get resource graph: %v", err)
 	}
 
-	// Calculate hierarchical permissions for each resource type
 	hierarchicalPermissions := calculateHierarchicalPermissions(resourceGraph)
 
-	// Collect all unique permissions (used by both Root type variants and by
-	// the legacy InternalRole/RoleBinding types).
+	// Collect all unique permissions for the Root type.
 	allPermsSet := make(map[string]struct{})
 	for _, perms := range hierarchicalPermissions {
 		for _, p := range perms {
@@ -284,112 +256,31 @@ func (r *AuthorizationModelReconciler) createExpectedAuthorizationModel(protecte
 	}
 	sort.Strings(allPermissions)
 
-	// InternalUser and InternalUserGroup are shared by both models.
 	typeDefinitions := []*openfgav1.TypeDefinition{
 		getUserTypeDefinition(),
 		getUserGroupTypeDefinition(),
 	}
 
-	switch {
-	case directEnabled && legacyEnabled:
-		// Hybrid mode: each resource type carries relations from BOTH models.
-		// Hashed permission relations accept direct user/group writes (This)
-		// AND resolve through legacy rolebinding/rootbinding tupleset lookups.
-		// This allows the controller to dual-write both tuple formats while
-		// the webhook continues using the legacy check path.
-		resourceTypeDefinitions := getHybridResourceTypeDefinitionsWithHierarchicalPermissions(hierarchicalPermissions, resourceGraph)
+	// Direct-permission model: resource types with direct user/group
+	// relations and a simplified Root type.
+	resourceTypeDefinitions := getResourceTypeDefinitionsWithHierarchicalPermissions(hierarchicalPermissions, resourceGraph)
 
-		sortedResourceTypes := make([]string, 0, len(resourceTypeDefinitions))
-		for resourceType := range resourceTypeDefinitions {
-			sortedResourceTypes = append(sortedResourceTypes, resourceType)
-		}
-		sort.Strings(sortedResourceTypes)
-
-		for _, resourceType := range sortedResourceTypes {
-			typeDefinitions = append(typeDefinitions, resourceTypeDefinitions[resourceType])
-		}
-
-		// Include the legacy infrastructure types (InternalRole, RoleBinding)
-		// and a hybrid Root type that accepts both direct and legacy tuples.
-		typeDefinitions = append(typeDefinitions,
-			getLegacyInternalRoleTypeDefinition(allPermissions),
-			getLegacyRoleBindingTypeDefinition(allPermissions),
-		)
-		resourceTypes := getAllResourceTypes(resourceGraph)
-		typeDefinitions = append(typeDefinitions, getHybridRootTypeDefinition(allPermissions, resourceTypes))
-
-	case directEnabled:
-		// Direct-permission model only: resource types with direct user/group
-		// relations and a simplified Root type.
-		resourceTypeDefinitions := getResourceTypeDefinitionsWithHierarchicalPermissions(hierarchicalPermissions, resourceGraph)
-
-		sortedResourceTypes := make([]string, 0, len(resourceTypeDefinitions))
-		for resourceType := range resourceTypeDefinitions {
-			sortedResourceTypes = append(sortedResourceTypes, resourceType)
-		}
-		sort.Strings(sortedResourceTypes)
-
-		for _, resourceType := range sortedResourceTypes {
-			typeDefinitions = append(typeDefinitions, resourceTypeDefinitions[resourceType])
-		}
-
-		typeDefinitions = append(typeDefinitions, getRootTypeDefinition(allPermissions))
-
-	case legacyEnabled:
-		// Legacy RoleBinding model only: InternalRole + RoleBinding types
-		// plus legacy resource types (rolebinding/rootbinding relations).
-		resourceTypeDefinitions := getLegacyResourceTypeDefinitionsWithHierarchicalPermissions(hierarchicalPermissions, resourceGraph)
-
-		sortedResourceTypes := make([]string, 0, len(resourceTypeDefinitions))
-		for resourceType := range resourceTypeDefinitions {
-			sortedResourceTypes = append(sortedResourceTypes, resourceType)
-		}
-		sort.Strings(sortedResourceTypes)
-
-		for _, resourceType := range sortedResourceTypes {
-			typeDefinitions = append(typeDefinitions, resourceTypeDefinitions[resourceType])
-		}
-
-		typeDefinitions = append(typeDefinitions,
-			getLegacyInternalRoleTypeDefinition(allPermissions),
-			getLegacyRoleBindingTypeDefinition(allPermissions),
-		)
-		resourceTypes := getAllResourceTypes(resourceGraph)
-		typeDefinitions = append(typeDefinitions, getLegacyRootTypeDefinition(allPermissions, resourceTypes))
+	sortedResourceTypes := make([]string, 0, len(resourceTypeDefinitions))
+	for resourceType := range resourceTypeDefinitions {
+		sortedResourceTypes = append(sortedResourceTypes, resourceType)
 	}
+	sort.Strings(sortedResourceTypes)
+
+	for _, resourceType := range sortedResourceTypes {
+		typeDefinitions = append(typeDefinitions, resourceTypeDefinitions[resourceType])
+	}
+
+	typeDefinitions = append(typeDefinitions, getRootTypeDefinition(allPermissions))
 
 	return &openfgav1.AuthorizationModel{
 		SchemaVersion:   "1.2",
 		TypeDefinitions: typeDefinitions,
 	}, nil
-}
-
-// getAllResourceTypes collects all resource type strings from the resource graph.
-func getAllResourceTypes(node *resourceGraphNode) []string {
-	if node == nil {
-		return nil
-	}
-	var types []string
-	if node.ResourceType != TypeRoot {
-		types = append(types, node.ResourceType)
-	}
-	for _, child := range node.ChildResources {
-		types = append(types, getAllResourceTypes(child)...)
-	}
-	return removeDuplicateStrings(types)
-}
-
-// removeDuplicateStrings returns a deduplicated copy of the input slice.
-func removeDuplicateStrings(in []string) []string {
-	seen := make(map[string]struct{}, len(in))
-	out := make([]string, 0, len(in))
-	for _, s := range in {
-		if _, ok := seen[s]; !ok {
-			seen[s] = struct{}{}
-			out = append(out, s)
-		}
-	}
-	return out
 }
 
 func getResourceParentRelatedTypes(parents []string) (relations []*openfgav1.RelationReference) {
@@ -402,16 +293,7 @@ func getResourceParentRelatedTypes(parents []string) (relations []*openfgav1.Rel
 }
 
 // getResourceTypeDefinition builds the OpenFGA TypeDefinition for a resource
-// under the direct-permission model.
-//
-// Each hashed-permission relation accepts:
-//   - A directly-assigned InternalUser
-//   - A directly-assigned InternalUserGroup (resolved via its "member" relation)
-//   - Permissions inherited from the parent resource (via the "parent" tupleset)
-//
-// This replaces the previous RoleBinding/InternalRole intersection that
-// required ~27 datastore reads per Check. With direct tuples a Check resolves
-// in 1-3 reads.
+// for the authorization model.
 func getResourceTypeDefinition(permissions []string, resourceNode *resourceGraphNode) *openfgav1.TypeDefinition {
 	typeDefinition := &openfgav1.TypeDefinition{
 		Type: resourceNode.ResourceType,
@@ -425,7 +307,6 @@ func getResourceTypeDefinition(permissions []string, resourceNode *resourceGraph
 		Relations: map[string]*openfgav1.Userset{},
 	}
 
-	// Only create a parent reference if the resource has parent relationships.
 	if len(resourceNode.ParentResources) > 0 {
 		typeDefinition.Metadata.Relations[RelationParent] = &openfgav1.RelationMetadata{
 			DirectlyRelatedUserTypes: getResourceParentRelatedTypes(resourceNode.ParentResources),
@@ -438,15 +319,10 @@ func getResourceTypeDefinition(permissions []string, resourceNode *resourceGraph
 	for _, permission := range permissions {
 		hashedPermission := hashPermission(permission)
 
-		// Build the union of assignment sources for this permission relation.
-		// Start with direct user/group assignment (This).
 		permChildren := []*openfgav1.Userset{
-			// Direct assignment: an InternalUser or InternalUserGroup#member tuple
-			// grants this permission on the resource directly.
 			{Userset: &openfgav1.Userset_This{This: &openfgav1.DirectUserset{}}},
 		}
 
-		// If the resource has parents, add permission inheritance from the parent.
 		if len(resourceNode.ParentResources) > 0 {
 			permChildren = append(permChildren, &openfgav1.Userset{
 				Userset: &openfgav1.Userset_TupleToUserset{
@@ -462,12 +338,9 @@ func getResourceTypeDefinition(permissions []string, resourceNode *resourceGraph
 			})
 		}
 
-		// The relation metadata declares which user types may be directly assigned.
 		typeDefinition.Metadata.Relations[hashedPermission] = &openfgav1.RelationMetadata{
 			DirectlyRelatedUserTypes: []*openfgav1.RelationReference{
-				// Individual users
 				{Type: TypeInternalUser},
-				// Group members (resolved transitively via InternalUserGroup#member)
 				{
 					Type: TypeInternalUserGroup,
 					RelationOrWildcard: &openfgav1.RelationReference_Relation{
@@ -478,7 +351,6 @@ func getResourceTypeDefinition(permissions []string, resourceNode *resourceGraph
 		}
 
 		if len(permChildren) == 1 {
-			// No parent: just use This directly (avoids unnecessary Union wrapper).
 			typeDefinition.Relations[hashedPermission] = permChildren[0]
 		} else {
 			typeDefinition.Relations[hashedPermission] = &openfgav1.Userset{
@@ -495,8 +367,6 @@ func getResourceTypeDefinition(permissions []string, resourceNode *resourceGraph
 }
 
 func getMinimalAuthorizationModel() *openfgav1.AuthorizationModel {
-	// Return a minimal authorization model with just InternalUser and
-	// InternalUserGroup when no ProtectedResources exist.
 	return &openfgav1.AuthorizationModel{
 		SchemaVersion: "1.2",
 		TypeDefinitions: []*openfgav1.TypeDefinition{
@@ -559,7 +429,7 @@ func getUserGroupTypeDefinition() *openfgav1.TypeDefinition {
 }
 
 // getRootTypeDefinition builds the OpenFGA TypeDefinition for the
-// iam.miloapis.com/Root type under the direct-permission model.
+// iam.miloapis.com/Root type for the authorization model.
 //
 // ResourceKind PolicyBindings write tuples of the form:
 //
@@ -610,6 +480,7 @@ func hashPermission(permission string) string {
 	return hex.EncodeToString(hasher.Sum(nil))
 }
 
+// HashPermission is the exported version of hashPermission for use by the webhook.
 func HashPermission(permission string) string {
 	return hashPermission(permission)
 }
@@ -619,10 +490,7 @@ func HashPermission(permission string) string {
 // all permissions from its descendants (children, grandchildren, etc.)
 func calculateHierarchicalPermissions(rootNode *resourceGraphNode) map[string][]string {
 	hierarchicalPermissions := make(map[string][]string)
-
-	// Traverse the entire graph and calculate permissions for each node
 	calculatePermissionsForNode(rootNode, hierarchicalPermissions)
-
 	return hierarchicalPermissions
 }
 
@@ -632,34 +500,26 @@ func calculatePermissionsForNode(node *resourceGraphNode, permissionsMap map[str
 		return []string{}
 	}
 
-	// Skip the root IAM node as it's handled separately
 	if node.ResourceType == TypeRoot {
-		// Process children but don't assign permissions to the IAM root
 		for _, child := range node.ChildResources {
 			calculatePermissionsForNode(child, permissionsMap)
 		}
 		return []string{}
 	}
 
-	// If we've already calculated permissions for this node, return them
 	if permissions, exists := permissionsMap[node.ResourceType]; exists {
 		return permissions
 	}
 
-	// Start with this node's direct permissions
 	nodePermissions := make([]string, len(node.DirectPermissions))
 	copy(nodePermissions, node.DirectPermissions)
 
-	// Add permissions from all child resources
 	for _, child := range node.ChildResources {
 		childPermissions := calculatePermissionsForNode(child, permissionsMap)
 		nodePermissions = append(nodePermissions, childPermissions...)
 	}
 
-	// Remove duplicates
 	nodePermissions = removeDuplicatePermissions(nodePermissions)
-
-	// Store the calculated permissions
 	permissionsMap[node.ResourceType] = nodePermissions
 
 	return nodePermissions
@@ -685,16 +545,14 @@ func removeDuplicatePermissions(permissions []string) []string {
 func getResourceTypeDefinitionsWithHierarchicalPermissions(hierarchicalPermissions map[string][]string, node *resourceGraphNode) map[string]*openfgav1.TypeDefinition {
 	types := map[string]*openfgav1.TypeDefinition{}
 
-	// Process the current node
 	if node.ResourceType != TypeRoot {
 		permissions := hierarchicalPermissions[node.ResourceType]
 		if permissions == nil {
-			permissions = []string{} // Default to empty if not found
+			permissions = []string{}
 		}
 		types[node.ResourceType] = getResourceTypeDefinition(permissions, node)
 	}
 
-	// Process all child nodes
 	for _, child := range node.ChildResources {
 		childTypes := getResourceTypeDefinitionsWithHierarchicalPermissions(hierarchicalPermissions, child)
 		for k, v := range childTypes {
@@ -703,506 +561,4 @@ func getResourceTypeDefinitionsWithHierarchicalPermissions(hierarchicalPermissio
 	}
 
 	return types
-}
-
-// =============================================================================
-// Legacy RoleBinding model type definitions
-// These are only included when the LegacyRoleBindingModel feature gate is
-// enabled. They replicate the type shapes from before the direct-permission
-// migration.
-// =============================================================================
-
-// getLegacyInternalRoleTypeDefinition returns the InternalRole type used by the
-// legacy RoleBinding intersection model.
-func getLegacyInternalRoleTypeDefinition(permissions []string) *openfgav1.TypeDefinition {
-	sortedPermissions := make([]string, len(permissions))
-	copy(sortedPermissions, permissions)
-	sort.Strings(sortedPermissions)
-
-	role := &openfgav1.TypeDefinition{
-		Type: TypeInternalRole,
-		Metadata: &openfgav1.Metadata{
-			Relations: map[string]*openfgav1.RelationMetadata{
-				RelationAssignee: {
-					DirectlyRelatedUserTypes: []*openfgav1.RelationReference{
-						{Type: TypeInternalUser},
-					},
-				},
-			},
-			SourceInfo: &openfgav1.SourceInfo{File: SourceFile},
-			Module:     Module,
-		},
-		Relations: map[string]*openfgav1.Userset{
-			RelationAssignee: {
-				Userset: &openfgav1.Userset_This{This: &openfgav1.DirectUserset{}},
-			},
-		},
-	}
-
-	for _, permission := range sortedPermissions {
-		hashedPermission := hashPermission(permission)
-		role.Metadata.Relations[hashedPermission] = &openfgav1.RelationMetadata{
-			DirectlyRelatedUserTypes: []*openfgav1.RelationReference{
-				{
-					Type:               TypeInternalUser,
-					RelationOrWildcard: &openfgav1.RelationReference_Wildcard{},
-				},
-			},
-		}
-		role.Relations[hashedPermission] = &openfgav1.Userset{
-			Userset: &openfgav1.Userset_This{This: &openfgav1.DirectUserset{}},
-		}
-	}
-
-	return role
-}
-
-// getLegacyRoleBindingTypeDefinition returns the RoleBinding type used by the
-// legacy intersection model.
-func getLegacyRoleBindingTypeDefinition(permissions []string) *openfgav1.TypeDefinition {
-	sortedPermissions := make([]string, len(permissions))
-	copy(sortedPermissions, permissions)
-	sort.Strings(sortedPermissions)
-
-	roleBinding := &openfgav1.TypeDefinition{
-		Type: TypeRoleBinding,
-		Metadata: &openfgav1.Metadata{
-			Relations: map[string]*openfgav1.RelationMetadata{
-				RelationInternalRole: {
-					DirectlyRelatedUserTypes: []*openfgav1.RelationReference{
-						{Type: TypeInternalRole},
-					},
-				},
-				RelationInternalUser: {
-					DirectlyRelatedUserTypes: []*openfgav1.RelationReference{
-						{Type: TypeInternalUser},
-						{
-							Type:               TypeInternalUser,
-							RelationOrWildcard: &openfgav1.RelationReference_Wildcard{},
-						},
-						{
-							Type: TypeInternalUserGroup,
-							RelationOrWildcard: &openfgav1.RelationReference_Relation{
-								Relation: RelationAssignee,
-							},
-						},
-					},
-				},
-			},
-			SourceInfo: &openfgav1.SourceInfo{File: SourceFile},
-			Module:     Module,
-		},
-		Relations: map[string]*openfgav1.Userset{
-			RelationInternalRole: {
-				Userset: &openfgav1.Userset_This{This: &openfgav1.DirectUserset{}},
-			},
-			RelationInternalUser: {
-				Userset: &openfgav1.Userset_This{This: &openfgav1.DirectUserset{}},
-			},
-		},
-	}
-
-	for _, permission := range sortedPermissions {
-		hashedPermission := hashPermission(permission)
-		roleBinding.Relations[hashedPermission] = &openfgav1.Userset{
-			Userset: &openfgav1.Userset_Intersection{
-				Intersection: &openfgav1.Usersets{
-					Child: []*openfgav1.Userset{
-						{
-							Userset: &openfgav1.Userset_ComputedUserset{
-								ComputedUserset: &openfgav1.ObjectRelation{
-									Relation: RelationInternalUser,
-								},
-							},
-						},
-						{
-							Userset: &openfgav1.Userset_TupleToUserset{
-								TupleToUserset: &openfgav1.TupleToUserset{
-									Tupleset: &openfgav1.ObjectRelation{
-										Relation: RelationInternalRole,
-									},
-									ComputedUserset: &openfgav1.ObjectRelation{
-										Relation: hashedPermission,
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-		}
-	}
-
-	return roleBinding
-}
-
-// getLegacyResourceTypeDefinition builds the OpenFGA TypeDefinition for a
-// resource under the legacy RoleBinding model. Relations are resolved through
-// rolebinding and rootbinding tupleset lookups instead of direct user/group
-// assignment.
-func getLegacyResourceTypeDefinition(permissions []string, resourceNode *resourceGraphNode) *openfgav1.TypeDefinition {
-	typeDefinition := &openfgav1.TypeDefinition{
-		Type: resourceNode.ResourceType,
-		Metadata: &openfgav1.Metadata{
-			Relations: map[string]*openfgav1.RelationMetadata{
-				RelationRoleBinding: {
-					DirectlyRelatedUserTypes: []*openfgav1.RelationReference{
-						{Type: TypeRoleBinding},
-					},
-				},
-				RelationRootBinding: {
-					DirectlyRelatedUserTypes: []*openfgav1.RelationReference{
-						{Type: TypeRoot},
-					},
-				},
-			},
-			SourceInfo: &openfgav1.SourceInfo{File: SourceFile},
-			Module:     strings.Split(resourceNode.ResourceType, "/")[0],
-		},
-		Relations: map[string]*openfgav1.Userset{
-			RelationRoleBinding: {Userset: &openfgav1.Userset_This{}},
-			RelationRootBinding: {Userset: &openfgav1.Userset_This{}},
-		},
-	}
-
-	if len(resourceNode.ParentResources) > 0 {
-		typeDefinition.Metadata.Relations[RelationParent] = &openfgav1.RelationMetadata{
-			DirectlyRelatedUserTypes: getResourceParentRelatedTypes(resourceNode.ParentResources),
-		}
-		typeDefinition.Relations[RelationParent] = &openfgav1.Userset{
-			Userset: &openfgav1.Userset_This{},
-		}
-	}
-
-	for _, permission := range permissions {
-		hashedPermission := hashPermission(permission)
-
-		permChildren := []*openfgav1.Userset{
-			{
-				Userset: &openfgav1.Userset_TupleToUserset{
-					TupleToUserset: &openfgav1.TupleToUserset{
-						Tupleset:        &openfgav1.ObjectRelation{Relation: RelationRoleBinding},
-						ComputedUserset: &openfgav1.ObjectRelation{Relation: hashedPermission},
-					},
-				},
-			},
-			{
-				Userset: &openfgav1.Userset_TupleToUserset{
-					TupleToUserset: &openfgav1.TupleToUserset{
-						Tupleset:        &openfgav1.ObjectRelation{Relation: RelationRootBinding},
-						ComputedUserset: &openfgav1.ObjectRelation{Relation: hashedPermission},
-					},
-				},
-			},
-		}
-
-		if len(resourceNode.ParentResources) > 0 {
-			permChildren = append(permChildren, &openfgav1.Userset{
-				Userset: &openfgav1.Userset_TupleToUserset{
-					TupleToUserset: &openfgav1.TupleToUserset{
-						Tupleset:        &openfgav1.ObjectRelation{Relation: RelationParent},
-						ComputedUserset: &openfgav1.ObjectRelation{Relation: hashedPermission},
-					},
-				},
-			})
-		}
-
-		typeDefinition.Relations[hashedPermission] = &openfgav1.Userset{
-			Userset: &openfgav1.Userset_Union{
-				Union: &openfgav1.Usersets{Child: permChildren},
-			},
-		}
-	}
-
-	return typeDefinition
-}
-
-// getLegacyResourceTypeDefinitionsWithHierarchicalPermissions walks the
-// resource graph and returns legacy-model TypeDefinitions for each resource.
-func getLegacyResourceTypeDefinitionsWithHierarchicalPermissions(hierarchicalPermissions map[string][]string, node *resourceGraphNode) map[string]*openfgav1.TypeDefinition {
-	types := map[string]*openfgav1.TypeDefinition{}
-
-	if node.ResourceType != TypeRoot {
-		permissions := hierarchicalPermissions[node.ResourceType]
-		if permissions == nil {
-			permissions = []string{}
-		}
-		types[node.ResourceType] = getLegacyResourceTypeDefinition(permissions, node)
-	}
-
-	for _, child := range node.ChildResources {
-		childTypes := getLegacyResourceTypeDefinitionsWithHierarchicalPermissions(hierarchicalPermissions, child)
-		for k, v := range childTypes {
-			types[k] = v
-		}
-	}
-
-	return types
-}
-
-// getLegacyRootTypeDefinition builds the Root type for the legacy RoleBinding
-// model. Permissions on Root objects are resolved through the rolebinding
-// tupleset rather than being stored as direct tuples.
-func getLegacyRootTypeDefinition(permissions []string, resourceTypes []string) *openfgav1.TypeDefinition {
-	sortedPermissions := make([]string, len(permissions))
-	copy(sortedPermissions, permissions)
-	sort.Strings(sortedPermissions)
-
-	sortedResourceTypes := make([]string, len(resourceTypes))
-	copy(sortedResourceTypes, resourceTypes)
-	sort.Strings(sortedResourceTypes)
-
-	relationReferences := make([]*openfgav1.RelationReference, 0, len(sortedResourceTypes))
-	for _, rt := range sortedResourceTypes {
-		relationReferences = append(relationReferences, &openfgav1.RelationReference{Type: rt})
-	}
-
-	root := &openfgav1.TypeDefinition{
-		Type: TypeRoot,
-		Metadata: &openfgav1.Metadata{
-			Relations: map[string]*openfgav1.RelationMetadata{
-				RelationRoleBinding: {
-					DirectlyRelatedUserTypes: []*openfgav1.RelationReference{
-						{Type: TypeRoleBinding},
-					},
-				},
-				RelationRootBinding: {
-					DirectlyRelatedUserTypes: relationReferences,
-				},
-			},
-			SourceInfo: &openfgav1.SourceInfo{File: SourceFile},
-			Module:     Module,
-		},
-		Relations: map[string]*openfgav1.Userset{
-			RelationRoleBinding: {Userset: &openfgav1.Userset_This{}},
-			RelationRootBinding: {Userset: &openfgav1.Userset_This{}},
-		},
-	}
-
-	for _, permission := range sortedPermissions {
-		hashedPermission := hashPermission(permission)
-		root.Relations[hashedPermission] = &openfgav1.Userset{
-			Userset: &openfgav1.Userset_TupleToUserset{
-				TupleToUserset: &openfgav1.TupleToUserset{
-					Tupleset:        &openfgav1.ObjectRelation{Relation: RelationRoleBinding},
-					ComputedUserset: &openfgav1.ObjectRelation{Relation: hashedPermission},
-				},
-			},
-		}
-	}
-
-	return root
-}
-
-// =============================================================================
-// Hybrid model type definitions (dual-write migration)
-// These combine both direct user/group assignment (This) and legacy
-// rolebinding/rootbinding tupleset resolution in a single type definition,
-// allowing both tuple formats to coexist.
-// =============================================================================
-
-// getHybridResourceTypeDefinition builds a resource type that supports both
-// direct tuple writes and legacy check resolution. Each hashed permission
-// relation is a union of:
-//   - This (direct InternalUser / InternalUserGroup#member assignment)
-//   - TupleToUserset(rolebinding, hash(perm))  — legacy check path
-//   - TupleToUserset(rootbinding, hash(perm))  — legacy check path
-//   - TupleToUserset(parent, hash(perm))       — hierarchical inheritance
-func getHybridResourceTypeDefinition(permissions []string, resourceNode *resourceGraphNode) *openfgav1.TypeDefinition {
-	typeDefinition := &openfgav1.TypeDefinition{
-		Type: resourceNode.ResourceType,
-		Metadata: &openfgav1.Metadata{
-			Relations: map[string]*openfgav1.RelationMetadata{
-				RelationRoleBinding: {
-					DirectlyRelatedUserTypes: []*openfgav1.RelationReference{
-						{Type: TypeRoleBinding},
-					},
-				},
-				RelationRootBinding: {
-					DirectlyRelatedUserTypes: []*openfgav1.RelationReference{
-						{Type: TypeRoot},
-					},
-				},
-			},
-			SourceInfo: &openfgav1.SourceInfo{File: SourceFile},
-			Module:     strings.Split(resourceNode.ResourceType, "/")[0],
-		},
-		Relations: map[string]*openfgav1.Userset{
-			RelationRoleBinding: {Userset: &openfgav1.Userset_This{}},
-			RelationRootBinding: {Userset: &openfgav1.Userset_This{}},
-		},
-	}
-
-	if len(resourceNode.ParentResources) > 0 {
-		typeDefinition.Metadata.Relations[RelationParent] = &openfgav1.RelationMetadata{
-			DirectlyRelatedUserTypes: getResourceParentRelatedTypes(resourceNode.ParentResources),
-		}
-		typeDefinition.Relations[RelationParent] = &openfgav1.Userset{
-			Userset: &openfgav1.Userset_This{},
-		}
-	}
-
-	for _, permission := range permissions {
-		hashedPermission := hashPermission(permission)
-
-		// Metadata declares which user types may be directly assigned
-		// (needed for the direct-permission tuple writes).
-		typeDefinition.Metadata.Relations[hashedPermission] = &openfgav1.RelationMetadata{
-			DirectlyRelatedUserTypes: []*openfgav1.RelationReference{
-				{Type: TypeInternalUser},
-				{
-					Type: TypeInternalUserGroup,
-					RelationOrWildcard: &openfgav1.RelationReference_Relation{
-						Relation: RelationMember,
-					},
-				},
-			},
-		}
-
-		permChildren := []*openfgav1.Userset{
-			// Direct assignment (new model)
-			{Userset: &openfgav1.Userset_This{This: &openfgav1.DirectUserset{}}},
-			// Legacy: resolve through RoleBinding chain
-			{
-				Userset: &openfgav1.Userset_TupleToUserset{
-					TupleToUserset: &openfgav1.TupleToUserset{
-						Tupleset:        &openfgav1.ObjectRelation{Relation: RelationRoleBinding},
-						ComputedUserset: &openfgav1.ObjectRelation{Relation: hashedPermission},
-					},
-				},
-			},
-			// Legacy: resolve through RootBinding chain
-			{
-				Userset: &openfgav1.Userset_TupleToUserset{
-					TupleToUserset: &openfgav1.TupleToUserset{
-						Tupleset:        &openfgav1.ObjectRelation{Relation: RelationRootBinding},
-						ComputedUserset: &openfgav1.ObjectRelation{Relation: hashedPermission},
-					},
-				},
-			},
-		}
-
-		// Hierarchical inheritance from parent
-		if len(resourceNode.ParentResources) > 0 {
-			permChildren = append(permChildren, &openfgav1.Userset{
-				Userset: &openfgav1.Userset_TupleToUserset{
-					TupleToUserset: &openfgav1.TupleToUserset{
-						Tupleset:        &openfgav1.ObjectRelation{Relation: RelationParent},
-						ComputedUserset: &openfgav1.ObjectRelation{Relation: hashedPermission},
-					},
-				},
-			})
-		}
-
-		typeDefinition.Relations[hashedPermission] = &openfgav1.Userset{
-			Userset: &openfgav1.Userset_Union{
-				Union: &openfgav1.Usersets{Child: permChildren},
-			},
-		}
-	}
-
-	return typeDefinition
-}
-
-// getHybridResourceTypeDefinitionsWithHierarchicalPermissions walks the
-// resource graph and returns hybrid-model TypeDefinitions for each resource.
-func getHybridResourceTypeDefinitionsWithHierarchicalPermissions(hierarchicalPermissions map[string][]string, node *resourceGraphNode) map[string]*openfgav1.TypeDefinition {
-	types := map[string]*openfgav1.TypeDefinition{}
-
-	if node.ResourceType != TypeRoot {
-		permissions := hierarchicalPermissions[node.ResourceType]
-		if permissions == nil {
-			permissions = []string{}
-		}
-		types[node.ResourceType] = getHybridResourceTypeDefinition(permissions, node)
-	}
-
-	for _, child := range node.ChildResources {
-		childTypes := getHybridResourceTypeDefinitionsWithHierarchicalPermissions(hierarchicalPermissions, child)
-		for k, v := range childTypes {
-			types[k] = v
-		}
-	}
-
-	return types
-}
-
-// getHybridRootTypeDefinition builds a Root type that supports both direct
-// tuple writes and legacy rolebinding-based resolution. Each hashed permission
-// is a union of This (direct) and TupleToUserset(rolebinding) (legacy).
-func getHybridRootTypeDefinition(permissions []string, resourceTypes []string) *openfgav1.TypeDefinition {
-	sortedPermissions := make([]string, len(permissions))
-	copy(sortedPermissions, permissions)
-	sort.Strings(sortedPermissions)
-
-	sortedResourceTypes := make([]string, len(resourceTypes))
-	copy(sortedResourceTypes, resourceTypes)
-	sort.Strings(sortedResourceTypes)
-
-	relationReferences := make([]*openfgav1.RelationReference, 0, len(sortedResourceTypes))
-	for _, rt := range sortedResourceTypes {
-		relationReferences = append(relationReferences, &openfgav1.RelationReference{Type: rt})
-	}
-
-	root := &openfgav1.TypeDefinition{
-		Type: TypeRoot,
-		Metadata: &openfgav1.Metadata{
-			Relations: map[string]*openfgav1.RelationMetadata{
-				RelationRoleBinding: {
-					DirectlyRelatedUserTypes: []*openfgav1.RelationReference{
-						{Type: TypeRoleBinding},
-					},
-				},
-				RelationRootBinding: {
-					DirectlyRelatedUserTypes: relationReferences,
-				},
-			},
-			SourceInfo: &openfgav1.SourceInfo{File: SourceFile},
-			Module:     Module,
-		},
-		Relations: map[string]*openfgav1.Userset{
-			RelationRoleBinding: {Userset: &openfgav1.Userset_This{}},
-			RelationRootBinding: {Userset: &openfgav1.Userset_This{}},
-		},
-	}
-
-	for _, permission := range sortedPermissions {
-		hashedPermission := hashPermission(permission)
-
-		// Metadata: accept direct user/group writes
-		root.Metadata.Relations[hashedPermission] = &openfgav1.RelationMetadata{
-			DirectlyRelatedUserTypes: []*openfgav1.RelationReference{
-				{Type: TypeInternalUser},
-				{
-					Type: TypeInternalUserGroup,
-					RelationOrWildcard: &openfgav1.RelationReference_Relation{
-						Relation: RelationMember,
-					},
-				},
-			},
-		}
-
-		// Union: direct assignment + legacy rolebinding resolution
-		root.Relations[hashedPermission] = &openfgav1.Userset{
-			Userset: &openfgav1.Userset_Union{
-				Union: &openfgav1.Usersets{
-					Child: []*openfgav1.Userset{
-						// Direct assignment (new model)
-						{Userset: &openfgav1.Userset_This{This: &openfgav1.DirectUserset{}}},
-						// Legacy: resolve through RoleBinding chain
-						{
-							Userset: &openfgav1.Userset_TupleToUserset{
-								TupleToUserset: &openfgav1.TupleToUserset{
-									Tupleset:        &openfgav1.ObjectRelation{Relation: RelationRoleBinding},
-									ComputedUserset: &openfgav1.ObjectRelation{Relation: hashedPermission},
-								},
-							},
-						},
-					},
-				},
-			},
-		}
-	}
-
-	return root
 }

@@ -9,16 +9,13 @@ import (
 	openfgav1 "github.com/openfga/api/proto/openfga/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.miloapis.com/auth-provider-openfga/internal/features"
 	"go.miloapis.com/auth-provider-openfga/internal/webhook"
 	iamv1alpha1 "go.miloapis.com/milo/pkg/apis/iam/v1alpha1"
 	"google.golang.org/grpc"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apiserver/pkg/authentication/user"
 	"k8s.io/apiserver/pkg/authorization/authorizer"
-	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/client-go/discovery"
-	featuregatetesting "k8s.io/component-base/featuregate/testing"
 )
 
 // mockAttributes is a simple mock for authorizer.Attributes
@@ -85,9 +82,7 @@ func (m *mockDiscoveryClient) ServerResourcesForGroupVersion(groupVersion string
 }
 
 func TestSubjectAccessReviewAuthorizer_Authorize_Integration(t *testing.T) {
-	// Enable the direct permission tuple model for these tests.
-	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.DirectPermissionTuples, true)
-	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.LegacyRoleBindingModel, false)
+
 	testCases := []struct {
 		name                    string
 		attributes              authorizer.Attributes
@@ -361,10 +356,23 @@ func TestSubjectAccessReviewWebhookFactory(t *testing.T) {
 func TestProjectScopedAuthorization(t *testing.T) {
 	t.Run("project-scoped request uses project authorization logic", func(t *testing.T) {
 		mockFGA := &mockFGAClient{
-			CheckFunc: func(ctx context.Context, req *openfgav1.CheckRequest, opts ...grpc.CallOption) (*openfgav1.CheckResponse, error) {
-				// Verify that project-scoped requests target the project resource
-				assert.Contains(t, req.TupleKey.Object, "resourcemanager.miloapis.com/Project:")
-				return &openfgav1.CheckResponse{Allowed: true}, nil
+			BatchCheckFunc: func(ctx context.Context, req *openfgav1.BatchCheckRequest, opts ...grpc.CallOption) (*openfgav1.BatchCheckResponse, error) {
+				// Verify that the instance check (correlation "instance") targets the project resource
+				foundProjectCheck := false
+				for _, check := range req.Checks {
+					if check.CorrelationId == "instance" {
+						assert.Contains(t, check.TupleKey.Object, "resourcemanager.miloapis.com/Project:")
+						foundProjectCheck = true
+					}
+				}
+				assert.True(t, foundProjectCheck, "expected an instance check targeting the project resource")
+				results := map[string]*openfgav1.BatchCheckSingleResult{}
+				for _, check := range req.Checks {
+					results[check.CorrelationId] = &openfgav1.BatchCheckSingleResult{
+						CheckResult: &openfgav1.BatchCheckSingleResult_Allowed{Allowed: true},
+					}
+				}
+				return &openfgav1.BatchCheckResponse{Result: results}, nil
 			},
 		}
 
@@ -487,10 +495,14 @@ func TestOrganizationNamespaceValidation(t *testing.T) {
 		})
 
 		mockFGA := &mockFGAClient{
-			CheckFunc: func(ctx context.Context, req *openfgav1.CheckRequest, opts ...grpc.CallOption) (*openfgav1.CheckResponse, error) {
-				// Verify it uses organization resource for collection operations with org context
-				assert.Equal(t, "resourcemanager.miloapis.com/Organization:acme", req.TupleKey.Object)
-				return &openfgav1.CheckResponse{Allowed: true}, nil
+			BatchCheckFunc: func(ctx context.Context, req *openfgav1.BatchCheckRequest, opts ...grpc.CallOption) (*openfgav1.BatchCheckResponse, error) {
+				results := map[string]*openfgav1.BatchCheckSingleResult{}
+				for _, check := range req.Checks {
+					results[check.CorrelationId] = &openfgav1.BatchCheckSingleResult{
+						CheckResult: &openfgav1.BatchCheckSingleResult_Allowed{Allowed: true},
+					}
+				}
+				return &openfgav1.BatchCheckResponse{Result: results}, nil
 			},
 		}
 
@@ -552,8 +564,14 @@ func TestOrganizationNamespaceValidation(t *testing.T) {
 		})
 
 		mockFGA := &mockFGAClient{
-			CheckFunc: func(ctx context.Context, req *openfgav1.CheckRequest, opts ...grpc.CallOption) (*openfgav1.CheckResponse, error) {
-				return &openfgav1.CheckResponse{Allowed: true}, nil
+			BatchCheckFunc: func(ctx context.Context, req *openfgav1.BatchCheckRequest, opts ...grpc.CallOption) (*openfgav1.BatchCheckResponse, error) {
+				results := map[string]*openfgav1.BatchCheckSingleResult{}
+				for _, check := range req.Checks {
+					results[check.CorrelationId] = &openfgav1.BatchCheckSingleResult{
+						CheckResult: &openfgav1.BatchCheckSingleResult_Allowed{Allowed: true},
+					}
+				}
+				return &openfgav1.BatchCheckResponse{Result: results}, nil
 			},
 		}
 
@@ -611,10 +629,14 @@ func TestOrganizationNamespaceValidation(t *testing.T) {
 		}
 
 		mockFGA := &mockFGAClient{
-			CheckFunc: func(ctx context.Context, req *openfgav1.CheckRequest, opts ...grpc.CallOption) (*openfgav1.CheckResponse, error) {
-				// Should use organization resource for collection operations
-				assert.Equal(t, "resourcemanager.miloapis.com/Organization:acme", req.TupleKey.Object)
-				return &openfgav1.CheckResponse{Allowed: true}, nil
+			BatchCheckFunc: func(ctx context.Context, req *openfgav1.BatchCheckRequest, opts ...grpc.CallOption) (*openfgav1.BatchCheckResponse, error) {
+				results := map[string]*openfgav1.BatchCheckSingleResult{}
+				for _, check := range req.Checks {
+					results[check.CorrelationId] = &openfgav1.BatchCheckSingleResult{
+						CheckResult: &openfgav1.BatchCheckSingleResult_Allowed{Allowed: true},
+					}
+				}
+				return &openfgav1.BatchCheckResponse{Result: results}, nil
 			},
 		}
 
@@ -712,15 +734,12 @@ func TestOrganizationNamespaceValidation(t *testing.T) {
 }
 
 // TestResourceKindBindingResolution covers the BatchCheck approach used by
-// the direct-permission model to resolve ResourceKind policy bindings. When a
+// BatchCheck to resolve ResourceKind policy bindings. When a
 // user requests a named resource instance without project or org scope the
 // authorizer sends a BatchCheck with two items: one for the specific instance
 // and one for Root:service/Kind so that both ResourceRef and ResourceKind
 // bindings are covered in a single RPC.
 func TestResourceKindBindingResolution(t *testing.T) {
-	// All sub-tests use the direct-permission model with no legacy fallback.
-	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.DirectPermissionTuples, true)
-	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.LegacyRoleBindingModel, false)
 
 	computeWorkloadResource := iamv1alpha1.ProtectedResource{
 		Spec: iamv1alpha1.ProtectedResourceSpec{
@@ -1060,8 +1079,6 @@ func TestResourceKindBindingResolution(t *testing.T) {
 // model stores group memberships as persistent tuples, and the Root fallback
 // check in BatchCheck covers the ResourceKind binding path.
 func TestResourceKindGroupBindingViaBatchCheck(t *testing.T) {
-	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.DirectPermissionTuples, true)
-	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.LegacyRoleBindingModel, false)
 
 	computeWorkloadResource := iamv1alpha1.ProtectedResource{
 		Spec: iamv1alpha1.ProtectedResourceSpec{

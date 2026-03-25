@@ -248,11 +248,8 @@ func runDirectMode(ctx context.Context, cfg Config) {
 	}
 
 	// Estimate tuple count so the operator knows what to expect.
-	bindingTuples := int64(cfg.NumUsers) * int64(cfg.MembershipsPerUser) * 3
 	roleTuples := int64(cfg.NumRoles) * int64(cfg.PermissionsPerRole)
-	orgRootBindings := int64(cfg.NumOrgs)
-	projTuples := int64(cfg.NumOrgs) * int64(cfg.NumProjectsPerOrg) * 2
-	estimate := bindingTuples + roleTuples + orgRootBindings + projTuples
+	estimate := roleTuples
 	fmt.Fprintf(os.Stderr, "\nEstimated tuple count: %d\n\n", estimate)
 
 	// Connect to OpenFGA via gRPC.
@@ -290,51 +287,23 @@ func runDirectMode(ctx context.Context, cfg Config) {
 	}
 	fmt.Fprintf(os.Stderr, "  Wrote %d role permission tuples\n", len(roleTupleSlice))
 
-	// Phase 4: Write organization binding tuples.
-	fmt.Fprintln(os.Stderr, "Phase 4: Writing organization binding tuples...")
-	membershipMap := buildMembershipMap(cfg)
-	orgBindingTuples := buildOrgBindingTuples(cfg, membershipMap)
-	if err := writeTuplesBatched(ctx, client, cfg.StoreID, orgBindingTuples, cfg.Workers, &totalWritten); err != nil {
-		fmt.Fprintf(os.Stderr, "ERROR: Phase 4 failed: %v\n", err)
-		os.Exit(1)
-	}
-	fmt.Fprintf(os.Stderr, "  Wrote %d org binding tuples\n", len(orgBindingTuples))
-
-	// Phase 5: Write RootBinding tuples for organizations.
-	fmt.Fprintln(os.Stderr, "Phase 5: Writing RootBinding tuples for organizations...")
-	orgRootTuples := buildOrgRootBindingTuples(cfg)
-	if err := writeTuplesBatched(ctx, client, cfg.StoreID, orgRootTuples, cfg.Workers, &totalWritten); err != nil {
-		fmt.Fprintf(os.Stderr, "ERROR: Phase 5 failed: %v\n", err)
-		os.Exit(1)
-	}
-	fmt.Fprintf(os.Stderr, "  Wrote %d org root binding tuples\n", len(orgRootTuples))
-
-	// Phase 6: Write project parent and RootBinding tuples.
-	fmt.Fprintln(os.Stderr, "Phase 6: Writing project parent and RootBinding tuples...")
-	projectTuples := buildProjectTuples(cfg)
-	if err := writeTuplesBatched(ctx, client, cfg.StoreID, projectTuples, cfg.Workers, &totalWritten); err != nil {
-		fmt.Fprintf(os.Stderr, "ERROR: Phase 6 failed: %v\n", err)
-		os.Exit(1)
-	}
-	fmt.Fprintf(os.Stderr, "  Wrote %d project tuples\n", len(projectTuples))
-
-	// Phase 6b: Write ResourceKind tuples for admin users on Root objects.
+	// Phase 4: Write ResourceKind tuples for admin users on Root objects.
 	// These exercise the BatchCheck path in the webhook.
-	fmt.Fprintln(os.Stderr, "Phase 6b: Writing admin ResourceKind tuples...")
+	fmt.Fprintln(os.Stderr, "Phase 4: Writing admin ResourceKind tuples...")
 	adminTuples := buildAdminResourceKindTuples(cfg)
 	if err := writeTuplesBatched(ctx, client, cfg.StoreID, adminTuples, cfg.Workers, &totalWritten); err != nil {
-		fmt.Fprintf(os.Stderr, "ERROR: Phase 6b failed: %v\n", err)
+		fmt.Fprintf(os.Stderr, "ERROR: Phase 4 failed: %v\n", err)
 		os.Exit(1)
 	}
 	fmt.Fprintf(os.Stderr, "  Wrote %d admin ResourceKind tuples\n", len(adminTuples))
 
-	membershipMap = buildMembershipMap(cfg)
+	membershipMap := buildMembershipMap(cfg)
 
-	// Phase 7: Write the fixture manifest.
-	fmt.Fprintln(os.Stderr, "Phase 7: Writing scale manifest...")
+	// Phase 5: Write the fixture manifest.
+	fmt.Fprintln(os.Stderr, "Phase 5: Writing scale manifest...")
 	manifest := buildManifest(cfg, membershipMap, totalWritten.Load())
 	if err := writeManifest(manifest, cfg.ManifestPath); err != nil {
-		fmt.Fprintf(os.Stderr, "ERROR: Phase 7 failed: %v\n", err)
+		fmt.Fprintf(os.Stderr, "ERROR: Phase 5 failed: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -1063,42 +1032,8 @@ func buildMembershipMap(cfg Config) map[int][]int {
 	return m
 }
 
-func buildOrgBindingTuples(cfg Config, membershipMap map[int][]int) []*openfgav1.TupleKey {
-	// 3 tuples per (user, org) pair.
-	tuples := make([]*openfgav1.TupleKey, 0, cfg.NumUsers*cfg.MembershipsPerUser*3)
-	for u := 0; u < cfg.NumUsers; u++ {
-		for _, o := range membershipMap[u] {
-			bindingID := fmt.Sprintf("scale-binding-%d-%d", u, o)
-			bindingObj := internalopenfga.TypeRoleBinding + ":" + bindingID
-			orgObj := fmt.Sprintf("resourcemanager.miloapis.com/Organization:scale-org-%d", o)
-			roleObj := internalopenfga.TypeInternalRole + fmt.Sprintf(":scale-role-%d", u%cfg.NumRoles)
-			userObj := internalopenfga.TypeInternalUser + fmt.Sprintf(":scale-user-%d", u)
-
-			// T1: binding → org
-			tuples = append(tuples, &openfgav1.TupleKey{
-				User:     bindingObj,
-				Relation: internalopenfga.RelationRoleBinding,
-				Object:   orgObj,
-			})
-			// T2: internalRole → binding
-			tuples = append(tuples, &openfgav1.TupleKey{
-				User:     roleObj,
-				Relation: internalopenfga.RelationInternalRole,
-				Object:   bindingObj,
-			})
-			// T3: internalUser → binding
-			tuples = append(tuples, &openfgav1.TupleKey{
-				User:     userObj,
-				Relation: internalopenfga.RelationInternalUser,
-				Object:   bindingObj,
-			})
-		}
-	}
-	return tuples
-}
-
 // ---------------------------------------------------------------------------
-// Direct mode: Phase 6b — Admin ResourceKind tuples on Root objects
+// Direct mode: Phase 4 — Admin ResourceKind tuples on Root objects
 // ---------------------------------------------------------------------------
 
 // buildAdminResourceKindTuples creates direct permission tuples for admin users
@@ -1121,52 +1056,6 @@ func buildAdminResourceKindTuples(cfg Config) []*openfgav1.TupleKey {
 				User:     user,
 				Relation: internalopenfga.HashPermission(perm),
 				Object:   rootObject,
-			})
-		}
-	}
-	return tuples
-}
-
-// ---------------------------------------------------------------------------
-// Direct mode: Phase 5 — Organization RootBinding tuples
-// ---------------------------------------------------------------------------
-
-func buildOrgRootBindingTuples(cfg Config) []*openfgav1.TupleKey {
-	tuples := make([]*openfgav1.TupleKey, 0, cfg.NumOrgs)
-	for o := 0; o < cfg.NumOrgs; o++ {
-		tuples = append(tuples, &openfgav1.TupleKey{
-			User:     internalopenfga.TypeRoot + ":resourcemanager.miloapis.com/Organization",
-			Relation: internalopenfga.RelationRootBinding,
-			Object:   fmt.Sprintf("resourcemanager.miloapis.com/Organization:scale-org-%d", o),
-		})
-	}
-	return tuples
-}
-
-// ---------------------------------------------------------------------------
-// Direct mode: Phase 6 — Project tuples
-// ---------------------------------------------------------------------------
-
-func buildProjectTuples(cfg Config) []*openfgav1.TupleKey {
-	// 2 tuples per project: RootBinding + parent.
-	tuples := make([]*openfgav1.TupleKey, 0, cfg.NumOrgs*cfg.NumProjectsPerOrg*2)
-	for o := 0; o < cfg.NumOrgs; o++ {
-		for p := 0; p < cfg.NumProjectsPerOrg; p++ {
-			projectID := fmt.Sprintf("scale-proj-%d-%d", o, p)
-			projectObj := "resourcemanager.miloapis.com/Project:" + projectID
-			orgObj := fmt.Sprintf("resourcemanager.miloapis.com/Organization:scale-org-%d", o)
-
-			// RootBinding for the project.
-			tuples = append(tuples, &openfgav1.TupleKey{
-				User:     internalopenfga.TypeRoot + ":resourcemanager.miloapis.com/Project",
-				Relation: internalopenfga.RelationRootBinding,
-				Object:   projectObj,
-			})
-			// Parent relationship: project → org.
-			tuples = append(tuples, &openfgav1.TupleKey{
-				User:     orgObj,
-				Relation: internalopenfga.RelationParent,
-				Object:   projectObj,
 			})
 		}
 	}
