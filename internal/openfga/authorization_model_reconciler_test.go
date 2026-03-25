@@ -8,14 +8,11 @@ import (
 	openfgav1 "github.com/openfga/api/proto/openfga/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.miloapis.com/auth-provider-openfga/internal/features"
 	iamdatumapiscomv1alpha1 "go.miloapis.com/milo/pkg/apis/iam/v1alpha1"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/testing/protocmp"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	utilfeature "k8s.io/apiserver/pkg/util/feature"
-	featuregatetesting "k8s.io/component-base/featuregate/testing"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 )
@@ -62,10 +59,6 @@ func buildExpectedResourceTypeDefinition(resourceType string, permissions []stri
 }
 
 func TestAuthorizationModelReconciler_ReconcileAuthorizationModel(t *testing.T) {
-	// Enable the direct permission tuple model for these tests.
-	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.DirectPermissionTuples, true)
-	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.LegacyRoleBindingModel, false)
-
 	// Set up test logger
 	logf.SetLogger(zap.New())
 
@@ -480,8 +473,8 @@ func TestAuthorizationModelsEqual_IdFieldIgnored(t *testing.T) {
 	assert.True(t, authorizationModelsEqual(modelWithoutId, modelWithId))
 }
 
-// TestDirectPermissionModel_ResourceTypeDefinition verifies that the generated
-// TypeDefinition for a resource under the direct-permission model:
+// TestAuthorizationModel_ResourceTypeDefinition verifies that the generated
+// TypeDefinition for a resource under the authorization model:
 //   - Has no legacy RoleBinding relation
 //   - Has no rootbinding relation (ResourceKind bindings are handled via
 //     BatchCheck at the webhook layer, not via a model relation)
@@ -489,7 +482,7 @@ func TestAuthorizationModelsEqual_IdFieldIgnored(t *testing.T) {
 //     (or a union of This + TupleToUserset(parent) when a parent exists)
 //   - Each relation declares InternalUser and InternalUserGroup#member as
 //     directly-related user types
-func TestDirectPermissionModel_ResourceTypeDefinition(t *testing.T) {
+func TestAuthorizationModel_ResourceTypeDefinition(t *testing.T) {
 	permissions := []string{
 		"resourcemanager.miloapis.com/organizations.get",
 		"resourcemanager.miloapis.com/organizations.update",
@@ -500,15 +493,6 @@ func TestDirectPermissionModel_ResourceTypeDefinition(t *testing.T) {
 	}
 
 	td := getResourceTypeDefinition(permissions, node)
-
-	// No legacy RoleBinding relation — that is a hybrid/legacy-only concept.
-	assert.NotContains(t, td.Relations, RelationRoleBinding, "should not have RoleBinding relation")
-
-	// No rootbinding relation — ResourceKind PolicyBindings are resolved via
-	// BatchCheck at the webhook layer, not through a model relation. Adding
-	// rootbinding to the model would require model changes which is exactly
-	// what BatchCheck is designed to avoid.
-	assert.NotContains(t, td.Relations, RelationRootBinding, "should NOT have rootbinding relation")
 
 	// One hashed-permission relation per permission
 	for _, perm := range permissions {
@@ -538,11 +522,11 @@ func TestDirectPermissionModel_ResourceTypeDefinition(t *testing.T) {
 	}
 }
 
-// TestDirectPermissionModel_ParentInheritance verifies that permission relations
+// TestAuthorizationModel_ParentInheritance verifies that permission relations
 // on a child resource include This + TupleToUserset(parent) when the resource
 // has registered parents. There is no rootbinding branch — ResourceKind
 // bindings are resolved via BatchCheck at the webhook layer.
-func TestDirectPermissionModel_ParentInheritance(t *testing.T) {
+func TestAuthorizationModel_ParentInheritance(t *testing.T) {
 	permissions := []string{"compute.miloapis.com/workloads.get"}
 	node := &resourceGraphNode{
 		ResourceType:    "compute.miloapis.com/Workload",
@@ -553,9 +537,6 @@ func TestDirectPermissionModel_ParentInheritance(t *testing.T) {
 
 	// Parent relation should exist
 	assert.Contains(t, td.Relations, RelationParent, "should have parent relation")
-
-	// No rootbinding — ResourceKind bindings resolved via BatchCheck, not model.
-	assert.NotContains(t, td.Relations, RelationRootBinding, "should NOT have rootbinding relation")
 
 	hashed := hashPermission(permissions[0])
 	relation, ok := td.Relations[hashed]
@@ -576,10 +557,10 @@ func TestDirectPermissionModel_ParentInheritance(t *testing.T) {
 	assert.Equal(t, hashed, parentTTU.ComputedUserset.Relation)
 }
 
-// TestDirectPermissionModel_MinimalModel verifies that getMinimalAuthorizationModel
+// TestAuthorizationModel_MinimalModel verifies that getMinimalAuthorizationModel
 // returns only InternalUser and InternalUserGroup — no RoleBinding, InternalRole,
 // or Root.
-func TestDirectPermissionModel_MinimalModel(t *testing.T) {
+func TestAuthorizationModel_MinimalModel(t *testing.T) {
 	model := getMinimalAuthorizationModel()
 
 	require.Len(t, model.TypeDefinitions, 2, "minimal model should have exactly 2 types")

@@ -40,7 +40,6 @@ spec:
             - --configmap-name=$(CONFIGMAP_NAME)
             - --configmap-namespace=$(CONFIGMAP_NAMESPACE)
             - --health-probe-bind-address=:8081
-            - --feature-gates=$(FEATURE_GATES)
           env:
             - name: OPENFGA_API_URL
               value: openfga.openfga-system.svc.cluster.local:8081

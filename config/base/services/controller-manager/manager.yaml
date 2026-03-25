@@ -44,7 +44,6 @@ spec:
           - --leader-election-retry-period=$(LEADER_ELECTION_RETRY_PERIOD)
           - --configmap-name=$(CONFIGMAP_NAME)
           - --configmap-namespace=$(CONFIGMAP_NAMESPACE)
-          - --feature-gates=$(FEATURE_GATES)
         env:
         - name: POD_NAMESPACE
           valueFrom:

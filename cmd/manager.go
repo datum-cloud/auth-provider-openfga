@@ -10,11 +10,9 @@ import (
 	openfgav1 "github.com/openfga/api/proto/openfga/v1"
 	"github.com/spf13/cobra"
 	"go.miloapis.com/auth-provider-openfga/internal/controller"
-	_ "go.miloapis.com/auth-provider-openfga/internal/features" // register feature gates
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
-	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/client-go/rest"
 
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -89,8 +87,6 @@ func createManagerCommand() *cobra.Command {
 		"Namespace in which to create/update the authorization model ConfigMap. Defaults to the POD_NAMESPACE environment variable.")
 	cmd.Flags().StringVar(&configmapName, "configmap-name", "openfga-authorization-model",
 		"Name of the ConfigMap used to store the current authorization model ID.")
-
-	utilfeature.DefaultMutableFeatureGate.AddFlag(cmd.Flags())
 
 	// Mark required flags
 	if err := cmd.MarkFlagRequired("openfga-api-url"); err != nil {
