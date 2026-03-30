@@ -253,7 +253,21 @@ func (o *SubjectAccessReviewAuthorizer) Authorize(ctx context.Context, attribute
 		return authorizer.DecisionDeny, "", buildErr
 	}
 	rootResource := o.buildRootResource(protectedResource)
-	decision, reason, checkErr = o.executeBatchCheck(ctx, checkReq, rootResource)
+
+	// For project-scoped requests, also check iam.miloapis.com/Root:resourcemanager.miloapis.com/Project.
+	// This covers ResourceKind PolicyBindings targeting all Projects (e.g. staff bindings).
+	var extraChecks []*openfgav1.BatchCheckItem
+	if authCtx.isProjectScope() {
+		extraChecks = append(extraChecks, &openfgav1.BatchCheckItem{
+			TupleKey: &openfgav1.CheckRequestTupleKey{
+				User:     checkReq.TupleKey.User,
+				Relation: checkReq.TupleKey.Relation,
+				Object:   "iam.miloapis.com/Root:resourcemanager.miloapis.com/Project",
+			},
+			CorrelationId: "project-root",
+		})
+	}
+	decision, reason, checkErr = o.executeBatchCheck(ctx, checkReq, rootResource, extraChecks...)
 	authzStepDuration.WithLabelValues("openfga_batch_check").Observe(time.Since(stepStart).Seconds())
 
 	// Record total end-to-end duration at the authorizer level as well, labeled
@@ -461,11 +475,13 @@ func (o *SubjectAccessReviewAuthorizer) buildCheckRequest(ctx context.Context, a
 // executeBatchCheck executes an OpenFGA BatchCheck for a specific-resource
 // operation that may be covered by either a ResourceRef (instance-level) or
 // ResourceKind (Root-level) PolicyBinding. It sends both checks in a single
-// RPC and allows access if either result is allowed.
+// RPC and allows access if either result is allowed. Additional check items
+// (e.g. project-root for staff bindings) can be passed via extraChecks.
 func (o *SubjectAccessReviewAuthorizer) executeBatchCheck(
 	ctx context.Context,
 	checkReq *openfgav1.CheckRequest,
 	rootResource string,
+	extraChecks ...*openfgav1.BatchCheckItem,
 ) (authorizer.Decision, string, error) {
 	tracer := otel.GetTracerProvider().Tracer("authz-webhook")
 	ctx, batchSpan := tracer.Start(ctx, "openfga.batch_check")
@@ -485,27 +501,31 @@ func (o *SubjectAccessReviewAuthorizer) executeBatchCheck(
 		"root", rootResource,
 	)
 
+	checks := make([]*openfgav1.BatchCheckItem, 0, 2+len(extraChecks))
+	checks = append(checks,
+		&openfgav1.BatchCheckItem{
+			TupleKey: &openfgav1.CheckRequestTupleKey{
+				User:     checkReq.TupleKey.User,
+				Relation: checkReq.TupleKey.Relation,
+				Object:   checkReq.TupleKey.Object,
+			},
+			CorrelationId: "instance",
+		},
+		&openfgav1.BatchCheckItem{
+			TupleKey: &openfgav1.CheckRequestTupleKey{
+				User:     checkReq.TupleKey.User,
+				Relation: checkReq.TupleKey.Relation,
+				Object:   rootResource,
+			},
+			CorrelationId: "root",
+		},
+	)
+	checks = append(checks, extraChecks...)
+
 	batchResp, err := o.FGAClient.BatchCheck(ctx, &openfgav1.BatchCheckRequest{
 		StoreId:              o.FGAStoreID,
 		AuthorizationModelId: checkReq.AuthorizationModelId,
-		Checks: []*openfgav1.BatchCheckItem{
-			{
-				TupleKey: &openfgav1.CheckRequestTupleKey{
-					User:     checkReq.TupleKey.User,
-					Relation: checkReq.TupleKey.Relation,
-					Object:   checkReq.TupleKey.Object,
-				},
-				CorrelationId: "instance",
-			},
-			{
-				TupleKey: &openfgav1.CheckRequestTupleKey{
-					User:     checkReq.TupleKey.User,
-					Relation: checkReq.TupleKey.Relation,
-					Object:   rootResource,
-				},
-				CorrelationId: "root",
-			},
-		},
+		Checks:               checks,
 	})
 	if err != nil {
 		openfgaCheckTotal.WithLabelValues("false", "true").Inc()
