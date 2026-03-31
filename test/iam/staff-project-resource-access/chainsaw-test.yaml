@@ -5,32 +5,26 @@ metadata:
 spec:
   steps:
     - try:
-        # Update the compute-workloads ProtectedResource to declare Project
-        # as a parent. This mirrors the production configuration where workloads
-        # are project-scoped resources. The parent relationship enables the
-        # policy reconciler to write workload permission tuples to Root:Project
-        # for ResourceKind bindings targeting all Projects.
+        # Create a test-only ProtectedResource with Project as a parent.
+        # Uses a unique service/kind so it doesn't interfere with other tests.
         - apply:
             resource:
               apiVersion: iam.miloapis.com/v1alpha1
               kind: ProtectedResource
               metadata:
-                name: compute-workloads
+                name: stafftest-widget
               spec:
                 serviceRef:
-                  name: "compute.miloapis.com"
-                kind: Workload
-                plural: workloads
-                singular: workload
+                  name: "stafftest.miloapis.com"
+                kind: Widget
+                plural: widgets
+                singular: widget
                 permissions:
                   - list
                   - get
                   - create
                   - update
                   - delete
-                  - use
-                  - patch
-                  - watch
                 parentResources:
                   - apiGroup: resourcemanager.miloapis.com
                     kind: Project
@@ -62,11 +56,9 @@ spec:
                 value: ($stdout)
 
         # Create ResourceKind PolicyBinding targeting all Projects.
-        # This simulates staff-level access: the binding grants permissions
-        # on ALL projects via the ResourceKind selector. The controller
-        # writes tuples to iam.miloapis.com/Root:resourcemanager.miloapis.com/Project
-        # for all effective permissions, including workload permissions inherited
-        # through the Project → Workload parent relationship.
+        # The controller writes tuples to Root:resourcemanager.miloapis.com/Project
+        # for all effective permissions, including widget permissions inherited
+        # through the Project → Widget parent relationship.
         - apply:
             resource:
               apiVersion: iam.miloapis.com/v1alpha1
@@ -97,16 +89,15 @@ spec:
                 name: Ready
                 value: 'true'
 
-        # Test: staff user accessing a project-scoped resource (compute workload)
+        # Test: staff user accessing a project-scoped resource (widget)
         # in a project they don't own. The SAR extras set the parent context to
         # a Project, making this a project-scoped request.
         #
-        # BUG (issue #90): The webhook currently checks:
+        # Without the fix (issue #90), the webhook only checks:
         #   1. instance: resourcemanager.miloapis.com/Project:other-users-project
-        #   2. root: iam.miloapis.com/Root:compute.miloapis.com/Workload
-        # Neither matches the staff binding on Root:resourcemanager.miloapis.com/Project,
-        # so the check incorrectly denies access. The fix adds a third check:
-        #   3. project-root: iam.miloapis.com/Root:resourcemanager.miloapis.com/Project
+        #   2. root: iam.miloapis.com/Root:stafftest.miloapis.com/Widget
+        # Neither matches the staff binding on Root:resourcemanager.miloapis.com/Project.
+        # The fix adds a third scope-root check against Root:resourcemanager.miloapis.com/Project.
         - apply:
             resource:
               apiVersion: v1
@@ -137,11 +128,11 @@ spec:
                           },
                           "groups": ["system:authenticated"],
                           "resourceAttributes": {
-                            "group": "compute.miloapis.com",
-                            "resource": "workloads",
+                            "group": "stafftest.miloapis.com",
+                            "resource": "widgets",
                             "version": "v1alpha1",
                             "verb": "get",
-                            "name": "some-workload"
+                            "name": "some-widget"
                           }
                         }
                       }
@@ -174,7 +165,6 @@ spec:
                 value: "Succeeded"
 
         # Test: staff user listing project-scoped resources (collection operation).
-        # This also exercises the project scope path — the parent context is a Project.
         - apply:
             resource:
               apiVersion: v1
@@ -205,8 +195,8 @@ spec:
                           },
                           "groups": ["system:authenticated"],
                           "resourceAttributes": {
-                            "group": "compute.miloapis.com",
-                            "resource": "workloads",
+                            "group": "stafftest.miloapis.com",
+                            "resource": "widgets",
                             "version": "v1alpha1",
                             "verb": "list"
                           }
@@ -248,26 +238,7 @@ spec:
             apiVersion: iam.miloapis.com/v1alpha1
             kind: PolicyBinding
       finally:
-        # Restore the original compute-workloads ProtectedResource without
-        # parentResources so other tests are not affected.
-        - apply:
-            resource:
-              apiVersion: iam.miloapis.com/v1alpha1
-              kind: ProtectedResource
-              metadata:
-                name: compute-workloads
-              spec:
-                serviceRef:
-                  name: "compute.miloapis.com"
-                kind: Workload
-                plural: workloads
-                singular: workload
-                permissions:
-                  - list
-                  - get
-                  - create
-                  - update
-                  - delete
-                  - use
-                  - patch
-                  - watch
+        # Clean up the test-only ProtectedResource
+        - script:
+            content: |
+              kubectl delete protectedresources.iam.miloapis.com stafftest-widget --ignore-not-found
