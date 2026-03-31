@@ -1,0 +1,546 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: overlapping-policy-bindings
+spec:
+  description: |
+    Verifies that multiple PolicyBindings targeting the same resource with
+    overlapping subjects all reconcile to Ready without conflicting on OpenFGA
+    tuple writes. Reproduces the BindingCreationFailed / Code(2017) "tuple
+    already exists" error caused by sibling binding aggregation.
+  steps:
+    - name: setup-and-create-bindings
+      try:
+        # Create the role.
+        - apply:
+            file: roles/org-viewer.yaml
+        - wait:
+            apiVersion: iam.miloapis.com/v1alpha1
+            kind: Role
+            name: overlapping-test-org-viewer
+            timeout: 5m
+            for:
+              condition:
+                name: Ready
+                value: "true"
+
+        # Create users and org, capturing outputs.
+        - create:
+            file: user-a.yaml
+            outputs:
+              - name: userA
+                value: (@)
+        - create:
+            file: user-b.yaml
+            outputs:
+              - name: userB
+                value: (@)
+        - create:
+            file: organization.yaml
+            outputs:
+              - name: org
+                value: (@)
+
+        # Binding A: user-a only → org-viewer on overlap-test-org.
+        - apply:
+            resource:
+              apiVersion: iam.miloapis.com/v1alpha1
+              kind: PolicyBinding
+              metadata:
+                name: binding-a-user-a-only
+              spec:
+                roleRef:
+                  name: overlapping-test-org-viewer
+                  namespace: ($namespace)
+                subjects:
+                  - kind: User
+                    name: overlap-user-a
+                    uid: ($userA.metadata.uid)
+                resourceSelector:
+                  resourceRef:
+                    apiGroup: resourcemanager.miloapis.com
+                    kind: Organization
+                    name: overlap-test-org
+                    uid: ($org.metadata.uid)
+        - wait:
+            apiVersion: iam.miloapis.com/v1alpha1
+            kind: PolicyBinding
+            name: binding-a-user-a-only
+            timeout: 5m
+            for:
+              condition:
+                name: Ready
+                value: "true"
+
+        # Binding B: user-a AND user-b → same role, same resource.
+        # user-a overlaps with Binding A. The controller must not fail
+        # trying to write tuples that already exist for user-a.
+        - apply:
+            resource:
+              apiVersion: iam.miloapis.com/v1alpha1
+              kind: PolicyBinding
+              metadata:
+                name: binding-b-both-users
+              spec:
+                roleRef:
+                  name: overlapping-test-org-viewer
+                  namespace: ($namespace)
+                subjects:
+                  - kind: User
+                    name: overlap-user-a
+                    uid: ($userA.metadata.uid)
+                  - kind: User
+                    name: overlap-user-b
+                    uid: ($userB.metadata.uid)
+                resourceSelector:
+                  resourceRef:
+                    apiGroup: resourcemanager.miloapis.com
+                    kind: Organization
+                    name: overlap-test-org
+                    uid: ($org.metadata.uid)
+        - wait:
+            apiVersion: iam.miloapis.com/v1alpha1
+            kind: PolicyBinding
+            name: binding-b-both-users
+            timeout: 5m
+            for:
+              condition:
+                name: Ready
+                value: "true"
+
+        # Verify both bindings are Ready (the wait steps above already confirmed
+        # Ready=true; assert the full condition set here to catch any regressions).
+        - assert:
+            resource:
+              apiVersion: iam.miloapis.com/v1alpha1
+              kind: PolicyBinding
+              metadata:
+                name: binding-a-user-a-only
+              status:
+                conditions:
+                  - type: TargetValid
+                    status: "True"
+                    reason: ValidationSuccessful
+                  - type: SubjectValid
+                    status: "True"
+                    reason: ValidationSuccessful
+                  - type: RoleValid
+                    status: "True"
+                    reason: ValidationSuccessful
+                  - type: Ready
+                    status: "True"
+                    reason: ReconciliationSuccessful
+        - assert:
+            resource:
+              apiVersion: iam.miloapis.com/v1alpha1
+              kind: PolicyBinding
+              metadata:
+                name: binding-b-both-users
+              status:
+                conditions:
+                  - type: TargetValid
+                    status: "True"
+                    reason: ValidationSuccessful
+                  - type: SubjectValid
+                    status: "True"
+                    reason: ValidationSuccessful
+                  - type: RoleValid
+                    status: "True"
+                    reason: ValidationSuccessful
+                  - type: Ready
+                    status: "True"
+                    reason: ReconciliationSuccessful
+
+        # Verify user-a is authorized.
+        - apply:
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: overlap-authz-user-a
+              spec:
+                restartPolicy: Never
+                containers:
+                - name: curl
+                  image: curlimages/curl:latest
+                  command: ["/bin/sh", "-c"]
+                  args:
+                    - |
+                      response=$(curl -ksS https://auth-provider-openfga-authz-webhook.auth-provider-openfga-system.svc.cluster.local:8090/apis/authorization.k8s.io/v1/subjectaccessreviews \
+                        -H "Content-Type: application/json" \
+                        -d @- << EOF
+                      {
+                        "apiVersion": "authorization.k8s.io/v1",
+                        "kind": "SubjectAccessReview",
+                        "spec": {
+                          "user": "overlap-user-a",
+                          "uid": "overlap-user-a",
+                          "extra": {
+                            "resourcemanager.miloapis.com/organization-id": ["overlap-test-org"]
+                          },
+                          "groups": ["system:authenticated"],
+                          "resourceAttributes": {
+                            "group": "resourcemanager.miloapis.com",
+                            "resource": "organizations",
+                            "version": "v1alpha1",
+                            "verb": "get",
+                            "name": "overlap-test-org"
+                          }
+                        }
+                      }
+                      EOF
+                      )
+                      echo "Webhook response: $response"
+                      if ! echo "$response" | grep -q '"kind":"SubjectAccessReview"'; then
+                        echo "FAIL: invalid response format"
+                        exit 1
+                      fi
+                      if echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*true'; then
+                        echo "PASS: user-a authorized"
+                        exit 0
+                      else
+                        echo "FAIL: user-a not authorized"
+                        exit 1
+                      fi
+        - wait:
+            apiVersion: v1
+            kind: Pod
+            name: overlap-authz-user-a
+            timeout: 30s
+            for:
+              jsonPath:
+                path: "status.phase"
+                value: "Succeeded"
+
+        # Verify user-b is authorized.
+        - apply:
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: overlap-authz-user-b
+              spec:
+                restartPolicy: Never
+                containers:
+                - name: curl
+                  image: curlimages/curl:latest
+                  command: ["/bin/sh", "-c"]
+                  args:
+                    - |
+                      response=$(curl -ksS https://auth-provider-openfga-authz-webhook.auth-provider-openfga-system.svc.cluster.local:8090/apis/authorization.k8s.io/v1/subjectaccessreviews \
+                        -H "Content-Type: application/json" \
+                        -d @- << EOF
+                      {
+                        "apiVersion": "authorization.k8s.io/v1",
+                        "kind": "SubjectAccessReview",
+                        "spec": {
+                          "user": "overlap-user-b",
+                          "uid": "overlap-user-b",
+                          "extra": {
+                            "resourcemanager.miloapis.com/organization-id": ["overlap-test-org"]
+                          },
+                          "groups": ["system:authenticated"],
+                          "resourceAttributes": {
+                            "group": "resourcemanager.miloapis.com",
+                            "resource": "organizations",
+                            "version": "v1alpha1",
+                            "verb": "get",
+                            "name": "overlap-test-org"
+                          }
+                        }
+                      }
+                      EOF
+                      )
+                      echo "Webhook response: $response"
+                      if ! echo "$response" | grep -q '"kind":"SubjectAccessReview"'; then
+                        echo "FAIL: invalid response format"
+                        exit 1
+                      fi
+                      if echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*true'; then
+                        echo "PASS: user-b authorized"
+                        exit 0
+                      else
+                        echo "FAIL: user-b not authorized"
+                        exit 1
+                      fi
+        - wait:
+            apiVersion: v1
+            kind: Pod
+            name: overlap-authz-user-b
+            timeout: 30s
+            for:
+              jsonPath:
+                path: "status.phase"
+                value: "Succeeded"
+
+        # Delete Binding A. user-a should still be authorized via Binding B.
+        - delete:
+            file: binding-a.yaml
+        - wait:
+            apiVersion: iam.miloapis.com/v1alpha1
+            kind: PolicyBinding
+            name: binding-a-user-a-only
+            timeout: 5m
+            for:
+              deletion: {}
+
+        # Verify user-a still authorized through binding-b after binding-a deleted.
+        - apply:
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: overlap-authz-user-a-after-delete
+              spec:
+                restartPolicy: Never
+                containers:
+                - name: curl
+                  image: curlimages/curl:latest
+                  command: ["/bin/sh", "-c"]
+                  args:
+                    - |
+                      response=$(curl -ksS https://auth-provider-openfga-authz-webhook.auth-provider-openfga-system.svc.cluster.local:8090/apis/authorization.k8s.io/v1/subjectaccessreviews \
+                        -H "Content-Type: application/json" \
+                        -d @- << EOF
+                      {
+                        "apiVersion": "authorization.k8s.io/v1",
+                        "kind": "SubjectAccessReview",
+                        "spec": {
+                          "user": "overlap-user-a",
+                          "uid": "overlap-user-a",
+                          "extra": {
+                            "resourcemanager.miloapis.com/organization-id": ["overlap-test-org"]
+                          },
+                          "groups": ["system:authenticated"],
+                          "resourceAttributes": {
+                            "group": "resourcemanager.miloapis.com",
+                            "resource": "organizations",
+                            "version": "v1alpha1",
+                            "verb": "get",
+                            "name": "overlap-test-org"
+                          }
+                        }
+                      }
+                      EOF
+                      )
+                      echo "Webhook response: $response"
+                      if ! echo "$response" | grep -q '"kind":"SubjectAccessReview"'; then
+                        echo "FAIL: invalid response format"
+                        exit 1
+                      fi
+                      if echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*true'; then
+                        echo "PASS: user-a still authorized via binding-b"
+                        exit 0
+                      else
+                        echo "FAIL: user-a lost access after binding-a deletion"
+                        exit 1
+                      fi
+        - wait:
+            apiVersion: v1
+            kind: Pod
+            name: overlap-authz-user-a-after-delete
+            timeout: 30s
+            for:
+              jsonPath:
+                path: "status.phase"
+                value: "Succeeded"
+
+        # Verify user-b still authorized after binding-a deleted.
+        - apply:
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: overlap-authz-user-b-after-delete
+              spec:
+                restartPolicy: Never
+                containers:
+                - name: curl
+                  image: curlimages/curl:latest
+                  command: ["/bin/sh", "-c"]
+                  args:
+                    - |
+                      response=$(curl -ksS https://auth-provider-openfga-authz-webhook.auth-provider-openfga-system.svc.cluster.local:8090/apis/authorization.k8s.io/v1/subjectaccessreviews \
+                        -H "Content-Type: application/json" \
+                        -d @- << EOF
+                      {
+                        "apiVersion": "authorization.k8s.io/v1",
+                        "kind": "SubjectAccessReview",
+                        "spec": {
+                          "user": "overlap-user-b",
+                          "uid": "overlap-user-b",
+                          "extra": {
+                            "resourcemanager.miloapis.com/organization-id": ["overlap-test-org"]
+                          },
+                          "groups": ["system:authenticated"],
+                          "resourceAttributes": {
+                            "group": "resourcemanager.miloapis.com",
+                            "resource": "organizations",
+                            "version": "v1alpha1",
+                            "verb": "get",
+                            "name": "overlap-test-org"
+                          }
+                        }
+                      }
+                      EOF
+                      )
+                      echo "Webhook response: $response"
+                      if ! echo "$response" | grep -q '"kind":"SubjectAccessReview"'; then
+                        echo "FAIL: invalid response format"
+                        exit 1
+                      fi
+                      if echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*true'; then
+                        echo "PASS: user-b still authorized"
+                        exit 0
+                      else
+                        echo "FAIL: user-b lost access"
+                        exit 1
+                      fi
+        - wait:
+            apiVersion: v1
+            kind: Pod
+            name: overlap-authz-user-b-after-delete
+            timeout: 30s
+            for:
+              jsonPath:
+                path: "status.phase"
+                value: "Succeeded"
+        # Delete Binding B. Both users should now lose access entirely.
+        - delete:
+            file: binding-b.yaml
+        - wait:
+            apiVersion: iam.miloapis.com/v1alpha1
+            kind: PolicyBinding
+            name: binding-b-both-users
+            timeout: 5m
+            for:
+              deletion: {}
+
+        # Verify user-a is denied after all bindings deleted.
+        - apply:
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: overlap-authz-user-a-denied
+              spec:
+                restartPolicy: Never
+                containers:
+                - name: curl
+                  image: curlimages/curl:latest
+                  command: ["/bin/sh", "-c"]
+                  args:
+                    - |
+                      response=$(curl -ksS https://auth-provider-openfga-authz-webhook.auth-provider-openfga-system.svc.cluster.local:8090/apis/authorization.k8s.io/v1/subjectaccessreviews \
+                        -H "Content-Type: application/json" \
+                        -d @- << EOF
+                      {
+                        "apiVersion": "authorization.k8s.io/v1",
+                        "kind": "SubjectAccessReview",
+                        "spec": {
+                          "user": "overlap-user-a",
+                          "uid": "overlap-user-a",
+                          "extra": {
+                            "resourcemanager.miloapis.com/organization-id": ["overlap-test-org"]
+                          },
+                          "groups": ["system:authenticated"],
+                          "resourceAttributes": {
+                            "group": "resourcemanager.miloapis.com",
+                            "resource": "organizations",
+                            "version": "v1alpha1",
+                            "verb": "get",
+                            "name": "overlap-test-org"
+                          }
+                        }
+                      }
+                      EOF
+                      )
+                      echo "Webhook response: $response"
+                      if ! echo "$response" | grep -q '"kind":"SubjectAccessReview"'; then
+                        echo "FAIL: invalid response format"
+                        exit 1
+                      fi
+                      if echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*false'; then
+                        echo "PASS: user-a correctly denied after all bindings deleted"
+                        exit 0
+                      else
+                        echo "FAIL: user-a still has access after all bindings deleted"
+                        exit 1
+                      fi
+        - wait:
+            apiVersion: v1
+            kind: Pod
+            name: overlap-authz-user-a-denied
+            timeout: 30s
+            for:
+              jsonPath:
+                path: "status.phase"
+                value: "Succeeded"
+
+        # Verify user-b is denied after all bindings deleted.
+        - apply:
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: overlap-authz-user-b-denied
+              spec:
+                restartPolicy: Never
+                containers:
+                - name: curl
+                  image: curlimages/curl:latest
+                  command: ["/bin/sh", "-c"]
+                  args:
+                    - |
+                      response=$(curl -ksS https://auth-provider-openfga-authz-webhook.auth-provider-openfga-system.svc.cluster.local:8090/apis/authorization.k8s.io/v1/subjectaccessreviews \
+                        -H "Content-Type: application/json" \
+                        -d @- << EOF
+                      {
+                        "apiVersion": "authorization.k8s.io/v1",
+                        "kind": "SubjectAccessReview",
+                        "spec": {
+                          "user": "overlap-user-b",
+                          "uid": "overlap-user-b",
+                          "extra": {
+                            "resourcemanager.miloapis.com/organization-id": ["overlap-test-org"]
+                          },
+                          "groups": ["system:authenticated"],
+                          "resourceAttributes": {
+                            "group": "resourcemanager.miloapis.com",
+                            "resource": "organizations",
+                            "version": "v1alpha1",
+                            "verb": "get",
+                            "name": "overlap-test-org"
+                          }
+                        }
+                      }
+                      EOF
+                      )
+                      echo "Webhook response: $response"
+                      if ! echo "$response" | grep -q '"kind":"SubjectAccessReview"'; then
+                        echo "FAIL: invalid response format"
+                        exit 1
+                      fi
+                      if echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*false'; then
+                        echo "PASS: user-b correctly denied after all bindings deleted"
+                        exit 0
+                      else
+                        echo "FAIL: user-b still has access after all bindings deleted"
+                        exit 1
+                      fi
+        - wait:
+            apiVersion: v1
+            kind: Pod
+            name: overlap-authz-user-b-denied
+            timeout: 30s
+            for:
+              jsonPath:
+                path: "status.phase"
+                value: "Succeeded"
+      catch:
+        - describe:
+            apiVersion: iam.miloapis.com/v1alpha1
+            kind: PolicyBinding
+        - describe:
+            apiVersion: v1
+            kind: Pod

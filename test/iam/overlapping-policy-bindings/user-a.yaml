@@ -1,0 +1,6 @@
+apiVersion: iam.miloapis.com/v1alpha1
+kind: User
+metadata:
+  name: overlap-user-a
+spec:
+  email: overlap-user-a@test.datum.net
