@@ -1,0 +1,244 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: staff-project-resource-access
+spec:
+  steps:
+    - try:
+        # Create a test-only ProtectedResource with Project as a parent.
+        # Uses a unique service/kind so it doesn't interfere with other tests.
+        - apply:
+            resource:
+              apiVersion: iam.miloapis.com/v1alpha1
+              kind: ProtectedResource
+              metadata:
+                name: stafftest-widget
+              spec:
+                serviceRef:
+                  name: "stafftest.miloapis.com"
+                kind: Widget
+                plural: widgets
+                singular: widget
+                permissions:
+                  - list
+                  - get
+                  - create
+                  - update
+                  - delete
+                parentResources:
+                  - apiGroup: resourcemanager.miloapis.com
+                    kind: Project
+
+        # Create a role with project-scoped resource permissions
+        - apply:
+            file: roles/staff-project-admin.yaml
+        - wait:
+            apiVersion: iam.miloapis.com/v1alpha1
+            kind: Role
+            name: staff-project-admin
+            timeout: 5m
+            for:
+              condition:
+                name: Ready
+                value: "true"
+
+        # Create test user
+        - apply:
+            file: user.yaml
+
+        # Fetch the test user UID
+        - script:
+            content: |
+              kubectl get users.iam.miloapis.com test-staff-user \
+                -o jsonpath='{.metadata.uid}'
+            outputs:
+              - name: userUID
+                value: ($stdout)
+
+        # Create ResourceKind PolicyBinding targeting all Projects.
+        # The controller writes tuples to Root:resourcemanager.miloapis.com/Project
+        # for all effective permissions, including widget permissions inherited
+        # through the Project → Widget parent relationship.
+        - apply:
+            resource:
+              apiVersion: iam.miloapis.com/v1alpha1
+              kind: PolicyBinding
+              metadata:
+                name: staff-all-projects-binding
+              spec:
+                roleRef:
+                  name: staff-project-admin
+                  namespace: ($namespace)
+                subjects:
+                  - kind: User
+                    name: "test-staff-user"
+                    uid: ($userUID)
+                resourceSelector:
+                  resourceKind:
+                    apiGroup: "resourcemanager.miloapis.com"
+                    kind: Project
+
+        # Wait for PolicyBinding to be ready
+        - wait:
+            apiVersion: iam.miloapis.com/v1alpha1
+            kind: PolicyBinding
+            name: staff-all-projects-binding
+            timeout: 5m
+            for:
+              condition:
+                name: Ready
+                value: 'true'
+
+        # Test: staff user accessing a project-scoped resource (widget)
+        # in a project they don't own. The SAR extras set the parent context to
+        # a Project, making this a project-scoped request.
+        #
+        # Without the fix (issue #90), the webhook only checks:
+        #   1. instance: resourcemanager.miloapis.com/Project:other-users-project
+        #   2. root: iam.miloapis.com/Root:stafftest.miloapis.com/Widget
+        # Neither matches the staff binding on Root:resourcemanager.miloapis.com/Project.
+        # The fix adds a third scope-root check against Root:resourcemanager.miloapis.com/Project.
+        - apply:
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: staff-project-resource-get
+              spec:
+                restartPolicy: Never
+                containers:
+                - name: curl
+                  image: curlimages/curl:latest
+                  command: ["/bin/sh", "-c"]
+                  args:
+                    - |
+                      response=$(curl -ksS https://auth-provider-openfga-authz-webhook.auth-provider-openfga-system.svc.cluster.local:8090/apis/authorization.k8s.io/v1/subjectaccessreviews \
+                        -H "Content-Type: application/json" \
+                        -d @- << EOF
+                      {
+                        "apiVersion": "authorization.k8s.io/v1",
+                        "kind": "SubjectAccessReview",
+                        "spec": {
+                          "user": "test-staff-user",
+                          "uid": "test-staff-user",
+                          "extra": {
+                            "iam.miloapis.com/parent-api-group": ["resourcemanager.miloapis.com"],
+                            "iam.miloapis.com/parent-type": ["Project"],
+                            "iam.miloapis.com/parent-name": ["other-users-project"]
+                          },
+                          "groups": ["system:authenticated"],
+                          "resourceAttributes": {
+                            "group": "stafftest.miloapis.com",
+                            "resource": "widgets",
+                            "version": "v1alpha1",
+                            "verb": "get",
+                            "name": "some-widget"
+                          }
+                        }
+                      }
+                      EOF
+                      )
+                      echo "Webhook response for staff project-scoped get: $response"
+                      if ! echo "$response" | grep -q '"kind":"SubjectAccessReview"'; then
+                        echo "Test failed - invalid response format"
+                        exit 1
+                      fi
+                      if echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*true'; then
+                        echo "Test passed - staff user granted access to project-scoped resource"
+                        exit 0
+                      elif echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*false'; then
+                        echo "Test failed - staff user denied access to project-scoped resource (issue #90)"
+                        exit 1
+                      else
+                        echo "Test failed - could not determine allowed status"
+                        exit 1
+                      fi
+
+        - wait:
+            apiVersion: v1
+            kind: Pod
+            name: staff-project-resource-get
+            timeout: 30s
+            for:
+              jsonPath:
+                path: "status.phase"
+                value: "Succeeded"
+
+        # Test: staff user listing project-scoped resources (collection operation).
+        - apply:
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: staff-project-resource-list
+              spec:
+                restartPolicy: Never
+                containers:
+                - name: curl
+                  image: curlimages/curl:latest
+                  command: ["/bin/sh", "-c"]
+                  args:
+                    - |
+                      response=$(curl -ksS https://auth-provider-openfga-authz-webhook.auth-provider-openfga-system.svc.cluster.local:8090/apis/authorization.k8s.io/v1/subjectaccessreviews \
+                        -H "Content-Type: application/json" \
+                        -d @- << EOF
+                      {
+                        "apiVersion": "authorization.k8s.io/v1",
+                        "kind": "SubjectAccessReview",
+                        "spec": {
+                          "user": "test-staff-user",
+                          "uid": "test-staff-user",
+                          "extra": {
+                            "iam.miloapis.com/parent-api-group": ["resourcemanager.miloapis.com"],
+                            "iam.miloapis.com/parent-type": ["Project"],
+                            "iam.miloapis.com/parent-name": ["other-users-project"]
+                          },
+                          "groups": ["system:authenticated"],
+                          "resourceAttributes": {
+                            "group": "stafftest.miloapis.com",
+                            "resource": "widgets",
+                            "version": "v1alpha1",
+                            "verb": "list"
+                          }
+                        }
+                      }
+                      EOF
+                      )
+                      echo "Webhook response for staff project-scoped list: $response"
+                      if ! echo "$response" | grep -q '"kind":"SubjectAccessReview"'; then
+                        echo "Test failed - invalid response format"
+                        exit 1
+                      fi
+                      if echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*true'; then
+                        echo "Test passed - staff user granted list access to project-scoped resources"
+                        exit 0
+                      elif echo "$response" | grep -q '"allowed"[[:space:]]*:[[:space:]]*false'; then
+                        echo "Test failed - staff user denied list access to project-scoped resources (issue #90)"
+                        exit 1
+                      else
+                        echo "Test failed - could not determine allowed status"
+                        exit 1
+                      fi
+
+        - wait:
+            apiVersion: v1
+            kind: Pod
+            name: staff-project-resource-list
+            timeout: 30s
+            for:
+              jsonPath:
+                path: "status.phase"
+                value: "Succeeded"
+
+      catch:
+        - describe:
+            apiVersion: v1
+            kind: Pod
+        - describe:
+            apiVersion: iam.miloapis.com/v1alpha1
+            kind: PolicyBinding
+      finally:
+        # Clean up the test-only ProtectedResource
+        - script:
+            content: |
+              kubectl delete protectedresources.iam.miloapis.com stafftest-widget --ignore-not-found

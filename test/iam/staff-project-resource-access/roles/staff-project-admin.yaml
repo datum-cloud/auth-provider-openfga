@@ -1,0 +1,11 @@
+apiVersion: iam.miloapis.com/v1alpha1
+kind: Role
+metadata:
+  name: staff-project-admin
+spec:
+  launchStage: Beta
+  includedPermissions:
+    - stafftest.miloapis.com/widgets.get
+    - stafftest.miloapis.com/widgets.list
+    - resourcemanager.miloapis.com/projects.get
+    - resourcemanager.miloapis.com/projects.list
