@@ -254,17 +254,19 @@ func (o *SubjectAccessReviewAuthorizer) Authorize(ctx context.Context, attribute
 	}
 	rootResource := o.buildRootResource(protectedResource)
 
-	// For project-scoped requests, also check iam.miloapis.com/Root:resourcemanager.miloapis.com/Project.
-	// This covers ResourceKind PolicyBindings targeting all Projects (e.g. staff bindings).
+	// For scoped requests (project or organization), also check the scope-level
+	// root object. This covers ResourceKind PolicyBindings targeting all instances
+	// of the scope type (e.g. staff bindings on all Projects or all Organizations).
 	var extraChecks []*openfgav1.BatchCheckItem
-	if authCtx.isProjectScope() {
+	if authCtx.parentContext != nil {
+		scopeRoot := fmt.Sprintf("iam.miloapis.com/Root:%s/%s", authCtx.parentContext.apiGroup, authCtx.parentContext.kind)
 		extraChecks = append(extraChecks, &openfgav1.BatchCheckItem{
 			TupleKey: &openfgav1.CheckRequestTupleKey{
 				User:     checkReq.TupleKey.User,
 				Relation: checkReq.TupleKey.Relation,
-				Object:   "iam.miloapis.com/Root:resourcemanager.miloapis.com/Project",
+				Object:   scopeRoot,
 			},
-			CorrelationId: "project-root",
+			CorrelationId: "scope-root",
 		})
 	}
 	decision, reason, checkErr = o.executeBatchCheck(ctx, checkReq, rootResource, extraChecks...)
