@@ -1,0 +1,4 @@
+apiVersion: iam.miloapis.com/v1alpha1
+kind: PolicyBinding
+metadata:
+  name: binding-b-both-users

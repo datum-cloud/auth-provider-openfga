@@ -5,10 +5,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/google/go-cmp/cmp"
-	"github.com/google/go-cmp/cmp/cmpopts"
 	openfgav1 "github.com/openfga/api/proto/openfga/v1"
 	iamdatumapiscomv1alpha1 "go.miloapis.com/milo/pkg/apis/iam/v1alpha1"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
@@ -35,8 +34,9 @@ func (r *PolicyReconciler) ReconcilePolicy(ctx context.Context, binding iamdatum
 	return nil
 }
 
-// DeletePolicy removes all tuples that were written for a
-// PolicyBinding.
+// DeletePolicy removes only the tuples that are exclusively owned by this
+// PolicyBinding. Tuples that are also desired by another binding targeting the
+// same resource with overlapping subjects are preserved.
 func (r *PolicyReconciler) DeletePolicy(ctx context.Context, binding iamdatumapiscomv1alpha1.PolicyBinding) error {
 	log := logf.FromContext(ctx)
 
@@ -45,40 +45,62 @@ func (r *PolicyReconciler) DeletePolicy(ctx context.Context, binding iamdatumapi
 		return fmt.Errorf("failed to get target object from resource selector: %w", err)
 	}
 
-	directTuples, err := r.getExistingTuples(ctx, binding, targetObject)
+	existingTuples, err := r.getExistingTuples(ctx, binding, targetObject)
 	if err != nil {
 		return fmt.Errorf("failed to retrieve existing direct tuples for deletion: %w", err)
 	}
 
-	if len(directTuples) == 0 {
+	if len(existingTuples) == 0 {
 		log.Info("No existing tuples found for PolicyBinding, nothing to delete", "binding", binding.Name)
+		return nil
+	}
+
+	validPerms, err := r.getHierarchicalPermissionsForSelector(ctx, binding.Spec.ResourceSelector)
+	if err != nil {
+		return fmt.Errorf("failed to compute hierarchical permissions: %w", err)
+	}
+
+	// Find tuples that other overlapping bindings still need, so we don't
+	// delete them.
+	stillDesired, err := r.siblingDesiredTuples(ctx, binding, targetObject, validPerms)
+	if err != nil {
+		return fmt.Errorf("failed to compute sibling desired tuples: %w", err)
+	}
+
+	// Only delete tuples that no remaining binding needs.
+	// diffTuples(existing, current) returns (added, removed) where:
+	//   removed = in existing but NOT in current
+	//   added   = in current but NOT in existing
+	// We want to delete tuples in existingTuples that are NOT in stillDesired.
+	_, toDelete := diffTuples(existingTuples, stillDesired)
+	if len(toDelete) == 0 {
+		log.Info("All tuples for PolicyBinding are still needed by other bindings, nothing to delete", "binding", binding.Name)
 		return nil
 	}
 
 	_, err = r.Client.Write(ctx, &openfgav1.WriteRequest{
 		StoreId: r.StoreID,
 		Deletes: &openfgav1.WriteRequestDeletes{
-			TupleKeys: convertTuplesForDelete(directTuples),
+			TupleKeys: convertTuplesForDelete(toDelete),
 		},
 	})
 	if err != nil {
 		return fmt.Errorf("failed to delete policy tuples: %w", err)
 	}
 
-	log.Info("Successfully deleted tuples for PolicyBinding", "binding", binding.Name, "tupleCount", len(directTuples))
+	log.Info("Successfully deleted tuples for PolicyBinding", "binding", binding.Name, "tupleCount", len(toDelete))
 	return nil
 }
 
 // ---------------------------------------------------
 
-// reconcilePolicy computes the full desired tuple set for all
-// PolicyBindings that share the same (subject, targetObject) pair as the
-// triggering binding, then diffs against the existing tuples in OpenFGA.
+// reconcilePolicy computes the desired tuple set for the single triggering
+// PolicyBinding and diffs it against the existing tuples in OpenFGA.
 //
-// This full-set approach prevents one binding from clobbering tuples written
-// by sibling bindings. For example, if two bindings both grant the staff-users
-// group permissions on Root:Organization, the desired set is the union of both
-// bindings' permissions, and the diff only removes tuples that no binding wants.
+// Each binding independently manages tuples for its own subjects only.
+// getExistingTuples reads all tuples for the binding's subjects on the target
+// object, so diffTuples will not re-write tuples that are already present,
+// regardless of which binding originally created them.
 func (r *PolicyReconciler) reconcilePolicy(ctx context.Context, binding iamdatumapiscomv1alpha1.PolicyBinding) error {
 	targetObject, err := r.getTargetObjectFromResourceSelector(binding.Spec.ResourceSelector)
 	if err != nil {
@@ -90,39 +112,45 @@ func (r *PolicyReconciler) reconcilePolicy(ctx context.Context, binding iamdatum
 		return fmt.Errorf("failed to compute hierarchical permissions: %w", err)
 	}
 
-	// Find all sibling PolicyBindings that share the same target object and
-	// have at least one overlapping subject. The union of their desired tuples
-	// is the complete desired state for these subjects on this object.
-	siblings, err := r.findSiblingBindings(ctx, binding)
+	role, err := r.fetchRole(ctx, binding)
 	if err != nil {
-		return fmt.Errorf("failed to find sibling bindings: %w", err)
+		return fmt.Errorf("failed to fetch role: %w", err)
 	}
 
-	// Build the union of desired tuples across all sibling bindings.
-	var allDesired []*openfgav1.TupleKey
-	for i := range siblings {
-		role, err := r.fetchRole(ctx, siblings[i])
-		if err != nil {
-			// Skip bindings with missing roles — they'll be handled by
-			// their own reconciliation which will set Ready=False.
-			continue
-		}
-		tuples, err := r.buildPermissionTuples(siblings[i], role, targetObject, validPerms)
-		if err != nil {
-			continue
-		}
-		allDesired = append(allDesired, tuples...)
+	desired, err := r.buildPermissionTuples(binding, role, targetObject, validPerms)
+	if err != nil {
+		return fmt.Errorf("failed to build permission tuples: %w", err)
 	}
-
-	// Deduplicate: multiple bindings may grant the same permission.
-	allDesired = deduplicateTuples(allDesired)
 
 	existingTuples, err := r.getExistingTuples(ctx, binding, targetObject)
 	if err != nil {
 		return fmt.Errorf("failed to retrieve existing tuples: %w", err)
 	}
 
-	added, removed := diffTuples(existingTuples, allDesired)
+	added, removed := diffTuples(existingTuples, desired)
+
+	// Filter removals: don't remove tuples that other overlapping bindings
+	// still need. This prevents clobbering permissions granted by sibling
+	// bindings that use different roles on the same subject+resource.
+	if len(removed) > 0 {
+		siblingTuples, err := r.siblingDesiredTuples(ctx, binding, targetObject, validPerms)
+		if err != nil {
+			return fmt.Errorf("failed to compute sibling desired tuples: %w", err)
+		}
+		if len(siblingTuples) > 0 {
+			siblingSet := make(map[string]struct{}, len(siblingTuples))
+			for _, t := range siblingTuples {
+				siblingSet[t.User+"|"+t.Relation+"|"+t.Object] = struct{}{}
+			}
+			filtered := make([]*openfgav1.TupleKey, 0, len(removed))
+			for _, t := range removed {
+				if _, ok := siblingSet[t.User+"|"+t.Relation+"|"+t.Object]; !ok {
+					filtered = append(filtered, t)
+				}
+			}
+			removed = filtered
+		}
+	}
 
 	writeReq := &openfgav1.WriteRequest{
 		StoreId: r.StoreID,
@@ -152,61 +180,68 @@ func (r *PolicyReconciler) reconcilePolicy(ctx context.Context, binding iamdatum
 	return nil
 }
 
-// findSiblingBindings returns all PolicyBindings (including the triggering one)
-// that target the same resource object and share at least one subject.
-func (r *PolicyReconciler) findSiblingBindings(ctx context.Context, binding iamdatumapiscomv1alpha1.PolicyBinding) ([]iamdatumapiscomv1alpha1.PolicyBinding, error) {
+// siblingDesiredTuples returns the set of tuples that other PolicyBindings
+// (targeting the same resource with at least one overlapping subject) still
+// desire. This is used by both DeletePolicy and reconcilePolicy to avoid
+// removing tuples that another binding still needs.
+func (r *PolicyReconciler) siblingDesiredTuples(
+	ctx context.Context,
+	binding iamdatumapiscomv1alpha1.PolicyBinding,
+	targetObject string,
+	validPerms map[string]struct{},
+) ([]*openfgav1.TupleKey, error) {
 	var allBindings iamdatumapiscomv1alpha1.PolicyBindingList
 	if err := r.K8sClient.List(ctx, &allBindings); err != nil {
 		return nil, fmt.Errorf("failed to list PolicyBindings: %w", err)
 	}
 
-	targetObject, err := r.getTargetObjectFromResourceSelector(binding.Spec.ResourceSelector)
-	if err != nil {
-		return nil, err
-	}
-
-	// Build subject set for the triggering binding.
 	triggerSubjects := make(map[string]struct{})
 	for _, s := range binding.Spec.Subjects {
-		key := s.Kind + "/" + s.Name
-		triggerSubjects[key] = struct{}{}
+		triggerSubjects[s.Kind+"/"+s.Name] = struct{}{}
 	}
 
-	var siblings []iamdatumapiscomv1alpha1.PolicyBinding
+	var desired []*openfgav1.TupleKey
 	for i := range allBindings.Items {
-		sibling := allBindings.Items[i]
+		other := allBindings.Items[i]
+
+		// Skip the binding itself.
+		if other.Namespace == binding.Namespace && other.Name == binding.Name {
+			continue
+		}
 
 		// Must target the same resource object.
-		siblingTarget, err := r.getTargetObjectFromResourceSelector(sibling.Spec.ResourceSelector)
-		if err != nil || siblingTarget != targetObject {
+		otherTarget, err := r.getTargetObjectFromResourceSelector(other.Spec.ResourceSelector)
+		if err != nil || otherTarget != targetObject {
 			continue
 		}
 
 		// Must share at least one subject.
-		for _, s := range sibling.Spec.Subjects {
-			key := s.Kind + "/" + s.Name
-			if _, ok := triggerSubjects[key]; ok {
-				siblings = append(siblings, sibling)
+		hasOverlap := false
+		for _, s := range other.Spec.Subjects {
+			if _, ok := triggerSubjects[s.Kind+"/"+s.Name]; ok {
+				hasOverlap = true
 				break
 			}
 		}
-	}
-
-	return siblings, nil
-}
-
-// deduplicateTuples removes duplicate tuples from a slice.
-func deduplicateTuples(tuples []*openfgav1.TupleKey) []*openfgav1.TupleKey {
-	seen := make(map[string]struct{}, len(tuples))
-	result := make([]*openfgav1.TupleKey, 0, len(tuples))
-	for _, t := range tuples {
-		key := t.User + "|" + t.Relation + "|" + t.Object
-		if _, ok := seen[key]; !ok {
-			seen[key] = struct{}{}
-			result = append(result, t)
+		if !hasOverlap {
+			continue
 		}
+
+		role, err := r.fetchRole(ctx, other)
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+				continue
+			}
+			return nil, fmt.Errorf("failed to fetch role for sibling binding %s/%s: %w", other.Namespace, other.Name, err)
+		}
+		tuples, err := r.buildPermissionTuples(other, role, targetObject, validPerms)
+		if err != nil {
+			continue
+		}
+		desired = append(desired, tuples...)
 	}
-	return result
+
+	return desired, nil
 }
 
 // fetchRole retrieves the Role referenced by the binding.
@@ -399,6 +434,20 @@ func convertTuplesForDelete(tuples []*openfgav1.TupleKey) []*openfgav1.TupleKeyW
 	return newTuples
 }
 
+// tupleKeyEqual compares two TupleKey proto messages by their semantic fields
+// (User, Relation, Object, Condition). Using proto.Equal ensures correct
+// comparison of protobuf messages regardless of internal state differences
+// between newly-constructed messages and those deserialized from the wire.
+func tupleKeyEqual(a, b *openfgav1.TupleKey) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	// Compare only the semantic fields to avoid false negatives from
+	// protobuf internal bookkeeping state.
+	return a.User == b.User && a.Relation == b.Relation && a.Object == b.Object &&
+		proto.Equal(a.Condition, b.Condition)
+}
+
 // diffTuples returns the tuples that need to be added and removed.
 func diffTuples(existing, current []*openfgav1.TupleKey) (added, removed []*openfgav1.TupleKey) {
 	// Any of the current tuples that don't exist in the new set of tuples will
@@ -406,7 +455,7 @@ func diffTuples(existing, current []*openfgav1.TupleKey) (added, removed []*open
 	for _, existingTuple := range existing {
 		found := false
 		for _, currentTuple := range current {
-			if cmp.Equal(existingTuple, currentTuple, cmpopts.IgnoreUnexported(openfgav1.TupleKey{})) {
+			if tupleKeyEqual(existingTuple, currentTuple) {
 				found = true
 				break
 			}
@@ -419,7 +468,7 @@ func diffTuples(existing, current []*openfgav1.TupleKey) (added, removed []*open
 	for _, currentTuple := range current {
 		found := false
 		for _, existingTuple := range existing {
-			if cmp.Equal(currentTuple, existingTuple, cmpopts.IgnoreUnexported(openfgav1.TupleKey{})) {
+			if tupleKeyEqual(currentTuple, existingTuple) {
 				found = true
 				break
 			}
