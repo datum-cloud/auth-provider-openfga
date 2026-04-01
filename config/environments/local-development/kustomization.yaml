@@ -6,7 +6,7 @@ kind: Kustomization
 
 resources:
   # External CRDs from Milo API
-  - github.com/datum-cloud/milo/config/crd/overlays/core-control-plane
+  - github.com/datum-cloud/milo/config/crd/overlays/core-control-plane?ref=feat/machineaccount-authorization
   # Base application components
   - ../../base
   # Development-specific certificate issuers
