@@ -15,6 +15,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	mcbuilder "sigs.k8s.io/multicluster-runtime/pkg/builder"
+	mcmanager "sigs.k8s.io/multicluster-runtime/pkg/manager"
+	mcreconcile "sigs.k8s.io/multicluster-runtime/pkg/reconcile"
 )
 
 const (
@@ -36,6 +39,7 @@ type SystemGroupReconciler struct {
 	Scheme     *runtime.Scheme
 	FGAClient  openfgav1.OpenFGAServiceClient
 	FGAStoreID string
+	mgr        mcmanager.Manager
 }
 
 // +kubebuilder:rbac:groups=iam.miloapis.com,resources=users;machineaccounts,verbs=get;list;watch;update;patch
@@ -46,11 +50,9 @@ func (r *SystemGroupReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	return ctrl.Result{}, nil
 }
 
-// SetupWithManager sets up the reconciler with the Manager. It registers TWO
-// separate controllers sharing the same reconciler logic: one for human Users
-// and another for cluster-scoped MachineAccounts.
+// SetupWithManager sets up the User controller only (single-cluster).
+// For multicluster support (including MachineAccount controller), use SetupWithManagerMultiCluster.
 func (r *SystemGroupReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	// 1. Controller for human Users (cluster-scoped)
 	if err := ctrl.NewControllerManagedBy(mgr).
 		For(&iamv1alpha1.User{}).
 		Named("systemgroup_user").
@@ -58,11 +60,27 @@ func (r *SystemGroupReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		return fmt.Errorf("failed to register user systemgroup reconciler: %w", err)
 	}
 
-	// 2. Controller for machine accounts (cluster-scoped)
+	return nil
+}
+
+// SetupWithManagerMultiCluster sets up both User and MachineAccount controllers, with the
+// latter using multicluster-runtime to watch across project control planes.
+func (r *SystemGroupReconciler) SetupWithManagerMultiCluster(mgr ctrl.Manager, mcMgr mcmanager.Manager) error {
+	r.mgr = mcMgr
+
+	// 1. Controller for human Users (cluster-scoped) - uses standard manager
 	if err := ctrl.NewControllerManagedBy(mgr).
+		For(&iamv1alpha1.User{}).
+		Named("systemgroup_user").
+		Complete(reconcile.Func(r.reconcileUser)); err != nil {
+		return fmt.Errorf("failed to register user systemgroup reconciler: %w", err)
+	}
+
+	// 2. Controller for machine accounts (multi-cluster) - uses multicluster manager
+	if err := mcbuilder.ControllerManagedBy(r.mgr).
 		For(&iamv1alpha1.MachineAccount{}).
 		Named("systemgroup_machineaccount").
-		Complete(reconcile.Func(r.reconcileMachineAccount)); err != nil {
+		Complete(mcreconcile.Func(r.reconcileMachineAccountMultiCluster)); err != nil {
 		return fmt.Errorf("failed to register machineaccount systemgroup reconciler: %w", err)
 	}
 
@@ -77,31 +95,36 @@ func (r *SystemGroupReconciler) reconcileUser(ctx context.Context, req ctrl.Requ
 		}
 		return ctrl.Result{}, err
 	}
-	return r.reconcileObject(ctx, user)
+	return r.reconcileObject(ctx, user, r.Client)
 }
 
-func (r *SystemGroupReconciler) reconcileMachineAccount(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *SystemGroupReconciler) reconcileMachineAccountMultiCluster(ctx context.Context, req mcreconcile.Request) (ctrl.Result, error) {
+	cluster, err := r.mgr.GetCluster(ctx, req.ClusterName)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to get cluster %s from manager: %w", req.ClusterName, err)
+	}
+
 	ma := &iamv1alpha1.MachineAccount{}
-	if err := r.Get(ctx, req.NamespacedName, ma); err != nil {
+	if err := cluster.GetClient().Get(ctx, req.NamespacedName, ma); err != nil {
 		if errors.IsNotFound(err) {
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
 	}
-	return r.reconcileObject(ctx, ma)
+	return r.reconcileObject(ctx, ma, cluster.GetClient())
 }
 
-func (r *SystemGroupReconciler) reconcileObject(ctx context.Context, obj client.Object) (ctrl.Result, error) {
+func (r *SystemGroupReconciler) reconcileObject(ctx context.Context, obj client.Object, cli client.Client) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
 	if obj.GetDeletionTimestamp() != nil {
-		return r.handleDeletion(ctx, obj)
+		return r.handleDeletion(ctx, obj, cli)
 	}
 
 	// Ensure the finalizer is present so we can clean up on deletion.
 	if !controllerutil.ContainsFinalizer(obj, systemGroupFinalizerKey) {
 		controllerutil.AddFinalizer(obj, systemGroupFinalizerKey)
-		if err := r.Update(ctx, obj); err != nil {
+		if err := cli.Update(ctx, obj); err != nil {
 			return ctrl.Result{}, fmt.Errorf("failed to add finalizer to %s %s: %w", obj.GetObjectKind().GroupVersionKind().Kind, obj.GetName(), err)
 		}
 		// Re-queue so we proceed with the write after the update is persisted.
@@ -119,7 +142,7 @@ func (r *SystemGroupReconciler) reconcileObject(ctx context.Context, obj client.
 
 // handleDeletion removes the system group membership tuple and strips the
 // finalizer so the object can be garbage-collected.
-func (r *SystemGroupReconciler) handleDeletion(ctx context.Context, obj client.Object) (ctrl.Result, error) {
+func (r *SystemGroupReconciler) handleDeletion(ctx context.Context, obj client.Object, cli client.Client) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
 	if !controllerutil.ContainsFinalizer(obj, systemGroupFinalizerKey) {
@@ -132,7 +155,7 @@ func (r *SystemGroupReconciler) handleDeletion(ctx context.Context, obj client.O
 	}
 
 	controllerutil.RemoveFinalizer(obj, systemGroupFinalizerKey)
-	if err := r.Update(ctx, obj); err != nil {
+	if err := cli.Update(ctx, obj); err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to remove finalizer from %s %s: %w", obj.GetObjectKind().GroupVersionKind().Kind, obj.GetName(), err)
 	}
 

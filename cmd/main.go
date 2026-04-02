@@ -17,6 +17,8 @@ import (
 
 	iamv1alpha1 "go.miloapis.com/milo/pkg/apis/iam/v1alpha1"
 	resourcemanagerv1alpha1 "go.miloapis.com/milo/pkg/apis/resourcemanager/v1alpha1"
+
+	"go.miloapis.com/auth-provider-openfga/internal/config"
 	//+kubebuilder:scaffold:imports
 )
 
@@ -30,6 +32,7 @@ func init() {
 
 	utilruntime.Must(resourcemanagerv1alpha1.AddToScheme(scheme))
 	utilruntime.Must(iamv1alpha1.AddToScheme(scheme))
+	utilruntime.Must(config.AddToScheme(scheme))
 	//+kubebuilder:scaffold:scheme
 }
 
