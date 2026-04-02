@@ -48,7 +48,7 @@ func (r *SystemGroupReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 // SetupWithManager sets up the reconciler with the Manager. It registers TWO
 // separate controllers sharing the same reconciler logic: one for human Users
-// and another for namespaced MachineAccounts.
+// and another for cluster-scoped MachineAccounts.
 func (r *SystemGroupReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// 1. Controller for human Users (cluster-scoped)
 	if err := ctrl.NewControllerManagedBy(mgr).
@@ -58,7 +58,7 @@ func (r *SystemGroupReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		return fmt.Errorf("failed to register user systemgroup reconciler: %w", err)
 	}
 
-	// 2. Controller for machine accounts (namespaced)
+	// 2. Controller for machine accounts (cluster-scoped)
 	if err := ctrl.NewControllerManagedBy(mgr).
 		For(&iamv1alpha1.MachineAccount{}).
 		Named("systemgroup_machineaccount").
