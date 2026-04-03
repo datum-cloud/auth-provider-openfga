@@ -124,6 +124,7 @@ func createManagerCommand() *cobra.Command {
 	return cmd
 }
 
+//nolint:gocyclo
 func runManager(
 	metricsAddr string,
 	enableLeaderElection bool,
