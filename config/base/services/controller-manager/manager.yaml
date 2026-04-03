@@ -44,6 +44,8 @@ spec:
           - --leader-election-retry-period=$(LEADER_ELECTION_RETRY_PERIOD)
           - --configmap-name=$(CONFIGMAP_NAME)
           - --configmap-namespace=$(CONFIGMAP_NAMESPACE)
+          - --server-config=$(OPENFGA_CONTROLLER_MANAGER_CONFIG_PATH)
+          - --core-control-plane-kubeconfig=$(CORE_CONTROL_PLANE_KUBECONFIG_PATH)
         env:
         - name: POD_NAMESPACE
           valueFrom:
@@ -70,6 +72,10 @@ spec:
             fieldRef:
               fieldPath: metadata.namespace
         - name: FEATURE_GATES
+          value: ""
+        - name: OPENFGA_CONTROLLER_MANAGER_CONFIG_PATH
+          value: ""
+        - name: CORE_CONTROL_PLANE_KUBECONFIG_PATH
           value: ""
         ports:
           - containerPort: 8080
