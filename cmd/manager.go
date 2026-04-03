@@ -460,6 +460,8 @@ func initializeClusterDiscovery(
 					Unstructured: true,
 				},
 			},
+			Metrics:                metricsserver.Options{BindAddress: "0"},
+			HealthProbeBindAddress: "0",
 		})
 		if err != nil {
 			return nil, nil, fmt.Errorf("unable to set up overall controller manager: %w", err)
