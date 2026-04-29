@@ -12,7 +12,7 @@ require (
 	github.com/prometheus/client_golang v1.22.0
 	github.com/spf13/cobra v1.10.2
 	github.com/stretchr/testify v1.11.1
-	go.miloapis.com/milo v0.24.7-0.20260428204836-0e7ac60965a5
+	go.miloapis.com/milo v0.24.7
 	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.67.0
 	go.opentelemetry.io/otel v1.43.0
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp v1.43.0
