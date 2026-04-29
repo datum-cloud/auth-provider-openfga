@@ -612,11 +612,11 @@ func (r *PolicyBindingReconciler) validatePolicyBindingSubjects(ctx context.Cont
 				subjectMsg = fmt.Sprintf("Subject Kind '%s' in group '%s' not recognized by the API server for subject '%s'.", subject.Kind, iamdatumapiscomv1alpha1.SchemeGroupVersion.Group, subject.Name)
 				reason = "KindNotRecognized"
 			} else if apierrors.IsNotFound(err) {
-				// MachineAccount is a special case: it is managed via multicluster and might not
+				// ServiceAccount is a special case: it is managed via multicluster and might not
 				// exist in the core cluster where PolicyBinding is reconciled. Because the UID
 				// is already provided in the spec, we can proceed with reconciliation.
-				if subject.Kind == "MachineAccount" {
-					log.Info("Subject MachineAccount not found in local cluster, assuming multi-cluster existence", "subjectName", subject.Name, "uid", subject.UID)
+				if subject.Kind == "ServiceAccount" {
+					log.Info("Subject ServiceAccount not found in local cluster, assuming multi-cluster existence", "subjectName", subject.Name, "uid", subject.UID)
 					continue
 				}
 
