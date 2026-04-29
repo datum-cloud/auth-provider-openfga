@@ -254,9 +254,21 @@ func (o *SubjectAccessReviewAuthorizer) Authorize(ctx context.Context, attribute
 	}
 	rootResource := o.buildRootResource(protectedResource)
 
-	// For scoped requests (project or organization), also check the scope-level
-	// root object. This covers ResourceKind PolicyBindings targeting all instances
-	// of the scope type (e.g. staff bindings on all Projects or all Organizations).
+	// For scoped requests (project, organization, or user-scoped via the
+	// /users/{id}/control-plane prefix), also check:
+	//
+	//   - the scope-level root object — catches ResourceKind PolicyBindings
+	//     targeting all instances of the scope type (e.g. staff bindings on
+	//     all Projects, all Organizations, or all Users).
+	//
+	//   - the parent INSTANCE — catches PolicyBindings bound to the specific
+	//     parent (e.g. the per-user `user-self-manage-{user}` PolicyBinding
+	//     bound to User:{userUID}). buildResourceObject only resolves to the
+	//     parent for collection ops; specific-resource ops (delete, get,
+	//     update on a named resource) resolve to the instance, which by
+	//     itself has no PolicyBinding. Without this extra check those ops
+	//     can't be authorised through a parent-scoped binding even when the
+	//     same role grants the verb at the parent level.
 	var extraChecks []*openfgav1.BatchCheckItem
 	if authCtx.parentContext != nil {
 		scopeRoot := fmt.Sprintf("iam.miloapis.com/Root:%s/%s", authCtx.parentContext.apiGroup, authCtx.parentContext.kind)
@@ -268,6 +280,19 @@ func (o *SubjectAccessReviewAuthorizer) Authorize(ctx context.Context, attribute
 			},
 			CorrelationId: "scope-root",
 		})
+		scopeParent := fmt.Sprintf("%s/%s:%s", authCtx.parentContext.apiGroup, authCtx.parentContext.kind, authCtx.parentContext.name)
+		// Avoid sending a duplicate when the primary check is already against
+		// the parent (collection ops resolve there via buildResourceObject).
+		if checkReq.TupleKey.Object != scopeParent {
+			extraChecks = append(extraChecks, &openfgav1.BatchCheckItem{
+				TupleKey: &openfgav1.CheckRequestTupleKey{
+					User:     checkReq.TupleKey.User,
+					Relation: checkReq.TupleKey.Relation,
+					Object:   scopeParent,
+				},
+				CorrelationId: "scope-parent",
+			})
+		}
 	}
 	decision, reason, checkErr = o.executeBatchCheck(ctx, checkReq, rootResource, extraChecks...)
 	authzStepDuration.WithLabelValues("openfga_batch_check").Observe(time.Since(stepStart).Seconds())
