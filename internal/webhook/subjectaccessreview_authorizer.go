@@ -106,22 +106,6 @@ func (ctx *authorizationContext) isOrganizationScope() bool {
 		ctx.parentContext.kind == "Organization"
 }
 
-// getProjectName returns the project name if in project scope
-func (ctx *authorizationContext) getProjectName() string {
-	if ctx.isProjectScope() {
-		return ctx.parentContext.name
-	}
-	return ""
-}
-
-// getOrganizationName returns the organization name if in organization scope
-func (ctx *authorizationContext) getOrganizationName() string {
-	if ctx.isOrganizationScope() {
-		return ctx.parentContext.name
-	}
-	return ""
-}
-
 // scopeLabel returns the metric scope label for an authorization context.
 func scopeLabel(authCtx *authorizationContext) string {
 	if authCtx == nil {
@@ -433,7 +417,7 @@ func (o *SubjectAccessReviewAuthorizer) validateOrganizationNamespace(ctx contex
 	}
 
 	requestNamespace := attributes.GetNamespace()
-	expectedNamespace := fmt.Sprintf("organization-%s", authCtx.getOrganizationName())
+	expectedNamespace := fmt.Sprintf("organization-%s", authCtx.parentContext.name)
 
 	// If no namespace specified in request, check if resource is cluster-scoped
 	if requestNamespace == "" {
@@ -585,22 +569,15 @@ func (o *SubjectAccessReviewAuthorizer) executeBatchCheck(
 // buildResourceObject determines the OpenFGA object string for the request.
 //
 // The lookup priority is:
-//  1. Project-scoped requests → authorize against the project object.
-//  2. Requests with a specific resource name → authorize against that instance.
-//  3. Collection operations with a parent context → authorize against the parent.
-//  4. Collection operations without a parent → authorize against the kind-level
+//  1. Requests with a specific resource name → authorize against that instance.
+//  2. Collection operations with a parent context → authorize against the parent.
+//  3. Collection operations without a parent → authorize against the kind-level
 //     root object (TypeRoot:<apiGroup/Kind>).
-func (o *SubjectAccessReviewAuthorizer) buildResourceObject(ctx context.Context, attributes authorizer.Attributes, authCtx *authorizationContext) (string, error) {
-	// Project-scoped requests are resolved against the project.
-	if authCtx.isProjectScope() {
-		return fmt.Sprintf("resourcemanager.miloapis.com/Project:%s", authCtx.getProjectName()), nil
-	}
-
-	// Organization-scoped requests are resolved against the organization.
-	if authCtx.isOrganizationScope() {
-		return fmt.Sprintf("resourcemanager.miloapis.com/Organization:%s", authCtx.getOrganizationName()), nil
-	}
-
+//
+// For scoped requests the Authorize method appends scope-root and scope-parent
+// extra checks, so the parent is always evaluated regardless of whether this
+// function returns the child instance or the parent.
+func (o *SubjectAccessReviewAuthorizer) buildResourceObject(ctx context.Context, attributes authorizer.Attributes, _ *authorizationContext) (string, error) {
 	protectedResource, err := o.getProtectedResource(ctx, attributes)
 	if err != nil {
 		return "", fmt.Errorf("failed to get protected resource: %w", err)

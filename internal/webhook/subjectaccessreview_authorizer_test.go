@@ -125,10 +125,9 @@ func TestSubjectAccessReviewAuthorizer_Authorize_Integration(t *testing.T) {
 				},
 			},
 			fgaBatchCheckFunc: func(t *testing.T, req *openfgav1.BatchCheckRequest) (*openfgav1.BatchCheckResponse, error) {
-				// Project-scoped get: instance check is against the project, root check
-				// is against the kind-level Root object, and scope-root check covers
-				// ResourceKind bindings targeting all Projects.
-				require.Len(t, req.Checks, 3, "BatchCheck must have instance, root, and scope-root checks")
+				// Project-scoped get: instance = the actual workload, scope-parent = the
+				// project, scope-root = kind-level Root for all Projects.
+				require.Len(t, req.Checks, 4, "BatchCheck must have instance, root, scope-root, and scope-parent checks")
 				checksById := make(map[string]*openfgav1.BatchCheckItem)
 				for _, c := range req.Checks {
 					checksById[c.CorrelationId] = c
@@ -136,14 +135,17 @@ func TestSubjectAccessReviewAuthorizer_Authorize_Integration(t *testing.T) {
 				require.Contains(t, checksById, "instance")
 				require.Contains(t, checksById, "root")
 				require.Contains(t, checksById, "scope-root")
-				assert.Equal(t, "resourcemanager.miloapis.com/Project:proj-xyz", checksById["instance"].TupleKey.Object)
+				require.Contains(t, checksById, "scope-parent")
+				assert.Equal(t, "compute.miloapis.com/Workload:wkld-123", checksById["instance"].TupleKey.Object)
 				assert.Equal(t, "iam.miloapis.com/Root:compute.miloapis.com/Workload", checksById["root"].TupleKey.Object)
 				assert.Equal(t, "iam.miloapis.com/Root:resourcemanager.miloapis.com/Project", checksById["scope-root"].TupleKey.Object)
+				assert.Equal(t, "resourcemanager.miloapis.com/Project:proj-xyz", checksById["scope-parent"].TupleKey.Object)
 				return &openfgav1.BatchCheckResponse{
 					Result: map[string]*openfgav1.BatchCheckSingleResult{
-						"instance":   {CheckResult: &openfgav1.BatchCheckSingleResult_Allowed{Allowed: true}},
-						"root":       {CheckResult: &openfgav1.BatchCheckSingleResult_Allowed{Allowed: false}},
-						"scope-root": {CheckResult: &openfgav1.BatchCheckSingleResult_Allowed{Allowed: false}},
+						"instance":     {CheckResult: &openfgav1.BatchCheckSingleResult_Allowed{Allowed: false}},
+						"root":         {CheckResult: &openfgav1.BatchCheckSingleResult_Allowed{Allowed: false}},
+						"scope-root":   {CheckResult: &openfgav1.BatchCheckSingleResult_Allowed{Allowed: false}},
+						"scope-parent": {CheckResult: &openfgav1.BatchCheckSingleResult_Allowed{Allowed: true}},
 					},
 				}, nil
 			},
@@ -365,15 +367,16 @@ func TestProjectScopedAuthorization(t *testing.T) {
 	t.Run("project-scoped request uses project authorization logic", func(t *testing.T) {
 		mockFGA := &mockFGAClient{
 			BatchCheckFunc: func(ctx context.Context, req *openfgav1.BatchCheckRequest, opts ...grpc.CallOption) (*openfgav1.BatchCheckResponse, error) {
-				// Verify that the instance check (correlation "instance") targets the project resource
-				foundProjectCheck := false
+				// For a specific-resource op the instance check targets the actual resource;
+				// the project is covered by scope-parent.
+				checksById := make(map[string]*openfgav1.BatchCheckItem)
 				for _, check := range req.Checks {
-					if check.CorrelationId == "instance" {
-						assert.Contains(t, check.TupleKey.Object, "resourcemanager.miloapis.com/Project:")
-						foundProjectCheck = true
-					}
+					checksById[check.CorrelationId] = check
 				}
-				assert.True(t, foundProjectCheck, "expected an instance check targeting the project resource")
+				assert.Contains(t, checksById, "instance")
+				assert.Contains(t, checksById, "scope-parent")
+				assert.Contains(t, checksById["instance"].TupleKey.Object, "core.miloapis.com/Pod:")
+				assert.Contains(t, checksById["scope-parent"].TupleKey.Object, "resourcemanager.miloapis.com/Project:")
 				results := map[string]*openfgav1.BatchCheckSingleResult{}
 				for _, check := range req.Checks {
 					results[check.CorrelationId] = &openfgav1.BatchCheckSingleResult{
@@ -854,16 +857,16 @@ func TestResourceKindBindingResolution(t *testing.T) {
 		assert.Equal(t, "iam.miloapis.com/Root:compute.miloapis.com/Workload", checksById["root"].TupleKey.Object)
 	})
 
-	t.Run("project-scoped request uses BatchCheck against Project, Root, and scope-root", func(t *testing.T) {
-		// Project scope: BatchCheck with instance=Project, root=Root, and
-		// scope-root=Root:Project; access is allowed if any allows.
+	t.Run("project-scoped request uses BatchCheck against Workload, Root, scope-root, and scope-parent", func(t *testing.T) {
+		// Project scope specific-resource op: instance=Workload, root=Root:Workload,
+		// scope-root=Root:Project, scope-parent=Project; access is allowed if any allows.
 		var capturedBatchReq *openfgav1.BatchCheckRequest
 		mockFGA := &mockFGAClient{
 			BatchCheckFunc: func(ctx context.Context, req *openfgav1.BatchCheckRequest, opts ...grpc.CallOption) (*openfgav1.BatchCheckResponse, error) {
 				capturedBatchReq = req
 				results := map[string]*openfgav1.BatchCheckSingleResult{}
 				for _, check := range req.Checks {
-					allowed := check.CorrelationId == "instance"
+					allowed := check.CorrelationId == "scope-parent"
 					results[check.CorrelationId] = &openfgav1.BatchCheckSingleResult{
 						CheckResult: &openfgav1.BatchCheckSingleResult_Allowed{Allowed: allowed},
 					}
@@ -900,7 +903,7 @@ func TestResourceKindBindingResolution(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, authorizer.DecisionAllow, decision)
 		require.NotNil(t, capturedBatchReq, "BatchCheck should have been called")
-		require.Len(t, capturedBatchReq.Checks, 3, "BatchCheck must have instance, root, and scope-root checks")
+		require.Len(t, capturedBatchReq.Checks, 4, "BatchCheck must have instance, root, scope-root, and scope-parent checks")
 		checksById := make(map[string]*openfgav1.BatchCheckItem)
 		for _, c := range capturedBatchReq.Checks {
 			checksById[c.CorrelationId] = c
@@ -908,19 +911,22 @@ func TestResourceKindBindingResolution(t *testing.T) {
 		require.Contains(t, checksById, "instance")
 		require.Contains(t, checksById, "root")
 		require.Contains(t, checksById, "scope-root")
-		assert.Equal(t, "resourcemanager.miloapis.com/Project:proj-xyz", checksById["instance"].TupleKey.Object)
+		require.Contains(t, checksById, "scope-parent")
+		assert.Equal(t, "compute.miloapis.com/Workload:wkld-123", checksById["instance"].TupleKey.Object)
 		assert.Equal(t, "iam.miloapis.com/Root:compute.miloapis.com/Workload", checksById["root"].TupleKey.Object)
 		assert.Equal(t, "iam.miloapis.com/Root:resourcemanager.miloapis.com/Project", checksById["scope-root"].TupleKey.Object)
+		assert.Equal(t, "resourcemanager.miloapis.com/Project:proj-xyz", checksById["scope-parent"].TupleKey.Object)
 	})
 
 	t.Run("project-scoped request includes scope-root check for ResourceKind Project bindings", func(t *testing.T) {
 		// Staff users have ResourceKind bindings targeting all Projects, which
 		// write tuples to iam.miloapis.com/Root:resourcemanager.miloapis.com/Project.
 		// When accessing a project-scoped resource in a project they don't own,
-		// the instance check (Project:proj-xyz) and the resource root check
-		// (Root:compute.miloapis.com/Workload) both deny. The scope-root
-		// check (Root:resourcemanager.miloapis.com/Project) must also be
-		// included so that staff bindings are evaluated.
+		// the instance check (Workload:wkld-123), the resource root check
+		// (Root:compute.miloapis.com/Workload), and the scope-parent check
+		// (Project:proj-xyz) all deny. The scope-root check
+		// (Root:resourcemanager.miloapis.com/Project) must also be included so
+		// that staff bindings are evaluated.
 		var capturedBatchReq *openfgav1.BatchCheckRequest
 		mockFGA := &mockFGAClient{
 			BatchCheckFunc: func(ctx context.Context, req *openfgav1.BatchCheckRequest, opts ...grpc.CallOption) (*openfgav1.BatchCheckResponse, error) {
@@ -965,8 +971,8 @@ func TestResourceKindBindingResolution(t *testing.T) {
 		assert.Equal(t, authorizer.DecisionAllow, decision,
 			"staff user should be allowed via scope-root check (issue #90)")
 		require.NotNil(t, capturedBatchReq, "BatchCheck should have been called")
-		require.Len(t, capturedBatchReq.Checks, 3,
-			"BatchCheck must have instance, root, and scope-root checks for project-scoped requests")
+		require.Len(t, capturedBatchReq.Checks, 4,
+			"BatchCheck must have instance, root, scope-root, and scope-parent checks for project-scoped requests")
 		checksById := make(map[string]*openfgav1.BatchCheckItem)
 		for _, c := range capturedBatchReq.Checks {
 			checksById[c.CorrelationId] = c
@@ -974,9 +980,11 @@ func TestResourceKindBindingResolution(t *testing.T) {
 		require.Contains(t, checksById, "instance")
 		require.Contains(t, checksById, "root")
 		require.Contains(t, checksById, "scope-root")
-		assert.Equal(t, "resourcemanager.miloapis.com/Project:proj-xyz", checksById["instance"].TupleKey.Object)
+		require.Contains(t, checksById, "scope-parent")
+		assert.Equal(t, "compute.miloapis.com/Workload:wkld-123", checksById["instance"].TupleKey.Object)
 		assert.Equal(t, "iam.miloapis.com/Root:compute.miloapis.com/Workload", checksById["root"].TupleKey.Object)
 		assert.Equal(t, "iam.miloapis.com/Root:resourcemanager.miloapis.com/Project", checksById["scope-root"].TupleKey.Object)
+		assert.Equal(t, "resourcemanager.miloapis.com/Project:proj-xyz", checksById["scope-parent"].TupleKey.Object)
 	})
 
 	t.Run("user-scoped specific-resource op includes scope-parent check for parent PolicyBindings", func(t *testing.T) {
