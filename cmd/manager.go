@@ -238,7 +238,7 @@ func runManager(
 	runnables = append(runnables, coreControlPlaneCluster)
 
 	// mcMgr is the primary manager. It owns leader election, metrics, and
-	// health probes. All multicluster controllers (MachineAccount) register here.
+	// health probes. All multicluster controllers (ServiceAccount) register here.
 	mcMgr, err := mcmanager.New(upstreamClusterConfig, provider, ctrl.Options{
 		Scheme:                     scheme,
 		Metrics:                    metricsserver.Options{BindAddress: metricsAddr},
@@ -338,7 +338,7 @@ func runManager(
 	}
 
 	// SystemGroupReconciler registers the User controller on localMgr and the
-	// MachineAccount controller on mcMgr.
+	// ServiceAccount controller on mcMgr.
 	if err = (&controller.SystemGroupReconciler{
 		Client:     localMgr.GetClient(),
 		Scheme:     localMgr.GetScheme(),

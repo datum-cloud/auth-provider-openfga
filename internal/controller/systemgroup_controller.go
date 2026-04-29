@@ -63,7 +63,7 @@ func (r *SystemGroupReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return nil
 }
 
-// SetupWithManagerMultiCluster sets up both User and MachineAccount controllers, with the
+// SetupWithManagerMultiCluster sets up both User and ServiceAccount controllers, with the
 // latter using multicluster-runtime to watch across project control planes.
 func (r *SystemGroupReconciler) SetupWithManagerMultiCluster(mgr ctrl.Manager, mcMgr mcmanager.Manager) error {
 	r.mgr = mcMgr
@@ -76,12 +76,12 @@ func (r *SystemGroupReconciler) SetupWithManagerMultiCluster(mgr ctrl.Manager, m
 		return fmt.Errorf("failed to register user systemgroup reconciler: %w", err)
 	}
 
-	// 2. Controller for machine accounts (multi-cluster) - uses multicluster manager
+	// 2. Controller for service accounts (multi-cluster) - uses multicluster manager
 	if err := mcbuilder.ControllerManagedBy(r.mgr).
-		For(&iamv1alpha1.MachineAccount{}).
-		Named("systemgroup_machineaccount").
-		Complete(mcreconcile.Func(r.reconcileMachineAccountMultiCluster)); err != nil {
-		return fmt.Errorf("failed to register machineaccount systemgroup reconciler: %w", err)
+		For(&iamv1alpha1.ServiceAccount{}).
+		Named("systemgroup_serviceaccount").
+		Complete(mcreconcile.Func(r.reconcileServiceAccountMultiCluster)); err != nil {
+		return fmt.Errorf("failed to register serviceaccount systemgroup reconciler: %w", err)
 	}
 
 	return nil
@@ -98,20 +98,20 @@ func (r *SystemGroupReconciler) reconcileUser(ctx context.Context, req ctrl.Requ
 	return r.reconcileObject(ctx, user, r.Client)
 }
 
-func (r *SystemGroupReconciler) reconcileMachineAccountMultiCluster(ctx context.Context, req mcreconcile.Request) (ctrl.Result, error) {
+func (r *SystemGroupReconciler) reconcileServiceAccountMultiCluster(ctx context.Context, req mcreconcile.Request) (ctrl.Result, error) {
 	cluster, err := r.mgr.GetCluster(ctx, req.ClusterName)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to get cluster %s from manager: %w", req.ClusterName, err)
 	}
 
-	ma := &iamv1alpha1.MachineAccount{}
-	if err := cluster.GetClient().Get(ctx, req.NamespacedName, ma); err != nil {
+	sa := &iamv1alpha1.ServiceAccount{}
+	if err := cluster.GetClient().Get(ctx, req.NamespacedName, sa); err != nil {
 		if errors.IsNotFound(err) {
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
 	}
-	return r.reconcileObject(ctx, ma, cluster.GetClient())
+	return r.reconcileObject(ctx, sa, cluster.GetClient())
 }
 
 func (r *SystemGroupReconciler) reconcileObject(ctx context.Context, obj client.Object, cli client.Client) (ctrl.Result, error) {
@@ -221,11 +221,11 @@ func (r *SystemGroupReconciler) deleteSystemGroupTuple(ctx context.Context, obj 
 
 // systemGroupTupleKey builds the OpenFGA tuple key that represents membership
 // of principal in the system:authenticated InternalUserGroup. For a User, the
-// resource Name is used as the identity token. For a MachineAccount, the
+// resource Name is used as the identity token. For a ServiceAccount, the
 // Kubernetes UID is used instead.
 func (r *SystemGroupReconciler) systemGroupTupleKey(obj client.Object) *openfgav1.TupleKey {
 	identityToken := obj.GetName()
-	if _, isMA := obj.(*iamv1alpha1.MachineAccount); isMA {
+	if _, isSA := obj.(*iamv1alpha1.ServiceAccount); isSA {
 		identityToken = string(obj.GetUID())
 	}
 

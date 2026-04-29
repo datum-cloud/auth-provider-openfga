@@ -1,6 +1,6 @@
 apiVersion: iam.miloapis.com/v1alpha1
-kind: MachineAccount
+kind: ServiceAccount
 metadata:
-  name: machine-user
+  name: service-account-user
 spec:
   state: Active

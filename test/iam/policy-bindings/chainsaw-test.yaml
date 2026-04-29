@@ -357,26 +357,26 @@ spec:
                 path: "status.phase"
                 value: "Succeeded"
 
-        # Test MachineAccount as a PolicyBinding subject
+        # Test ServiceAccount as a PolicyBinding subject
         - create:
             file: machine-account.yaml
             outputs:
-              - name: machineAccount
+              - name: serviceAccount
                 value: (@)
         - apply:
             resource:
               apiVersion: iam.miloapis.com/v1alpha1
               kind: PolicyBinding
               metadata:
-                name: sample-machine-account-binding
+                name: sample-service-account-binding
               spec:
                 roleRef:
                   name: resourcemanager.miloapis.com-organizationowner
                   namespace: ($namespace)
                 subjects:
-                  - kind: MachineAccount
-                    name: machine-user
-                    uid: ($machineAccount.metadata.uid)
+                  - kind: ServiceAccount
+                    name: service-account-user
+                    uid: ($serviceAccount.metadata.uid)
                 resourceSelector:
                   resourceRef:
                     apiGroup: "resourcemanager.miloapis.com"
@@ -386,7 +386,7 @@ spec:
         - wait:
             apiVersion: iam.miloapis.com/v1alpha1
             kind: PolicyBinding
-            name: sample-machine-account-binding
+            name: sample-service-account-binding
             timeout: 5m
             for:
               condition:
@@ -404,8 +404,8 @@ spec:
                 - name: curl
                   image: curlimages/curl:latest
                   env:
-                  - name: MACHINE_ACCOUNT_UID
-                    value: ($machineAccount.metadata.uid)
+                  - name: SERVICE_ACCOUNT_UID
+                    value: ($serviceAccount.metadata.uid)
                   - name: TEST_NAMESPACE
                     value: ($namespace)
                   command: ["/bin/sh", "-c"]
@@ -418,8 +418,8 @@ spec:
                         "apiVersion": "authorization.k8s.io/v1",
                         "kind": "SubjectAccessReview",
                         "spec": {
-                          "user": "ma-${TEST_NAMESPACE}@datum.default",
-                          "uid": "${MACHINE_ACCOUNT_UID}",
+                          "user": "sa-${TEST_NAMESPACE}@datum.default",
+                          "uid": "${SERVICE_ACCOUNT_UID}",
                           "extra": {
                             "resourcemanager.miloapis.com/organization-id": ["datum"]
                           },

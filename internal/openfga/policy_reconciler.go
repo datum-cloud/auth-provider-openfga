@@ -509,7 +509,7 @@ func getTupleKeys(ctx context.Context, storeID string, client openfgav1.OpenFGAS
 
 // getTupleUser returns the OpenFGA user string for a subject under the
 // permission model. Group members are referenced via the #member
-// relation (InternalUserGroup:<uid>#member). MachineAccount subjects are
+// relation (InternalUserGroup:<uid>#member). ServiceAccount subjects are
 // treated as InternalUser principals, using the resource name as the identity
 // token (consistent with how the auth webhook sets the SAR user UID).
 func getTupleUser(subject iamdatumapiscomv1alpha1.Subject) (string, error) {
@@ -523,9 +523,9 @@ func getTupleUser(subject iamdatumapiscomv1alpha1.Subject) (string, error) {
 		// SubjectAccessReview requests (the system uses names as identity
 		// tokens, not the K8s metadata UID).
 		return TypeInternalUser + ":" + subject.Name, nil
-	case "MachineAccount":
+	case "ServiceAccount":
 		if subject.UID == "" {
-			return "", fmt.Errorf("machineaccount subject must have a UID")
+			return "", fmt.Errorf("serviceaccount subject must have a UID")
 		}
 		// Machine accounts are represented as InternalUser principals in OpenFGA.
 		// For machine accounts, we use the literal Kubernetes UID as the identity
