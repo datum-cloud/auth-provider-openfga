@@ -979,6 +979,134 @@ func TestResourceKindBindingResolution(t *testing.T) {
 		assert.Equal(t, "iam.miloapis.com/Root:resourcemanager.miloapis.com/Project", checksById["scope-root"].TupleKey.Object)
 	})
 
+	t.Run("user-scoped specific-resource op includes scope-parent check for parent PolicyBindings", func(t *testing.T) {
+		// Reproduces the user-scoped sessions delete case: a request for
+		// `delete sessions/{name}` arrives via the user-scoped
+		// /apis/iam.miloapis.com/v1alpha1/users/{user}/control-plane prefix.
+		// The user has a PolicyBinding (e.g. `user-self-manage-{user}`)
+		// bound to their User resource, granting `sessions.delete`. The
+		// instance check (Session:{name}) and the resource Root
+		// (Root:identity.miloapis.com/Session) both deny because no
+		// PolicyBinding targets them. The scope-parent check
+		// (User:{userId}) is the only path that allows the request.
+		var capturedBatchReq *openfgav1.BatchCheckRequest
+		mockFGA := &mockFGAClient{
+			BatchCheckFunc: func(ctx context.Context, req *openfgav1.BatchCheckRequest, opts ...grpc.CallOption) (*openfgav1.BatchCheckResponse, error) {
+				capturedBatchReq = req
+				results := map[string]*openfgav1.BatchCheckSingleResult{}
+				for _, check := range req.Checks {
+					allowed := check.CorrelationId == "scope-parent"
+					results[check.CorrelationId] = &openfgav1.BatchCheckSingleResult{
+						CheckResult: &openfgav1.BatchCheckSingleResult_Allowed{Allowed: allowed},
+					}
+				}
+				return &openfgav1.BatchCheckResponse{Result: results}, nil
+			},
+		}
+
+		sessionResource := iamv1alpha1.ProtectedResource{
+			Spec: iamv1alpha1.ProtectedResourceSpec{
+				ServiceRef:  iamv1alpha1.ServiceReference{Name: "identity.miloapis.com"},
+				Plural:      "sessions",
+				Kind:        "Session",
+				Permissions: []string{"get", "list", "delete"},
+			},
+		}
+
+		auth := &webhook.SubjectAccessReviewAuthorizer{
+			FGAClient:              mockFGA,
+			ProtectedResourceCache: webhook.NewProtectedResourceCacheForTest([]iamv1alpha1.ProtectedResource{sessionResource}),
+			FGAStoreID:             "test_store",
+			DiscoveryClient:        &mockDiscoveryClient{},
+		}
+
+		attributes := &mockAttributes{
+			apiGroup: "identity.miloapis.com",
+			resource: "sessions",
+			name:     "session-abc",
+			verb:     "delete",
+			user: &user.DefaultInfo{
+				Name: "test-user",
+				UID:  "user-abc",
+				Extra: map[string][]string{
+					iamv1alpha1.ParentAPIGroupExtraKey: {"iam.miloapis.com"},
+					iamv1alpha1.ParentKindExtraKey:     {"User"},
+					iamv1alpha1.ParentNameExtraKey:     {"user-abc"},
+				},
+			},
+		}
+
+		decision, _, err := auth.Authorize(context.Background(), attributes)
+
+		require.NoError(t, err)
+		assert.Equal(t, authorizer.DecisionAllow, decision)
+		require.NotNil(t, capturedBatchReq, "BatchCheck should have been called")
+		require.Len(t, capturedBatchReq.Checks, 4, "BatchCheck must have instance, root, scope-root, and scope-parent checks")
+		checksById := make(map[string]*openfgav1.BatchCheckItem)
+		for _, c := range capturedBatchReq.Checks {
+			checksById[c.CorrelationId] = c
+		}
+		require.Contains(t, checksById, "instance")
+		require.Contains(t, checksById, "root")
+		require.Contains(t, checksById, "scope-root")
+		require.Contains(t, checksById, "scope-parent")
+		assert.Equal(t, "identity.miloapis.com/Session:session-abc", checksById["instance"].TupleKey.Object)
+		assert.Equal(t, "iam.miloapis.com/Root:identity.miloapis.com/Session", checksById["root"].TupleKey.Object)
+		assert.Equal(t, "iam.miloapis.com/Root:iam.miloapis.com/User", checksById["scope-root"].TupleKey.Object)
+		assert.Equal(t, "iam.miloapis.com/User:user-abc", checksById["scope-parent"].TupleKey.Object)
+	})
+
+	t.Run("project-scoped collection op does not duplicate scope-parent (primary check is already the parent)", func(t *testing.T) {
+		// For project-scoped collection ops the primary instance check is
+		// already against the Project; adding a scope-parent for the same
+		// object would be a duplicate. Confirm we still send only 3 checks
+		// (instance, root, scope-root) and skip scope-parent.
+		var capturedBatchReq *openfgav1.BatchCheckRequest
+		mockFGA := &mockFGAClient{
+			BatchCheckFunc: func(ctx context.Context, req *openfgav1.BatchCheckRequest, opts ...grpc.CallOption) (*openfgav1.BatchCheckResponse, error) {
+				capturedBatchReq = req
+				return &openfgav1.BatchCheckResponse{
+					Result: map[string]*openfgav1.BatchCheckSingleResult{
+						"instance":   {CheckResult: &openfgav1.BatchCheckSingleResult_Allowed{Allowed: true}},
+						"root":       {CheckResult: &openfgav1.BatchCheckSingleResult_Allowed{Allowed: false}},
+						"scope-root": {CheckResult: &openfgav1.BatchCheckSingleResult_Allowed{Allowed: false}},
+					},
+				}, nil
+			},
+		}
+
+		auth := &webhook.SubjectAccessReviewAuthorizer{
+			FGAClient:              mockFGA,
+			ProtectedResourceCache: webhook.NewProtectedResourceCacheForTest([]iamv1alpha1.ProtectedResource{computeWorkloadResource}),
+			FGAStoreID:             "test_store",
+			DiscoveryClient:        &mockDiscoveryClient{},
+		}
+
+		attributes := &mockAttributes{
+			apiGroup: "compute.miloapis.com",
+			resource: "workloads",
+			verb:     "list",
+			user: &user.DefaultInfo{
+				Name: "test-user",
+				UID:  "user-abc",
+				Extra: map[string][]string{
+					iamv1alpha1.ParentAPIGroupExtraKey: {"resourcemanager.miloapis.com"},
+					iamv1alpha1.ParentKindExtraKey:     {"Project"},
+					iamv1alpha1.ParentNameExtraKey:     {"proj-xyz"},
+				},
+			},
+		}
+
+		decision, _, err := auth.Authorize(context.Background(), attributes)
+
+		require.NoError(t, err)
+		assert.Equal(t, authorizer.DecisionAllow, decision)
+		require.Len(t, capturedBatchReq.Checks, 3, "scope-parent should be skipped when primary check is already the parent")
+		for _, c := range capturedBatchReq.Checks {
+			assert.NotEqual(t, "scope-parent", c.CorrelationId)
+		}
+	})
+
 	t.Run("BatchCheck allows when instance check allows (ResourceRef binding)", func(t *testing.T) {
 		// Instance check allows, Root denies — access must be granted.
 		mockFGA := &mockFGAClient{
