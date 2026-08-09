@@ -3,11 +3,10 @@ package controller
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	openfgav1 "github.com/openfga/api/proto/openfga/v1"
+	"go.miloapis.com/auth-provider-openfga/internal/openfga"
 	iamv1alpha1 "go.miloapis.com/milo/pkg/apis/iam/v1alpha1"
-	"google.golang.org/grpc/status"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -178,7 +177,7 @@ func (r *SystemGroupReconciler) writeSystemGroupTuple(ctx context.Context, obj c
 		},
 	})
 	if err != nil {
-		if isAlreadyExistsErr(err) {
+		if openfga.IsAlreadyExistsErr(err) {
 			log.V(1).Info("system group membership tuple already exists in OpenFGA", "name", obj.GetName())
 			return nil
 		}
@@ -209,7 +208,7 @@ func (r *SystemGroupReconciler) deleteSystemGroupTuple(ctx context.Context, obj 
 		},
 	})
 	if err != nil {
-		if isTupleNotFoundErr(err) {
+		if openfga.IsTupleNotFoundErr(err) {
 			log.V(1).Info("system group membership tuple already absent from OpenFGA", "name", obj.GetName())
 			return nil
 		}
@@ -234,27 +233,4 @@ func (r *SystemGroupReconciler) systemGroupTupleKey(obj client.Object) *openfgav
 		Relation: "member",
 		Object:   fmt.Sprintf("iam.miloapis.com/InternalUserGroup:%s", systemAuthenticatedGroup),
 	}
-}
-
-// isAlreadyExistsErr reports whether the gRPC error indicates that the tuple
-// already exists in OpenFGA (code 2017).
-func isAlreadyExistsErr(err error) bool {
-	if st, ok := status.FromError(err); ok {
-		// OpenFGA uses gRPC application error code 2017 for "already exists".
-		return st.Code() == 2017
-	}
-	// Fallback: check the error message for robustness across SDK versions.
-	return strings.Contains(err.Error(), "already exists")
-}
-
-// isTupleNotFoundErr reports whether the gRPC error indicates that the tuple
-// does not exist in OpenFGA. OpenFGA has been observed returning code 2017
-// ("cannot delete a tuple which does not exist") and code 2018; both are
-// treated as "not found" so deletion is idempotent.
-func isTupleNotFoundErr(err error) bool {
-	if st, ok := status.FromError(err); ok {
-		return st.Code() == 2017 || st.Code() == 2018
-	}
-	return strings.Contains(err.Error(), "cannot delete a tuple which does not exist") ||
-		strings.Contains(err.Error(), "not found")
 }
